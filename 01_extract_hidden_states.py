@@ -40,8 +40,8 @@ def load_processbench_subset(dataset_name, subset, n_correct, n_error, seed=42):
     Returns:
         correct_examples, error_examples: lists of dicts
     """
-    print(f"Loading {dataset_name}/{subset} ...")
-    ds = load_dataset(dataset_name, subset, split="test")
+    print(f"Loading {dataset_name} split={subset} ...")
+    ds = load_dataset(dataset_name, split=subset)
 
     correct = [ex for ex in ds if ex.get("label", -1) == -1]
     error = [ex for ex in ds if ex.get("label", -1) >= 0]
