@@ -240,7 +240,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True,
                         help="Path to local LLM (e.g. gz-data/models/.../Llama-3.1-8B-Instruct)")
-    parser.add_argument("--data_dir", type=str, default="data/processbench",
+    parser.add_argument("--data_dir", type=str, default="data",
                         help="Directory containing ProcessBench jsonl files")
     parser.add_argument("--output_dir", type=str, default="results")
     parser.add_argument("--splits", type=str, default="gsm8k",

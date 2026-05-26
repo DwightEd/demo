@@ -17,7 +17,7 @@ MAX_SEQ_LEN=2048
 DTYPE="float16"                 # bfloat16 if A100/H100
 
 WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
-DATA_DIR="${WORK_DIR}/data/processbench"
+DATA_DIR="${WORK_DIR}/data"
 RESULTS_DIR="${WORK_DIR}/results"
 # ───────────────────────────────────────────────────────────
 
@@ -30,36 +30,25 @@ echo "Work:   ${WORK_DIR}"
 echo ""
 
 # ── Step 1: Install dependencies ──────────────────────────
-echo "[1/4] Installing dependencies..."
-pip install -q torch transformers accelerate datasets scipy scikit-learn numpy 2>&1 | tail -3
+echo "[1/3] Installing dependencies..."
+pip install -q torch transformers accelerate scipy scikit-learn numpy 2>&1 | tail -3
 echo "Done."
 
-# ── Step 2: Download ProcessBench ─────────────────────────
+# ── Step 2: Check data ────────────────────────────────────
 echo ""
-echo "[2/4] Downloading ProcessBench..."
-mkdir -p "${DATA_DIR}"
-
-python3 -c "
-import os, json
-from datasets import load_dataset
-
-save_dir = '${DATA_DIR}'
-ds = load_dataset('Qwen/ProcessBench')
-for split in ds:
-    out = os.path.join(save_dir, f'{split}.jsonl')
-    if os.path.exists(out):
-        print(f'  {split}: already exists, skipping')
-        continue
-    with open(out, 'w', encoding='utf-8') as f:
-        for ex in ds[split]:
-            f.write(json.dumps(ex, ensure_ascii=False) + '\n')
-    print(f'  {split}: {len(ds[split])} examples saved')
-print('Done.')
-"
+echo "[2/3] Checking ProcessBench data..."
+for s in gsm8k math olympiadbench omnimath; do
+    if [ -f "${DATA_DIR}/${s}.jsonl" ]; then
+        echo "  ${s}.jsonl: OK ($(wc -l < "${DATA_DIR}/${s}.jsonl") lines)"
+    else
+        echo "  ${s}.jsonl: MISSING! Data should be in ${DATA_DIR}/"
+        exit 1
+    fi
+done
 
 # ── Step 3: Extract AFC metrics ───────────────────────────
 echo ""
-echo "[3/4] Extracting AFC metrics (this takes a while)..."
+echo "[3/3] Extracting AFC metrics (this takes a while)..."
 mkdir -p "${RESULTS_DIR}"
 
 python3 "${WORK_DIR}/01_extract_afc.py" \
@@ -73,7 +62,7 @@ python3 "${WORK_DIR}/01_extract_afc.py" \
 
 # ── Step 4: Evaluate ──────────────────────────────────────
 echo ""
-echo "[4/4] Evaluating AFC metrics..."
+echo "Evaluating AFC metrics..."
 python3 "${WORK_DIR}/02_evaluate.py" \
     --results_dir "${RESULTS_DIR}" \
     --splits "${SPLITS}" \
