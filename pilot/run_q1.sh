@@ -1,10 +1,13 @@
 #!/bin/bash
 # ============================================================
-# Q1 Pilot: AFC Hypothesis Verification on ProcessBench
+# Q1 Pilot: Geometric Hypothesis Verification on ProcessBench
 # ============================================================
+# Hypothesis: correct reasoning trajectories evolve in a
+# "constrained but non-degenerate" subspace.
+#
 # Usage:  bash run_q1.sh
 # GPU:    1x A100/H100/4090 (16GB+ VRAM)
-# Time:   ~30-60 min for gsm8k (400 examples)
+# Time:   ~20-40 min for gsm8k (400 examples)
 # ============================================================
 
 set -e
@@ -22,7 +25,7 @@ RESULTS_DIR="${WORK_DIR}/results"
 # ───────────────────────────────────────────────────────────
 
 echo "============================================"
-echo "Q1 Pilot: AFC Hypothesis Verification"
+echo "Q1 Pilot: Geometric Hypothesis Verification"
 echo "============================================"
 echo "Model:  ${MODEL_PATH}"
 echo "Splits: ${SPLITS}"
@@ -46,12 +49,12 @@ for s in gsm8k math olympiadbench omnimath; do
     fi
 done
 
-# ── Step 3: Extract AFC metrics ───────────────────────────
+# ── Step 3: Extract geometric metrics ─────────────────────
 echo ""
-echo "[3/3] Extracting AFC metrics (this takes a while)..."
+echo "[3/3] Extracting step-level geometric metrics..."
 mkdir -p "${RESULTS_DIR}"
 
-python3 "${WORK_DIR}/01_extract_afc.py" \
+python3 "${WORK_DIR}/01_extract_geometry.py" \
     --model_path "${MODEL_PATH}" \
     --data_dir "${DATA_DIR}" \
     --output_dir "${RESULTS_DIR}" \
@@ -62,7 +65,7 @@ python3 "${WORK_DIR}/01_extract_afc.py" \
 
 # ── Step 4: Evaluate ──────────────────────────────────────
 echo ""
-echo "Evaluating AFC metrics..."
+echo "Evaluating geometric metrics..."
 python3 "${WORK_DIR}/02_evaluate.py" \
     --results_dir "${RESULTS_DIR}" \
     --splits "${SPLITS}" \

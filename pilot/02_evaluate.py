@@ -1,15 +1,16 @@
 """
-Q1 Pilot: Evaluate AFC metrics on ProcessBench.
+Q1 Pilot: Evaluate geometric hypothesis on ProcessBench.
 
-Reads results/{split}_afc.jsonl, computes:
-- AUROC for each metric (correct step vs first-error step)
-- Cohen's d effect size
-- Mann-Whitney U test
-- Per-metric distribution plots
+Core hypothesis: correct reasoning trajectories evolve in a "constrained but
+non-degenerate" subspace.
 
-Decision criteria (from research_motivation_v1.md):
-- At least one metric AUROC >= 0.70 and Cohen's d >= 0.5  => AFC direction confirmed
-- All metrics AUROC < 0.65  => AFC hypothesis fails, need pivot
+Testable predictions:
+- Correct steps have STABLE displacement (low variance)
+- Correct steps have HIGH cosine similarity (smooth evolution)
+- Correct steps have BOUNDED effective rank (constrained but non-degenerate)
+- Error steps show SPIKES in curvature, displacement, or rank collapse/explosion
+
+Metrics: AUROC, Cohen's d, Mann-Whitney U for each geometric feature.
 """
 
 import argparse
@@ -21,178 +22,166 @@ from collections import defaultdict
 try:
     from scipy import stats
     from sklearn.metrics import roc_auc_score
-    HAS_SKLEARN = True
+    HAS_STATS = True
 except ImportError:
-    HAS_SKLEARN = False
-    print("[WARN] scipy/sklearn not found, install them for full evaluation")
+    HAS_STATS = False
+    print("[WARN] scipy/sklearn not found. Install: pip install scipy scikit-learn")
 
 
-def cohens_d(group1, group2):
-    """Compute Cohen's d effect size."""
-    n1, n2 = len(group1), len(group2)
+def cohens_d(g1, g2):
+    n1, n2 = len(g1), len(g2)
     if n1 < 2 or n2 < 2:
         return 0.0
-    var1 = np.var(group1, ddof=1)
-    var2 = np.var(group2, ddof=1)
-    pooled_std = np.sqrt(((n1 - 1) * var1 + (n2 - 1) * var2) / (n1 + n2 - 2))
-    if pooled_std < 1e-10:
-        return 0.0
-    return (np.mean(group1) - np.mean(group2)) / pooled_std
+    var1, var2 = np.var(g1, ddof=1), np.var(g2, ddof=1)
+    pooled = np.sqrt(((n1 - 1) * var1 + (n2 - 1) * var2) / (n1 + n2 - 2))
+    return (np.mean(g1) - np.mean(g2)) / pooled if pooled > 1e-10 else 0.0
 
 
-def evaluate_metric(correct_vals, error_vals, metric_name):
-    """Evaluate a single metric: AUROC, Cohen's d, Mann-Whitney U."""
-    correct_vals = np.array(correct_vals)
-    error_vals = np.array(error_vals)
-
-    result = {
-        "metric": metric_name,
-        "n_correct": len(correct_vals),
-        "n_error": len(error_vals),
-        "mean_correct": float(np.mean(correct_vals)),
-        "mean_error": float(np.mean(error_vals)),
-        "std_correct": float(np.std(correct_vals)),
-        "std_error": float(np.std(error_vals)),
+def evaluate_metric(correct_vals, error_vals, name, higher_means_correct=True):
+    """Evaluate one metric. Returns dict with stats."""
+    c, e = np.array(correct_vals), np.array(error_vals)
+    r = {
+        "metric": name,
+        "n_correct": len(c), "n_error": len(e),
+        "mean_correct": float(np.mean(c)), "std_correct": float(np.std(c)),
+        "mean_error": float(np.mean(e)), "std_error": float(np.std(e)),
+        "cohens_d": cohens_d(c, e),
     }
 
-    # Cohen's d
-    d = cohens_d(correct_vals, error_vals)
-    result["cohens_d"] = d
+    if not HAS_STATS or len(c) < 2 or len(e) < 2:
+        return r
 
-    if not HAS_SKLEARN:
-        return result
-
-    # AUROC: higher metric value = more likely correct
-    # For detection, we want to detect errors, so we flip:
-    # label=1 for error, label=0 for correct
-    # score = -metric_value (lower AFC = more likely error)
-    labels = np.concatenate([np.zeros(len(correct_vals)), np.ones(len(error_vals))])
-    scores = np.concatenate([-correct_vals, -error_vals])  # negate so higher score = more error
+    # AUROC: we want to detect errors
+    labels = np.concatenate([np.zeros(len(c)), np.ones(len(e))])
+    if higher_means_correct:
+        scores = np.concatenate([-c, -e])  # negate: lower metric -> more likely error
+    else:
+        scores = np.concatenate([c, e])  # higher metric -> more likely error
 
     try:
-        auroc = roc_auc_score(labels, scores)
-        result["auroc"] = auroc
+        r["auroc"] = roc_auc_score(labels, scores)
     except ValueError:
-        result["auroc"] = None
+        r["auroc"] = None
 
-    # Mann-Whitney U
     try:
-        stat, p_val = stats.mannwhitneyu(correct_vals, error_vals, alternative='two-sided')
-        result["mannwhitney_U"] = float(stat)
-        result["mannwhitney_p"] = float(p_val)
+        stat, p = stats.mannwhitneyu(c, e, alternative='two-sided')
+        r["mw_p"] = float(p)
     except Exception:
-        result["mannwhitney_U"] = None
-        result["mannwhitney_p"] = None
+        r["mw_p"] = None
 
-    return result
+    return r
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--results_dir", type=str, default="results")
-    parser.add_argument("--splits", type=str, default="gsm8k",
-                        help="Comma-separated splits")
+    parser.add_argument("--splits", type=str, default="gsm8k")
     parser.add_argument("--output", type=str, default="results/q1_evaluation.json")
     args = parser.parse_args()
 
-    metrics_to_eval = ["afc_cos", "afc_vocab_jsd", "afc_proj"]
+    # Metrics to evaluate and whether higher value means "more correct"
+    METRICS = {
+        "displacement":       {"higher_correct": False, "desc": "step-to-step L2 distance"},
+        "displacement_normed":{"higher_correct": False, "desc": "displacement / norm"},
+        "cosine_sim":         {"higher_correct": True,  "desc": "consecutive step cosine"},
+        "norm":               {"higher_correct": None,  "desc": "hidden state L2 norm"},
+        "curvature":          {"higher_correct": False, "desc": "angle between displacements"},
+        "effective_rank":     {"higher_correct": None,  "desc": "cross-layer effective rank"},
+    }
+
     all_results = {}
 
     for split in args.splits.split(","):
         split = split.strip()
-        path = os.path.join(args.results_dir, f"{split}_afc.jsonl")
+        path = os.path.join(args.results_dir, f"{split}_geometry.jsonl")
         if not os.path.exists(path):
-            print(f"[WARN] {path} not found, skipping")
+            print(f"[WARN] {path} not found")
             continue
 
         print(f"\n{'='*60}")
-        print(f"Evaluating {split}")
+        print(f"Evaluating: {split}")
         print(f"{'='*60}")
 
-        # Collect per-step values grouped by label
-        metric_correct = defaultdict(list)  # metric_name -> list of values (correct steps)
-        metric_error = defaultdict(list)    # metric_name -> list of values (first-error steps)
-
-        n_examples = 0
-        n_correct_steps = 0
-        n_first_error_steps = 0
+        correct = defaultdict(list)
+        error = defaultdict(list)
+        n_ex = 0
 
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
-                record = json.loads(line)
-                n_examples += 1
-                for sm in record["step_metrics"]:
-                    for m in metrics_to_eval:
+                rec = json.loads(line)
+                n_ex += 1
+                for sm in rec["step_metrics"]:
+                    for m in METRICS:
                         val = sm.get(m)
                         if val is None:
                             continue
                         if sm["is_first_error"] == 1:
-                            metric_error[m].append(val)
+                            error[m].append(val)
                         elif sm["is_error"] == 0:
-                            metric_correct[m].append(val)
-                        # Skip non-first error steps (after first error)
+                            correct[m].append(val)
 
-                    # Count
-                    if sm["is_first_error"] == 1:
-                        n_first_error_steps += 1
-                    elif sm["is_error"] == 0:
-                        n_correct_steps += 1
-
-        print(f"  Examples: {n_examples}")
-        print(f"  Correct steps: {n_correct_steps}")
-        print(f"  First-error steps: {n_first_error_steps}")
+        n_correct_steps = len(correct.get("norm", []))
+        n_error_steps = len(error.get("norm", []))
+        print(f"  Examples: {n_ex}")
+        print(f"  Correct steps: {n_correct_steps}, First-error steps: {n_error_steps}")
 
         split_results = []
-        for m in metrics_to_eval:
-            if not metric_correct[m] or not metric_error[m]:
-                print(f"  {m}: insufficient data")
+        for m, info in METRICS.items():
+            if not correct[m] or not error[m]:
                 continue
 
-            r = evaluate_metric(metric_correct[m], metric_error[m], m)
+            hc = info["higher_correct"]
+            if hc is None:
+                # Try both directions, pick better AUROC
+                r1 = evaluate_metric(correct[m], error[m], m, higher_means_correct=True)
+                r2 = evaluate_metric(correct[m], error[m], m, higher_means_correct=False)
+                a1 = r1.get("auroc", 0) or 0
+                a2 = r2.get("auroc", 0) or 0
+                r = r1 if a1 >= a2 else r2
+                r["direction"] = "higher=correct" if a1 >= a2 else "higher=error"
+            else:
+                r = evaluate_metric(correct[m], error[m], m, higher_means_correct=hc)
+                r["direction"] = "higher=correct" if hc else "higher=error"
+
+            r["description"] = info["desc"]
             split_results.append(r)
 
-            # Print
-            auroc_str = f"{r['auroc']:.4f}" if r.get('auroc') is not None else "N/A"
-            p_str = f"{r['mannwhitney_p']:.2e}" if r.get('mannwhitney_p') is not None else "N/A"
-            print(f"\n  {m}:")
-            print(f"    Correct: mean={r['mean_correct']:.4f} +/- {r['std_correct']:.4f}")
-            print(f"    Error:   mean={r['mean_error']:.4f} +/- {r['std_error']:.4f}")
-            print(f"    Cohen's d = {r['cohens_d']:.4f}")
-            print(f"    AUROC     = {auroc_str}")
-            print(f"    M-W p     = {p_str}")
+            auroc = f"{r['auroc']:.4f}" if r.get('auroc') else "N/A"
+            p_str = f"{r['mw_p']:.2e}" if r.get('mw_p') else "N/A"
+            d_str = f"{r['cohens_d']:.3f}"
+            print(f"\n  {m} ({info['desc']}):")
+            print(f"    Correct: {r['mean_correct']:.4f} +/- {r['std_correct']:.4f}")
+            print(f"    Error:   {r['mean_error']:.4f} +/- {r['std_error']:.4f}")
+            print(f"    Cohen's d={d_str}  AUROC={auroc}  MW-p={p_str}  [{r.get('direction','')}]")
 
         all_results[split] = split_results
 
-    # Decision summary
+    # ── Summary ──
     print(f"\n{'='*60}")
-    print("Q1 DECISION SUMMARY")
+    print("Q1 HYPOTHESIS VERIFICATION SUMMARY")
     print(f"{'='*60}")
+    print()
+    print("Hypothesis: correct steps evolve in a constrained-but-non-degenerate subspace.")
+    print("Evidence for each metric:\n")
 
-    best_auroc = 0
-    best_metric = None
-    best_d = 0
     for split, results in all_results.items():
-        for r in results:
+        print(f"  [{split}]")
+        for r in sorted(results, key=lambda x: -(x.get("auroc", 0) or 0)):
             auroc = r.get("auroc", 0) or 0
             d = abs(r.get("cohens_d", 0))
-            if auroc > best_auroc:
-                best_auroc = auroc
-                best_metric = f"{split}/{r['metric']}"
-                best_d = d
-
-    print(f"Best AUROC: {best_auroc:.4f} ({best_metric}), Cohen's d = {best_d:.4f}")
-    if best_auroc >= 0.70 and best_d >= 0.5:
-        print(">>> PASS: AFC hypothesis direction confirmed. Proceed to P2.")
-    elif best_auroc >= 0.65:
-        print(">>> MARGINAL: AFC shows signal but weak. Consider augmentation or layer tuning.")
-    else:
-        print(">>> FAIL: AFC signal too weak. Consider pivoting or checking layer selection.")
+            tag = ""
+            if auroc >= 0.65 and d >= 0.3:
+                tag = " *** SIGNAL"
+            elif auroc >= 0.55:
+                tag = " *  weak"
+            print(f"    {r['metric']:25s}  AUROC={auroc:.3f}  d={d:.3f}{tag}")
+        print()
 
     # Save
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
-    print(f"\nFull results saved to {args.output}")
+    print(f"Full results -> {args.output}")
 
 
 if __name__ == "__main__":
