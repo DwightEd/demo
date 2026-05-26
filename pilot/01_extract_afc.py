@@ -256,6 +256,11 @@ def main():
     dtype = getattr(torch, args.dtype)
 
     # Load model
+    if not os.path.isdir(args.model_path):
+        raise FileNotFoundError(
+            f"Model path not found: {args.model_path}\n"
+            f"If running on gpugeek, use the absolute path (e.g. /gz-data/models/...)"
+        )
     print(f"Loading model from {args.model_path} ...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
