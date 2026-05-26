@@ -14,7 +14,7 @@ set -e
 
 # ── Configuration ──────────────────────────────────────────
 MODEL_PATH="/gz-data/models/LLM-Research/Meta-Llama-3___1-8B-Instruct"
-SPLITS="gsm8k"                  # Start with gsm8k; add math,olympiadbench,omnimath later
+SPLITS="gsm8k,math,olympiadbench,omnimath"
 MAX_EXAMPLES=-1                 # -1 = all; set to 50 for quick smoke test
 MAX_SEQ_LEN=2048
 DTYPE="float16"                 # bfloat16 if A100/H100
