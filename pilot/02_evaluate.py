@@ -1,8 +1,7 @@
 """
-Q1 Pilot v2: Evaluate manifold-level geometric hypothesis on ProcessBench.
+Q1 Pilot v3: Evaluate step-level manifold hypothesis on ProcessBench.
 
-v2 evaluates trajectory-aware metrics alongside basic metrics.
-Groups metrics into tiers for clearer interpretation.
+Adapted for v3 metrics: natural token-window based step geometry.
 """
 
 import argparse
@@ -62,63 +61,71 @@ def evaluate_metric(correct_vals, error_vals, name, higher_means_correct=True):
     return r
 
 
-# Metrics organized by category
+# Metrics organized by category (v3)
 METRICS = {
-    # ── Trajectory-level (the real hypothesis test) ──
-    "subspace_deviation":       {"higher_correct": False, "cat": "trajectory",
-                                 "desc": "recon error projecting onto prior PCA subspace"},
-    "subspace_angle_change":    {"higher_correct": False, "cat": "trajectory",
-                                 "desc": "principal angle rotation when step added"},
-    "traj_effective_rank":      {"higher_correct": None,  "cat": "trajectory",
-                                 "desc": "effective rank of full trajectory matrix"},
-    "traj_rank_normed":         {"higher_correct": None,  "cat": "trajectory",
-                                 "desc": "trajectory effective rank / n_steps"},
-    "traj_spectral_gap":        {"higher_correct": None,  "cat": "trajectory",
-                                 "desc": "sigma1/sigma2 of trajectory matrix"},
-    "window_rank":              {"higher_correct": None,  "cat": "trajectory",
-                                 "desc": "effective rank of last-5-steps window"},
-    "window_rank_normed":       {"higher_correct": None,  "cat": "trajectory",
-                                 "desc": "window rank / window_size"},
-    "window_spectral_gap":      {"higher_correct": None,  "cat": "trajectory",
-                                 "desc": "sigma1/sigma2 of window matrix"},
+    # ── Within-step manifold shape (the core: every step has these) ──
+    "step_effective_rank":      {"higher_correct": None,  "cat": "step_shape",
+                                 "desc": "effective rank of [n_tokens, hidden_dim] within step"},
+    "step_rank_normed":         {"higher_correct": None,  "cat": "step_shape",
+                                 "desc": "step effective rank / n_tokens"},
+    "step_spectral_gap":        {"higher_correct": None,  "cat": "step_shape",
+                                 "desc": "sigma1/sigma2 within step"},
+    "norm_mean":                {"higher_correct": None,  "cat": "step_shape",
+                                 "desc": "mean token norm within step"},
+    "norm_std":                 {"higher_correct": None,  "cat": "step_shape",
+                                 "desc": "std of token norms within step"},
+
+    # ── Inter-step manifold comparison ──
+    "inter_step_deviation":     {"higher_correct": False, "cat": "inter_step",
+                                 "desc": "recon error: step j tokens onto step j-1 subspace"},
+    "inter_step_angle":         {"higher_correct": False, "cat": "inter_step",
+                                 "desc": "principal angle between adjacent step subspaces"},
+    "displacement":             {"higher_correct": False, "cat": "inter_step",
+                                 "desc": "||mean(step_j) - mean(step_{j-1})||"},
+    "displacement_normed":      {"higher_correct": False, "cat": "inter_step",
+                                 "desc": "displacement / norm_mean"},
+    "cosine_sim":               {"higher_correct": True,  "cat": "inter_step",
+                                 "desc": "cosine between consecutive step means"},
+    "curvature":                {"higher_correct": False, "cat": "inter_step",
+                                 "desc": "angle between consecutive displacement vectors"},
 
     # ── Cross-layer coherence ──
     "crosslayer_disp_align":    {"higher_correct": True,  "cat": "crosslayer",
                                  "desc": "mean pairwise cosine of cross-layer displacements"},
     "crosslayer_rank":          {"higher_correct": None,  "cat": "crosslayer",
-                                 "desc": "cross-layer effective rank (single step)"},
+                                 "desc": "cross-layer effective rank (layer means per step)"},
     "crosslayer_rank_normed":   {"higher_correct": None,  "cat": "crosslayer",
                                  "desc": "cross-layer rank / n_layers"},
 
-    # ── Running z-scores (anomaly detection) ──
-    "displacement_zscore":      {"higher_correct": False, "cat": "zscore",
-                                 "desc": "displacement z-score vs trajectory history"},
-    "cosine_sim_zscore":        {"higher_correct": True,  "cat": "zscore",
-                                 "desc": "cosine_sim z-score vs trajectory history"},
-    "norm_zscore":              {"higher_correct": None,  "cat": "zscore",
-                                 "desc": "norm z-score vs trajectory history"},
-    "curvature_zscore":         {"higher_correct": False, "cat": "zscore",
-                                 "desc": "curvature z-score vs trajectory history"},
-    "subspace_deviation_zscore":{"higher_correct": False, "cat": "zscore",
-                                 "desc": "subspace_deviation z-score"},
-    "crosslayer_disp_align_zscore": {"higher_correct": True, "cat": "zscore",
-                                 "desc": "cross-layer alignment z-score"},
-    "displacement_normed_zscore":{"higher_correct": False, "cat": "zscore",
-                                 "desc": "normalized displacement z-score"},
-    "traj_effective_rank_zscore":{"higher_correct": None, "cat": "zscore",
-                                 "desc": "trajectory rank z-score"},
+    # ── Trajectory-level (accumulating step means) ──
+    "traj_effective_rank":      {"higher_correct": None,  "cat": "trajectory",
+                                 "desc": "effective rank of step means [0..j]"},
+    "traj_rank_normed":         {"higher_correct": None,  "cat": "trajectory",
+                                 "desc": "trajectory rank / n_steps_so_far"},
+    "traj_spectral_gap":        {"higher_correct": None,  "cat": "trajectory",
+                                 "desc": "sigma1/sigma2 of step means trajectory"},
 
-    # ── Basic (v1 reference) ──
-    "displacement":             {"higher_correct": False, "cat": "basic",
-                                 "desc": "step-to-step L2 distance"},
-    "displacement_normed":      {"higher_correct": False, "cat": "basic",
-                                 "desc": "displacement / norm"},
-    "cosine_sim":               {"higher_correct": True,  "cat": "basic",
-                                 "desc": "consecutive step cosine"},
-    "norm":                     {"higher_correct": None,  "cat": "basic",
-                                 "desc": "hidden state L2 norm"},
-    "curvature":                {"higher_correct": False, "cat": "basic",
-                                 "desc": "angle between displacements"},
+    # ── Running z-scores (anomaly detection) ──
+    "step_effective_rank_zscore":   {"higher_correct": None,  "cat": "zscore",
+                                     "desc": "step rank z-score vs history"},
+    "step_spectral_gap_zscore":     {"higher_correct": None,  "cat": "zscore",
+                                     "desc": "step spectral gap z-score"},
+    "norm_mean_zscore":             {"higher_correct": None,  "cat": "zscore",
+                                     "desc": "norm mean z-score"},
+    "displacement_zscore":          {"higher_correct": False, "cat": "zscore",
+                                     "desc": "displacement z-score"},
+    "cosine_sim_zscore":            {"higher_correct": True,  "cat": "zscore",
+                                     "desc": "cosine_sim z-score"},
+    "curvature_zscore":             {"higher_correct": False, "cat": "zscore",
+                                     "desc": "curvature z-score"},
+    "inter_step_deviation_zscore":  {"higher_correct": False, "cat": "zscore",
+                                     "desc": "inter-step deviation z-score"},
+    "inter_step_angle_zscore":      {"higher_correct": False, "cat": "zscore",
+                                     "desc": "inter-step angle z-score"},
+    "crosslayer_disp_align_zscore": {"higher_correct": True,  "cat": "zscore",
+                                     "desc": "cross-layer alignment z-score"},
+    "displacement_normed_zscore":   {"higher_correct": False, "cat": "zscore",
+                                     "desc": "normalized displacement z-score"},
 }
 
 
@@ -160,8 +167,8 @@ def main():
                         elif sm["is_error"] == 0:
                             correct[m].append(val)
 
-        n_correct_steps = len(correct.get("norm", []))
-        n_error_steps = len(error.get("norm", []))
+        n_correct_steps = len(correct.get("norm_mean", []))
+        n_error_steps = len(error.get("norm_mean", []))
         print(f"  Examples: {n_ex}")
         print(f"  Correct steps: {n_correct_steps}, First-error steps: {n_error_steps}")
 
@@ -189,12 +196,13 @@ def main():
         all_results[split] = split_results
 
         # Print by category
-        categories = ["trajectory", "crosslayer", "zscore", "basic"]
+        categories = ["step_shape", "inter_step", "crosslayer", "trajectory", "zscore"]
         cat_names = {
-            "trajectory": "TRAJECTORY-LEVEL (manifold hypothesis)",
-            "crosslayer": "CROSS-LAYER COHERENCE",
-            "zscore":     "RUNNING Z-SCORES (anomaly)",
-            "basic":      "BASIC (v1 reference)",
+            "step_shape":  "WITHIN-STEP MANIFOLD SHAPE (no warm-up)",
+            "inter_step":  "INTER-STEP MANIFOLD COMPARISON",
+            "crosslayer":  "CROSS-LAYER COHERENCE",
+            "trajectory":  "TRAJECTORY-LEVEL (accumulating means)",
+            "zscore":      "RUNNING Z-SCORES (anomaly)",
         }
 
         for cat in categories:
@@ -215,7 +223,7 @@ def main():
 
     # ── Summary ──
     print(f"\n{'='*70}")
-    print("Q1 HYPOTHESIS VERIFICATION SUMMARY (v2)")
+    print("Q1 HYPOTHESIS VERIFICATION SUMMARY (v3)")
     print(f"{'='*70}")
     print()
     print("Hypothesis: correct steps evolve in a constrained-but-non-degenerate subspace.")
@@ -223,7 +231,7 @@ def main():
     print("     *  weak (AUROC>=0.55), .  noise (<0.55)\n")
 
     for split, results in all_results.items():
-        for cat in ["trajectory", "crosslayer", "zscore", "basic"]:
+        for cat in categories:
             cat_results = [r for r in results if r.get("category") == cat]
             if not cat_results:
                 continue

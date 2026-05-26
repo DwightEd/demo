@@ -33,13 +33,13 @@ echo "Work:   ${WORK_DIR}"
 echo ""
 
 # ── Step 1: Install dependencies ──────────────────────────
-echo "[1/3] Installing dependencies..."
+echo "[1/4] Installing dependencies..."
 pip install -q torch transformers accelerate scipy scikit-learn numpy 2>&1 | tail -3
 echo "Done."
 
 # ── Step 2: Check data ────────────────────────────────────
 echo ""
-echo "[2/3] Checking ProcessBench data..."
+echo "[2/4] Checking ProcessBench data..."
 for s in gsm8k math olympiadbench omnimath; do
     if [ -f "${DATA_DIR}/${s}.jsonl" ]; then
         echo "  ${s}.jsonl: OK ($(wc -l < "${DATA_DIR}/${s}.jsonl") lines)"
@@ -51,7 +51,7 @@ done
 
 # ── Step 3: Extract geometric metrics ─────────────────────
 echo ""
-echo "[3/3] Extracting step-level geometric metrics..."
+echo "[3/4] Extracting step-level geometric metrics..."
 mkdir -p "${RESULTS_DIR}"
 
 python3 "${WORK_DIR}/01_extract_geometry.py" \
@@ -65,7 +65,7 @@ python3 "${WORK_DIR}/01_extract_geometry.py" \
 
 # ── Step 4: Evaluate ──────────────────────────────────────
 echo ""
-echo "Evaluating geometric metrics..."
+echo "[4/4] Evaluating geometric metrics..."
 python3 "${WORK_DIR}/02_evaluate.py" \
     --results_dir "${RESULTS_DIR}" \
     --splits "${SPLITS}" \
