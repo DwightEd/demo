@@ -42,6 +42,9 @@ def parse_args():
     # Representation
     p.add_argument("--pca_dim", type=int, default=16,
                    help="Tangent vector PCA dimension (r)")
+    p.add_argument("--mode", type=str, default="full",
+                   choices=["full", "spectral", "sigma_only", "tangent"],
+                   help="Representation mode for ablation")
     # Density model
     p.add_argument("--hidden_dim", type=int, default=64)
     p.add_argument("--n_layers", type=int, default=2)
@@ -79,14 +82,19 @@ def stage_load_and_represent(args):
     d = data[0]["steps"][0]["V"].shape[0]
     print(f"  Loaded {len(data)} examples (correct={n_correct}, error={n_error})")
     print(f"  Subspace: Gr({k}, {d})")
+    print(f"  Representation mode: {args.mode}")
 
-    # Learn tangent PCA
-    pca = learn_tangent_pca(data, n_components=args.pca_dim)
+    # Learn tangent PCA (only if mode needs tangent vectors)
+    pca = None
+    if args.mode in ("full", "tangent"):
+        pca = learn_tangent_pca(data, n_components=args.pca_dim)
+    else:
+        print(f"  Skipping tangent PCA (mode={args.mode})")
 
     # Compute representations
-    features_list, labels_list, example_labels = compute_representations(data, pca)
+    features_list, labels_list, example_labels = compute_representations(data, pca, mode=args.mode)
     feat_dim = features_list[0].shape[1]
-    print(f"  Representation dim: {feat_dim} (r={args.pca_dim}, k={k})")
+    print(f"  Representation dim: {feat_dim} (mode={args.mode}, r={args.pca_dim}, k={k})")
     print(f"  Usable examples: {len(features_list)}")
 
     # Split
@@ -381,6 +389,7 @@ def main():
         "data_path": args.data_path,
         "n_examples": len(features_list),
         "feat_dim": feat_dim,
+        "mode": args.mode,
         "pca_dim": args.pca_dim,
         "delta_auroc": auroc,
         "cusum": cusum_results,

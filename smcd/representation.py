@@ -59,23 +59,32 @@ def learn_tangent_pca(
 
 def compute_representations(
     data: List[Dict],
-    pca: TangentPCA,
+    pca: TangentPCA = None,
+    mode: str = "full",
 ) -> Tuple[List[np.ndarray], List[np.ndarray], List[int]]:
     """Compute transition representations for all examples.
 
+    Args:
+        mode: "full"       = [v_j, sigma_j, delta_sigma_j]  (r + 2k dims)
+              "spectral"   = [sigma_j, delta_sigma_j]        (2k dims)
+              "sigma_only" = [sigma_j]                        (k dims)
+              "tangent"    = [v_j]                            (r dims)
+
     Returns:
-        features_list:  list of (T, r+2k) arrays — transition representations
-        labels_list:    list of (T,) arrays — 0/1 per step
-        example_labels: list of int — -1 = all correct, else first error idx
+        features_list, labels_list, example_labels
     """
     features_list = []
     labels_list = []
     example_labels = []
 
-    k = pca.basis.shape[0] // data[0]["steps"][0]["V"].shape[0]  # infer k from basis shape
-    # Actually k = V.shape[1]
     k = data[0]["steps"][0]["V"].shape[1]
-    r = pca.n_components
+    use_tangent = mode in ("full", "tangent")
+    use_sigma = mode in ("full", "spectral", "sigma_only")
+    use_delta_sigma = mode in ("full", "spectral")
+
+    if use_tangent:
+        assert pca is not None, "PCA required for tangent mode"
+        r = pca.n_components
 
     for ex in data:
         steps = ex["steps"]
@@ -83,24 +92,31 @@ def compute_representations(
         if T < 2:
             continue
 
-        V_list = [s["V"].float() for s in steps]
+        V_list = [s["V"].float() for s in steps] if use_tangent else None
         sigma_list = [s["sigma"] for s in steps]
         step_labels = [s["is_error"] for s in steps]
 
         t_list = []
         for j in range(T):
-            sigma_j = sigma_list[j]
+            parts = []
 
-            if j == 0:
-                v_proj = torch.zeros(r)
-                delta_sigma = torch.zeros(k)
-            else:
-                Delta = grassmann_log(V_list[j - 1], V_list[j])
-                v_proj = pca.project(Delta)
-                delta_sigma = sigma_j - sigma_list[j - 1]
+            if use_tangent:
+                if j == 0:
+                    parts.append(torch.zeros(r))
+                else:
+                    Delta = grassmann_log(V_list[j - 1], V_list[j])
+                    parts.append(pca.project(Delta))
 
-            t_j = torch.cat([v_proj, sigma_j, delta_sigma])
-            t_list.append(t_j)
+            if use_sigma:
+                parts.append(sigma_list[j])
+
+            if use_delta_sigma:
+                if j == 0:
+                    parts.append(torch.zeros(k))
+                else:
+                    parts.append(sigma_list[j] - sigma_list[j - 1])
+
+            t_list.append(torch.cat(parts))
 
         features = torch.stack(t_list).numpy()
         labels = np.array(step_labels, dtype=np.float32)
