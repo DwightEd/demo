@@ -143,8 +143,8 @@ def main():
     parser.add_argument("--max_examples", type=int, default=-1)
     parser.add_argument("--max_seq_len", type=int, default=2048)
     parser.add_argument("--k", type=int, default=32)
-    parser.add_argument("--layers", type=str, default="0,3,7,11,15,19,23,27,31",
-                        help="Layer indices (default: 9 evenly-spaced layers)")
+    parser.add_argument("--layers", type=str, default="all",
+                        help="Layer indices: 'all' or comma-separated (e.g., '0,8,16,24,31')")
     parser.add_argument("--dtype", type=str, default="float16",
                         choices=["float16", "bfloat16", "float32"])
     args = parser.parse_args()
@@ -162,7 +162,10 @@ def main():
     num_layers = model.config.num_hidden_layers
     hidden_dim = model.config.hidden_size
 
-    layer_indices = [int(x.strip()) for x in args.layers.split(",")]
+    if args.layers == "all":
+        layer_indices = list(range(num_layers))
+    else:
+        layer_indices = [int(x.strip()) for x in args.layers.split(",")]
 
     print(f"Model: {num_layers} layers, hidden_dim={hidden_dim}")
     print(f"Extracting layers: {layer_indices} ({len(layer_indices)} layers)")
