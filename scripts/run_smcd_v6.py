@@ -28,7 +28,10 @@ from sklearn.metrics import roc_auc_score
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from smcd.info_geometry import spectrum_to_distribution, effective_rank, hellinger_distance
+from smcd.info_geometry import (
+    spectrum_to_distribution, effective_rank, hellinger_distance,
+    window_manifold_rank, trajectory_stability,
+)
 from smcd.probe import TrajectoryProbe
 from smcd.detector import CUSUMDetector, evaluate_detection
 
@@ -52,6 +55,8 @@ def parse_args():
     p.add_argument("--patience", type=int, default=25)
     p.add_argument("--ecn_weight", type=float, default=0.1,
                    help="E×C×N regularization weight")
+    p.add_argument("--window", type=int, default=3,
+                   help="Window size for trajectory manifold features")
     # Detection
     p.add_argument("--cusum_threshold", type=float, default=3.0)
     # Split
@@ -67,22 +72,22 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def build_grid_features(data, meta):
-    """Build per-(step, layer) feature grid.
+def build_grid_features(data, meta, window=3):
+    """Build per-(step, layer) feature grid with trajectory manifold features.
 
     For each step j, layer l, compute:
-        - effective_rank(p_{j,l})
-        - spectral_entropy(p_{j,l})
-        - hellinger_distance(p_{j-1,l}, p_{j,l})  (0 for j=0)
-        - delta_effective_rank(j, l)               (0 for j=0)
-        - spectral_gap σ_1/σ_2
-        - energy_ratio (σ_1^2 / Σσ^2)
+        F0: manifold_rank — trajectory dimension in window (CORE: low-dim manifold hypothesis)
+        F1: stability — trajectory stability in window (low = stable evolution)
+        F2: hellinger — step-to-step spectral distance
+        F3: step_eff_rank — per-step effective rank (information density)
+        F4: spectral_gap — σ_1/σ_2
+        F5: energy_concentration — σ_1²/Σσ²
 
-    Output: (T, L, F) feature grid per example, F=6 features per node.
+    Output: (T, L, F=6) feature grid per example.
     """
     L = len(meta["layer_indices"])
     k = meta["k"]
-    F = 6  # features per (step, layer) node
+    F = 6
 
     examples = []
     for ex in data:
@@ -95,48 +100,43 @@ def build_grid_features(data, meta):
         p_all = [spectrum_to_distribution(s) for s in sigma_all]
 
         grid = torch.zeros(T, L, F)
-        ecn_summary = torch.zeros(T, 3)  # [E_mean, C_mean, N_abs_mean]
+        ecn_summary = torch.zeros(T, 3)
 
-        for j in range(T):
-            p_j = p_all[j]      # (L, k)
-            sigma_j = sigma_all[j]  # (L, k)
+        for l in range(L):
+            p_layer = torch.stack([p_all[j][l] for j in range(T)])      # (T, k)
+            sigma_layer = torch.stack([sigma_all[j][l] for j in range(T)])  # (T, k)
 
-            # Feature 0: effective rank
-            eff_r = effective_rank(p_j)  # (L,)
-            grid[j, :, 0] = eff_r
+            # F0: trajectory manifold dimension (THE core feature)
+            grid[:, l, 0] = window_manifold_rank(p_layer, window=window)
 
-            # Feature 1: spectral entropy (log of effective rank)
-            grid[j, :, 1] = torch.log(eff_r + 1e-6)
+            # F1: trajectory stability
+            grid[:, l, 1] = trajectory_stability(p_layer, window=window)
 
-            # Feature 2: Hellinger distance to previous step
-            if j > 0:
-                h_dist = hellinger_distance(p_all[j - 1], p_j)  # (L,)
-                grid[j, :, 2] = h_dist
-            # else: 0 (default)
+            # F2: step-to-step Hellinger distance
+            for j in range(1, T):
+                grid[j, l, 2] = hellinger_distance(p_layer[j-1:j], p_layer[j:j+1])
 
-            # Feature 3: delta effective rank
-            if j > 0:
-                eff_r_prev = effective_rank(p_all[j - 1])
-                grid[j, :, 3] = eff_r - eff_r_prev
+            # F3: per-step effective rank
+            grid[:, l, 3] = effective_rank(p_layer)
 
-            # Feature 4: spectral gap σ_1/σ_2
-            grid[j, :, 4] = sigma_j[:, 0] / (sigma_j[:, 1] + 1e-8)
+            # F4: spectral gap
+            grid[:, l, 4] = sigma_layer[:, 0] / (sigma_layer[:, 1] + 1e-8)
 
-            # Feature 5: energy concentration (σ_1^2 / Σσ^2)
-            s2 = sigma_j ** 2
-            grid[j, :, 5] = s2[:, 0] / (s2.sum(dim=-1) + 1e-8)
+            # F5: energy concentration
+            s2 = sigma_layer ** 2
+            grid[:, l, 5] = s2[:, 0] / (s2.sum(dim=-1) + 1e-8)
 
-            # ECN summary for regularization
-            ecn_summary[j, 0] = eff_r.mean()          # E
-            ecn_summary[j, 1] = grid[j, :, 2].mean()  # C
-            ecn_summary[j, 2] = grid[j, :, 3].abs().mean()  # |N|
+        # ECN summary for regularization
+        ecn_summary[:, 0] = grid[:, :, 0].mean(dim=1)  # mean manifold rank
+        ecn_summary[:, 1] = grid[:, :, 2].mean(dim=1)  # mean Hellinger
+        ecn_summary[:, 2] = grid[:, :, 1].mean(dim=1)  # mean stability
 
         labels = torch.tensor([s["is_error"] for s in steps], dtype=torch.float32)
 
         examples.append({
-            "grid": grid,            # (T, L, F)
-            "ecn": ecn_summary,      # (T, 3)
-            "labels": labels,        # (T,)
+            "grid": grid,
+            "ecn": ecn_summary,
+            "labels": labels,
             "example_label": ex["label"],
         })
 
@@ -397,11 +397,11 @@ def main():
     print(f"\n{'='*60}")
     print("Building (step × layer) feature grid")
     print(f"{'='*60}")
-    examples = build_grid_features(data, meta)
+    examples = build_grid_features(data, meta, window=args.window)
     F = examples[0]["grid"].shape[-1]
     print(f"  {len(examples)} usable examples")
-    print(f"  Grid: T × {L} layers × {F} features")
-    print(f"  Features: eff_rank, log_eff_rank, hellinger, delta_rank, spectral_gap, energy_ratio")
+    print(f"  Grid: T × {L} layers × {F} features (window={args.window})")
+    print(f"  Features: manifold_rank, stability, hellinger, step_eff_rank, spectral_gap, energy_conc")
 
     # Split
     indices = np.arange(len(examples))
