@@ -4,18 +4,26 @@ For each reasoning chain we:
   1. Tokenize prompt + response and align each pre-parsed step with its token range.
   2. Run one forward pass with output_hidden_states=True to get hidden states at
      all L+1 layers (embedding + L transformer blocks).
-  3. For every (step j, layer l), collect the token cloud H_j^(l) ∈ R^{n_j × d}
-     and reduce it to three scalars: effective rank D, spectral energy V,
-     and top concentration C. Stack across steps and layers to get three
-     (T, L+1) matrices M_D, M_V, M_C — this is what downstream analysis consumes.
+  3. Project the per-token hidden states onto the *reasoning subspace* induced
+     by SVD of the unembedding matrix W_U (HARP, Hu et al. ICLR 2026). The
+     intuition is that W_U @ h gives the next-token logits, so directions
+     aligned with the top singular vectors of W_U carry the semantic
+     prediction content; directions in the kernel-like complement carry the
+     intermediate computation that does not directly produce the current
+     token. Analyzing token-cloud structure inside the reasoning subspace
+     isolates the latter.
+  4. For every (step j, layer l), reduce the projected token cloud
+     H_j^(l) V_R ∈ R^{n_j × d_R} to three scalars: effective rank D, spectral
+     energy V, and top concentration C. Stack across steps and layers to get
+     three (T, L+1) matrices M_D, M_V, M_C — this is what downstream
+     analysis consumes.
 
-The single behavioural difference from prior demo versions:
-  *all* tokens in a step are kept (the cloud H_j^(l) is what carries the
-  spectral signal); prior versions kept only the last token of each step.
+The reasoning subspace projection can be turned off via --no_reasoning_subspace
+(then the raw hidden states are analyzed as before; this is the v17 baseline).
 
 Usage:
     python 01_extract_spectral_field.py \
-        --model meta-llama/Llama-3.1-8B-Instruct \
+        --model /path/to/llama-3.1-8b \
         --dataset Qwen/ProcessBench \
         --subset gsm8k \
         --n_correct 50 \
@@ -34,7 +42,13 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 
-from utils import find_step_token_ranges, step_layer_spectral_summary
+from utils import (
+    find_step_token_ranges,
+    step_layer_spectral_summary,
+    compute_unembedding_svd,
+    select_reasoning_subspace,
+    project_to_reasoning,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +85,51 @@ def build_prompt_and_response(example):
 
 
 # ---------------------------------------------------------------------------
+# Reasoning subspace from unembedding matrix
+# ---------------------------------------------------------------------------
+
+def get_unembedding_matrix(model) -> torch.Tensor:
+    """Locate the unembedding (lm_head) weight in a HuggingFace causal-LM.
+
+    Returns a 2D tensor of shape (V, d). Works for tied-weight and untied
+    variants by reading model.get_output_embeddings().weight when present.
+    """
+    out_emb = model.get_output_embeddings()
+    if out_emb is None:
+        # Fall back to common attribute names.
+        for attr in ("lm_head", "output", "embed_out"):
+            if hasattr(model, attr):
+                out_emb = getattr(model, attr)
+                break
+    if out_emb is None or not hasattr(out_emb, "weight"):
+        raise RuntimeError(
+            "Could not locate the unembedding weight on the model. "
+            "Pass --no_reasoning_subspace to skip projection."
+        )
+    return out_emb.weight.detach()
+
+
+def prepare_reasoning_subspace(model, mode: str, threshold: float,
+                               cache_path: str | None):
+    """Compute the reasoning subspace basis V_R from W_U.
+
+    Returns:
+        V_R: numpy (d, d_R) basis with columns as reasoning directions.
+        meta: dict with cutoff information for logging.
+    """
+    print("Preparing reasoning subspace via unembedding SVD ...")
+    W_U = get_unembedding_matrix(model)
+    Vt, S = compute_unembedding_svd(W_U, cache_path=cache_path)
+    V_R, meta = select_reasoning_subspace(Vt, S, mode=mode, threshold=threshold)
+    print(f"  W_U shape: {tuple(W_U.shape)}  (V × d)")
+    print(f"  d_total = {meta['d_total']}   d_semantic = {meta['d_semantic']}"
+          f"   d_reasoning = {meta['d_reasoning']}")
+    print(f"  energy fraction in reasoning subspace = "
+          f"{meta['energy_in_reasoning']:.4f}")
+    return V_R, meta
+
+
+# ---------------------------------------------------------------------------
 # Spectral field for one trajectory
 # ---------------------------------------------------------------------------
 
@@ -78,8 +137,12 @@ def build_prompt_and_response(example):
 def extract_spectral_field(
     model, tokenizer, prompt, response, steps,
     device, layer_indices=None, max_seq_len=4096,
+    V_R: np.ndarray | None = None,
 ):
     """Run one forward pass and reduce each (step, layer) token cloud to (D, V, C).
+
+    If V_R is provided, project each token-cloud onto the reasoning subspace
+    before computing the spectral summary.
 
     Returns:
         M_D, M_V, M_C: (T, L_sub) float arrays where L_sub = len(layer_indices).
@@ -122,6 +185,8 @@ def extract_spectral_field(
         H_l = hidden_states[l][0].float().cpu().numpy()  # (seq_len, d)
         for row, (_, a, b) in enumerate(safe):
             H_jl = H_l[a : b + 1]  # (n_j, d)
+            if V_R is not None:
+                H_jl = project_to_reasoning(H_jl, V_R)  # (n_j, d_R)
             D, V, C = step_layer_spectral_summary(H_jl)
             M_D[row, li] = D
             M_V[row, li] = V
@@ -150,6 +215,21 @@ def main():
     parser.add_argument("--max_seq_len", type=int, default=4096)
     parser.add_argument("--output", default="data/spectral_field.npz")
     parser.add_argument("--seed", type=int, default=42)
+    # Reasoning-subspace projection options.
+    parser.add_argument("--no_reasoning_subspace", action="store_true",
+                        help="Disable HARP-style unembedding projection.")
+    parser.add_argument("--reasoning_mode", default="energy",
+                        choices=["energy", "dim_ratio"],
+                        help='"energy": top-`threshold` of energy is semantic, '
+                             'remainder is reasoning. '
+                             '"dim_ratio": bottom-`threshold` × d directions '
+                             'are reasoning.')
+    parser.add_argument("--reasoning_threshold", type=float, default=0.95,
+                        help="Cutoff for the reasoning subspace; meaning "
+                             "depends on --reasoning_mode.")
+    parser.add_argument("--unembedding_cache",
+                        default="data/unembedding_svd.npz",
+                        help="Cache file for the W_U SVD.")
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
@@ -168,6 +248,22 @@ def main():
     )
     model.eval()
 
+    # ---- Reasoning subspace ----
+    V_R, V_R_meta = None, None
+    if not args.no_reasoning_subspace:
+        cache_path = args.unembedding_cache
+        # Make cache path model-specific to avoid mixing different W_U.
+        if cache_path:
+            tag = os.path.basename(args.model.rstrip("/")).replace("/", "_")
+            root, ext = os.path.splitext(cache_path)
+            cache_path = f"{root}.{tag}{ext}"
+        V_R, V_R_meta = prepare_reasoning_subspace(
+            model,
+            mode=args.reasoning_mode,
+            threshold=args.reasoning_threshold,
+            cache_path=cache_path,
+        )
+
     layer_indices = None if args.layers == "all" else \
         [int(x) for x in args.layers.split(",") if x.strip()]
 
@@ -175,7 +271,8 @@ def main():
         args.dataset, args.subset, args.n_correct, args.n_error, seed=args.seed
     )
 
-    print(f"Extracting spectral fields (layers={args.layers}) ...")
+    print(f"Extracting spectral fields (layers={args.layers}, "
+          f"reasoning_subspace={V_R is not None}) ...")
     rows = []
     skipped = 0
     for ex_set, _tag in [(correct_examples, "correct"), (error_examples, "error")]:
@@ -189,6 +286,7 @@ def main():
                     model, tokenizer, prompt, response, steps,
                     device, layer_indices=layer_indices,
                     max_seq_len=args.max_seq_len,
+                    V_R=V_R,
                 )
             except Exception as e:
                 print(f"  warn: extraction failed: {e}")
@@ -231,8 +329,7 @@ def main():
     print(f"\nKept {len(rows)} trajectories ({skipped} skipped), "
           f"L_sub = {n_layers_sub} sampled layers.")
 
-    np.savez(
-        args.output,
+    save_dict = dict(
         ids=np.array([r["id"] for r in rows], dtype=object),
         labels=np.array([r["label"] for r in rows], dtype=np.int32),
         n_steps=np.array([r["n_steps"] for r in rows], dtype=np.int32),
@@ -243,7 +340,13 @@ def main():
         layers_used=rows[0]["layers_used"],
         model_name=np.array(args.model),
         subset=np.array(args.subset),
+        reasoning_subspace_used=np.array(V_R is not None),
     )
+    if V_R_meta is not None:
+        for k, v in V_R_meta.items():
+            save_dict[f"V_R_{k}"] = np.array(v)
+
+    np.savez(args.output, **save_dict)
     print(f"Saved -> {args.output}")
 
 

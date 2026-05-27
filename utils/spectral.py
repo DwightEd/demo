@@ -6,13 +6,27 @@ Core operations:
   - per-(step, layer) top concentration (largest singular value squared / total)
   - full SVD of the spectral field matrix and its rank-k residual
 
-All routines are pure numpy; no model dependency. Designed so that the spectral
-field extraction (01_*.py) and the low-rank analysis (02_*.py) share the same
-primitives.
+Reasoning-subspace projection (HARP, Hu et al. ICLR 2026):
+  - SVD the unembedding matrix W_U ∈ R^{V × d}.
+  - The right singular vectors associated with the top-σ directions span the
+    *semantic subspace* — they carry the components of hidden states that
+    directly drive next-token logits.
+  - The right singular vectors associated with the bottom-σ directions span the
+    *reasoning subspace* — they encode internal computation that is invisible
+    at the current decoding step.
+  - For analyzing the structure of intermediate reasoning, we project each
+    token-cloud onto the reasoning subspace before computing spectral
+    indicators; this isolates the components of variation that are not
+    dominated by the semantic prediction signal.
+
+All routines are pure numpy except `compute_unembedding_svd`, which accepts
+torch tensors so the (V × d) SVD can be done on GPU. The downstream analysis
+(01_*.py / 02_*.py) consumes only numpy arrays.
 """
 
 from __future__ import annotations
 
+import os
 import numpy as np
 
 
@@ -155,6 +169,152 @@ def layer_residual_norms(R: np.ndarray) -> np.ndarray:
 
 # ---------------------------------------------------------------------------
 # Auxiliary signal: layer-profile correlation with prefix mean
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Reasoning subspace via unembedding SVD (HARP-style)
+# ---------------------------------------------------------------------------
+
+def compute_unembedding_svd(W_U, cache_path: str | None = None):
+    """SVD of the unembedding matrix W_U ∈ R^{V × d}.
+
+    The right singular vectors form an orthonormal basis of the hidden-state
+    space; the singular values rank these basis directions by their
+    contribution to the output logits. Specifically, W_U h = U Σ V^T h, so the
+    component of h along the i-th right singular vector contributes σ_i to the
+    output, scaled into a vocabulary direction by u_i.
+
+    Caching: SVD of (V, d) is expensive but only needs to be done once per
+    model. Pass `cache_path` to persist the result.
+
+    Args:
+        W_U: numpy ndarray or torch.Tensor of shape (V, d).
+        cache_path: optional .npz path to load/save (Vt, S).
+
+    Returns:
+        Vt: (d, d) numpy array, right singular vectors as rows, ordered by
+            descending σ.
+        S:  (d,)  numpy array of singular values, descending.
+    """
+    if cache_path is not None and os.path.exists(cache_path):
+        data = np.load(cache_path)
+        return data["Vt"], data["S"]
+
+    # Use torch for the heavy SVD when available, fall back to numpy otherwise.
+    try:
+        import torch
+        is_torch = isinstance(W_U, torch.Tensor)
+    except ImportError:
+        torch = None
+        is_torch = False
+
+    if torch is not None and (is_torch or torch.cuda.is_available()):
+        if not is_torch:
+            W_U_t = torch.from_numpy(np.asarray(W_U, dtype=np.float32))
+        else:
+            W_U_t = W_U
+        if torch.cuda.is_available() and not W_U_t.is_cuda:
+            W_U_t = W_U_t.cuda()
+        W_U_t = W_U_t.float()
+        with torch.no_grad():
+            _, S_t, Vh_t = torch.linalg.svd(W_U_t, full_matrices=False)
+        S = S_t.detach().cpu().numpy().astype(np.float64)
+        Vt = Vh_t.detach().cpu().numpy().astype(np.float64)
+    else:
+        W_U_np = np.asarray(W_U, dtype=np.float64)
+        _, S, Vt = np.linalg.svd(W_U_np, full_matrices=False)
+
+    if cache_path is not None:
+        os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+        np.savez(cache_path, Vt=Vt, S=S)
+
+    return Vt, S
+
+
+def select_reasoning_subspace(Vt: np.ndarray, S: np.ndarray,
+                              mode: str = "energy",
+                              threshold: float = 0.95,
+                              ) -> tuple[np.ndarray, dict]:
+    """Pick the reasoning subspace from the unembedding SVD.
+
+    Two equivalent ways to define the cutoff are supported. The "energy" mode
+    follows HARP's original choice and the typical convention in spectral
+    analysis. The "dim_ratio" mode mirrors HARP's empirical "~5% of d" remark.
+
+    Args:
+        Vt: (d, d) right singular vectors of W_U, rows in descending-σ order.
+        S:  (d,)   singular values, descending.
+        mode:
+            "energy": split so that the first dimensions capture `threshold`
+                fraction of total energy (Σσ²); the *remainder* is reasoning.
+                With threshold=0.95, semantic gets top-95% energy and the
+                reasoning subspace gets the residual 5%.
+            "dim_ratio": the reasoning subspace is the bottom `threshold`
+                fraction of the d singular directions. With threshold=0.05,
+                reasoning gets 5% × d dimensions.
+        threshold: meaning depends on mode (see above).
+
+    Returns:
+        V_R: (d, d_R) reasoning subspace basis with columns as basis vectors.
+        meta: dict recording (mode, threshold, d_total, d_semantic, d_reasoning,
+            energy_in_reasoning) for traceability and downstream logging.
+    """
+    Vt = np.asarray(Vt, dtype=np.float64)
+    S = np.asarray(S, dtype=np.float64)
+    d = Vt.shape[0]
+    assert S.shape[0] == d, "Vt and S must agree on d"
+
+    if mode == "energy":
+        energy = S ** 2
+        cumsum = np.cumsum(energy)
+        total = cumsum[-1]
+        # Smallest index k_sem such that cumsum[k_sem-1] >= threshold * total.
+        cutoff_idx = int(np.searchsorted(cumsum, threshold * total) + 1)
+        cutoff_idx = max(1, min(cutoff_idx, d - 1))
+    elif mode == "dim_ratio":
+        d_R = max(1, int(round(threshold * d)))
+        cutoff_idx = d - d_R
+    else:
+        raise ValueError(f"Unknown mode={mode}")
+
+    d_R = d - cutoff_idx
+    V_R = Vt[cutoff_idx:, :].T  # (d, d_R), columns are reasoning basis vectors
+
+    meta = {
+        "mode": mode,
+        "threshold": float(threshold),
+        "d_total": int(d),
+        "d_semantic": int(cutoff_idx),
+        "d_reasoning": int(d_R),
+        "energy_in_reasoning": float(np.sum(S[cutoff_idx:] ** 2) /
+                                     max(np.sum(S ** 2), 1e-30)),
+    }
+    return V_R, meta
+
+
+def project_to_reasoning(H: np.ndarray, V_R: np.ndarray) -> np.ndarray:
+    """Project hidden-state matrix H onto the reasoning subspace.
+
+    Args:
+        H:   (n, d) token hidden states at one (step, layer).
+        V_R: (d, d_R) reasoning subspace basis with columns as basis vectors.
+
+    Returns:
+        H_R: (n, d_R) projection of H onto the reasoning subspace.
+
+    Semantics: each row of H is a token's d-dim hidden state. The projection
+    keeps only the components orthogonal to the top-σ directions of the
+    unembedding map, i.e., the components that do not directly drive the
+    current-step logits. Token-cloud structure in this projected space
+    reflects the *internal* computation rather than the surface prediction.
+    """
+    H = np.asarray(H, dtype=np.float64)
+    V_R = np.asarray(V_R, dtype=np.float64)
+    return H @ V_R
+
+
+# ---------------------------------------------------------------------------
+# Layer-profile auxiliary
 # ---------------------------------------------------------------------------
 
 def layer_profile_corr_with_prefix(M: np.ndarray) -> np.ndarray:

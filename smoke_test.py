@@ -42,6 +42,9 @@ from utils import (
     step_residual_norms,
     layer_residual_norms,
     layer_profile_corr_with_prefix,
+    compute_unembedding_svd,
+    select_reasoning_subspace,
+    project_to_reasoning,
 )
 
 
@@ -164,11 +167,78 @@ def test_auroc_sanity(n_each=30, T=10, L=32):
 
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Test 4: Reasoning-subspace projection (HARP-style) on synthetic W_U
+# ---------------------------------------------------------------------------
+
+def test_reasoning_subspace(d=64, V_vocab=1024):
+    """Construct a synthetic W_U with known semantic / reasoning split.
+
+    We let W_U have rank ≈ d_semantic on a particular subspace; the rest of the
+    hidden-state space lies in the kernel of W_U and is the "true" reasoning
+    subspace. Verify that select_reasoning_subspace recovers the correct
+    cutoff under both modes.
+    """
+    print("=" * 60)
+    print(f"Test 4: reasoning-subspace projection on synthetic W_U "
+          f"(V={V_vocab}, d={d})")
+    print("=" * 60)
+    rng = np.random.default_rng(0)
+    # Build a W_U whose right singular spectrum has a clear elbow at k=48.
+    d_semantic_true = 48
+    sigma = np.concatenate([
+        np.linspace(10, 5, d_semantic_true),
+        np.linspace(0.1, 0.01, d - d_semantic_true),
+    ])
+    # Random orthonormal bases.
+    U = np.linalg.qr(rng.standard_normal((V_vocab, d)))[0]
+    V = np.linalg.qr(rng.standard_normal((d, d)))[0]
+    W_U = (U * sigma) @ V.T
+
+    # Run the SVD wrapper (no cache).
+    Vt, S = compute_unembedding_svd(W_U)
+    print(f"  recovered S[:5]            = {S[:5].round(3).tolist()}")
+    print(f"  recovered S[-5:]           = {S[-5:].round(3).tolist()}")
+    print(f"  σ ratio S[0]/S[-1]         = {S[0] / max(S[-1], 1e-12):.2f}    "
+          f"(expect ~1000)")
+
+    # Mode 1: energy threshold 0.95.
+    V_R_energy, meta_e = select_reasoning_subspace(Vt, S, mode="energy",
+                                                   threshold=0.95)
+    print(f"  energy mode 0.95           d_semantic={meta_e['d_semantic']}   "
+          f"d_reasoning={meta_e['d_reasoning']}   "
+          f"reasoning_energy={meta_e['energy_in_reasoning']:.4f}")
+
+    # Mode 2: dim_ratio = 0.05 → bottom 5% directions.
+    V_R_dim, meta_d = select_reasoning_subspace(Vt, S, mode="dim_ratio",
+                                                threshold=0.05)
+    print(f"  dim_ratio mode 0.05        d_semantic={meta_d['d_semantic']}   "
+          f"d_reasoning={meta_d['d_reasoning']}")
+
+    # Test projection: a hidden state with a tiny reasoning component should
+    # project to (approximately) zero in the reasoning subspace if its content
+    # lies entirely in the semantic subspace.
+    h_semantic_only = V[:, :d_semantic_true] @ rng.standard_normal(d_semantic_true)
+    h_reasoning_only = V[:, d_semantic_true:] @ rng.standard_normal(d - d_semantic_true)
+
+    proj_sem = project_to_reasoning(h_semantic_only.reshape(1, -1), V_R_dim)
+    proj_rea = project_to_reasoning(h_reasoning_only.reshape(1, -1), V_R_dim)
+    norm_sem = float(np.linalg.norm(proj_sem))
+    norm_rea = float(np.linalg.norm(proj_rea))
+    ratio = norm_rea / max(norm_sem, 1e-12)
+    print(f"  projection norm (semantic only) = {norm_sem:.4f}")
+    print(f"  projection norm (reasoning only)= {norm_rea:.4f}")
+    print(f"  reasoning/semantic norm ratio   = {ratio:.2f}   "
+          f"(expect >> 1)")
+
+
 if __name__ == "__main__":
     test_spectral_primitives()
     print()
     test_lowrank_decomposition()
     print()
     test_auroc_sanity()
+    print()
+    test_reasoning_subspace()
     print()
     print("Smoke tests completed.")

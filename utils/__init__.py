@@ -11,6 +11,9 @@ from .spectral import (
     step_residual_norms,
     layer_residual_norms,
     layer_profile_corr_with_prefix,
+    compute_unembedding_svd,
+    select_reasoning_subspace,
+    project_to_reasoning,
 )
 from .step_boundaries import (
     find_step_token_ranges,
@@ -28,6 +31,9 @@ __all__ = [
     "step_residual_norms",
     "layer_residual_norms",
     "layer_profile_corr_with_prefix",
+    "compute_unembedding_svd",
+    "select_reasoning_subspace",
+    "project_to_reasoning",
     "find_step_token_ranges",
     "split_response_into_steps",
 ]
