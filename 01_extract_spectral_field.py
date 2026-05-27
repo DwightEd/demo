@@ -138,11 +138,18 @@ def extract_spectral_field(
     model, tokenizer, prompt, response, steps,
     device, layer_indices=None, max_seq_len=4096,
     V_R: np.ndarray | None = None,
+    rank_mode: str = "full",
+    rank_k: int | None = None,
+    rank_threshold: float = 0.95,
 ):
     """Run one forward pass and reduce each (step, layer) token cloud to (D, V, C).
 
     If V_R is provided, project each token-cloud onto the reasoning subspace
     before computing the spectral summary.
+
+    The effective rank D is computed by `step_layer_spectral_summary`. Its
+    rank_mode argument selects whether to use the full spectrum (default) or
+    a truncated form. See `effective_rank_truncated` for the available modes.
 
     Returns:
         M_D, M_V, M_C: (T, L_sub) float arrays where L_sub = len(layer_indices).
@@ -187,7 +194,12 @@ def extract_spectral_field(
             H_jl = H_l[a : b + 1]  # (n_j, d)
             if V_R is not None:
                 H_jl = project_to_reasoning(H_jl, V_R)  # (n_j, d_R)
-            D, V, C = step_layer_spectral_summary(H_jl)
+            D, V, C = step_layer_spectral_summary(
+                H_jl,
+                rank_mode=rank_mode,
+                rank_k=rank_k,
+                rank_threshold=rank_threshold,
+            )
             M_D[row, li] = D
             M_V[row, li] = V
             M_C[row, li] = C
@@ -230,6 +242,19 @@ def main():
     parser.add_argument("--unembedding_cache",
                         default="data/unembedding_svd.npz",
                         help="Cache file for the W_U SVD.")
+    # Effective rank estimator options.
+    parser.add_argument("--rank_mode", default="full",
+                        choices=["full", "topk", "energy", "kaiser"],
+                        help="Effective rank estimator. 'full' is the v17 "
+                             "baseline (whole spectrum). 'topk' / 'energy' / "
+                             "'kaiser' truncate the spectrum before computing "
+                             "the spectral entropy; see "
+                             "utils.effective_rank_truncated.")
+    parser.add_argument("--rank_topk", type=int, default=10,
+                        help="Top-k cutoff for --rank_mode topk.")
+    parser.add_argument("--rank_energy_threshold", type=float, default=0.95,
+                        help="Cumulative energy threshold for "
+                             "--rank_mode energy.")
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
@@ -271,8 +296,14 @@ def main():
         args.dataset, args.subset, args.n_correct, args.n_error, seed=args.seed
     )
 
+    rank_mode_str = args.rank_mode
+    if rank_mode_str == "topk":
+        rank_mode_str = f"topk(k={args.rank_topk})"
+    elif rank_mode_str == "energy":
+        rank_mode_str = f"energy(thr={args.rank_energy_threshold})"
     print(f"Extracting spectral fields (layers={args.layers}, "
-          f"reasoning_subspace={V_R is not None}) ...")
+          f"reasoning_subspace={V_R is not None}, "
+          f"rank_mode={rank_mode_str}) ...")
     rows = []
     skipped = 0
     for ex_set, _tag in [(correct_examples, "correct"), (error_examples, "error")]:
@@ -287,6 +318,9 @@ def main():
                     device, layer_indices=layer_indices,
                     max_seq_len=args.max_seq_len,
                     V_R=V_R,
+                    rank_mode=args.rank_mode,
+                    rank_k=args.rank_topk,
+                    rank_threshold=args.rank_energy_threshold,
                 )
             except Exception as e:
                 print(f"  warn: extraction failed: {e}")
@@ -341,6 +375,9 @@ def main():
         model_name=np.array(args.model),
         subset=np.array(args.subset),
         reasoning_subspace_used=np.array(V_R is not None),
+        rank_mode=np.array(args.rank_mode),
+        rank_topk=np.array(args.rank_topk),
+        rank_energy_threshold=np.array(args.rank_energy_threshold),
     )
     if V_R_meta is not None:
         for k, v in V_R_meta.items():

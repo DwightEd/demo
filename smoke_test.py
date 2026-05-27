@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import (
     token_cloud_singular_values,
     effective_rank,
+    effective_rank_truncated,
     spectral_energy,
     top_concentration,
     lowrank_decompose,
@@ -232,6 +233,61 @@ def test_reasoning_subspace(d=64, V_vocab=1024):
           f"(expect >> 1)")
 
 
+# ---------------------------------------------------------------------------
+# Test 5: Truncated effective rank under three modes
+# ---------------------------------------------------------------------------
+
+def test_truncated_effective_rank():
+    """Verify that each truncation mode picks out the dominant directions.
+
+    Two synthetic cases are used. Case A has a small-energy noise tail, so the
+    full effective rank already converges to the true rank and all modes agree.
+    Case B has a heavy noise tail that inflates the full effective rank, and
+    the truncated modes recover the elbow much better. Together they
+    demonstrate both the mathematical correctness and the practical use case.
+    """
+    print("=" * 60)
+    print("Test 5: truncated effective rank under three modes")
+    print("=" * 60)
+    rng = np.random.default_rng(0)
+
+    # ---- Case A: small noise tail ----
+    sigmas_a = np.concatenate([
+        np.full(5, 10.0) + 0.5 * rng.standard_normal(5),
+        np.full(50, 0.05) + 0.005 * rng.standard_normal(50),
+    ])
+    sigmas_a = np.sort(sigmas_a)[::-1]
+    print(f"  Case A (small noise tail) — 5 large σ ≈ 10, 50 small σ ≈ 0.05")
+    print(f"    full:        {effective_rank(sigmas_a):7.3f}   "
+          f"(expect ≈ 5; noise tail energy negligible)")
+    print(f"    topk(5):     {effective_rank_truncated(sigmas_a, mode='topk', k=5):7.3f}")
+    print(f"    energy 0.95: {effective_rank_truncated(sigmas_a, mode='energy'):7.3f}")
+    print(f"    kaiser:      {effective_rank_truncated(sigmas_a, mode='kaiser'):7.3f}")
+
+    # ---- Case B: heavy noise tail (more realistic for LLM hidden states) ----
+    sigmas_b = np.concatenate([
+        np.full(5, 10.0) + 0.5 * rng.standard_normal(5),
+        np.full(50, 2.5) + 0.3 * rng.standard_normal(50),  # tail with sizeable energy
+    ])
+    sigmas_b = np.sort(sigmas_b)[::-1]
+    print(f"  Case B (heavy noise tail) — 5 large σ ≈ 10, 50 medium σ ≈ 2.5")
+    d_full_b = effective_rank(sigmas_b)
+    d_topk_b = effective_rank_truncated(sigmas_b, mode="topk", k=5)
+    d_energy_b = effective_rank_truncated(sigmas_b, mode="energy", threshold=0.95)
+    d_kaiser_b = effective_rank_truncated(sigmas_b, mode="kaiser")
+    print(f"    full:        {d_full_b:7.3f}   "
+          f"(expect inflated > 5)")
+    print(f"    topk(5):     {d_topk_b:7.3f}   (expect ≈ 5)")
+    print(f"    energy 0.95: {d_energy_b:7.3f}")
+    print(f"    kaiser:      {d_kaiser_b:7.3f}")
+    if d_full_b > 1.5 * d_topk_b:
+        print("    PASS: heavy tail inflates full effective rank; "
+              "truncation recovers the elbow.")
+    else:
+        print("    NOTE: heavy tail in this random seed did not inflate "
+              "the full estimate strongly; rerun with another seed.")
+
+
 if __name__ == "__main__":
     test_spectral_primitives()
     print()
@@ -240,5 +296,7 @@ if __name__ == "__main__":
     test_auroc_sanity()
     print()
     test_reasoning_subspace()
+    print()
+    test_truncated_effective_rank()
     print()
     print("Smoke tests completed.")

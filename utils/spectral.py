@@ -79,6 +79,74 @@ def spectral_energy(sigmas: np.ndarray) -> float:
     return float((sigmas ** 2).sum())
 
 
+def effective_rank_truncated(sigmas: np.ndarray,
+                             mode: str = "full",
+                             k: int | None = None,
+                             threshold: float = 0.95,
+                             eps: float = 1e-15) -> float:
+    """Effective rank with an optional truncation of the singular spectrum.
+
+    Motivation: when the tail of the singular spectrum is dominated by noise,
+    including it in the spectral entropy dilutes the discriminative signal
+    that the leading components carry. UNComp (Hu et al., EMNLP 2025) reports
+    that the truncated effective rank reveals layer-wise structural variation
+    that the full effective rank flattens out. This routine offers three
+    truncation strategies so that downstream extraction can ablate which
+    one is best for our step-level hallucination detection task.
+
+    Args:
+        sigmas: singular values in descending order (typically the output
+            of `token_cloud_singular_values`).
+        mode: one of {"full", "topk", "energy", "kaiser"}.
+            "full"   — Roy & Vetterli (2007) original form on the full spectrum.
+            "topk"   — keep only the top-k singular values; pass k explicitly.
+            "energy" — keep the leading singular values until the cumulative
+                energy fraction first reaches `threshold`.
+            "kaiser" — detect the spectral elbow by locating the largest
+                consecutive drop σ_i − σ_{i+1} and keep all σ up to and
+                including index i. This is the simplest version of the
+                Kaiser-type elbow rule applied to the singular spectrum.
+        k: top-k count for "topk" mode.
+        threshold: energy fraction for "energy" mode.
+        eps: numerical floor.
+
+    Returns:
+        Scalar effective rank computed on the truncated spectrum; NaN on
+        degenerate input.
+    """
+    sigmas = np.asarray(sigmas, dtype=np.float64)
+    sigmas = sigmas[sigmas > eps]
+    if sigmas.size == 0:
+        return float("nan")
+
+    if mode == "full":
+        kept = sigmas
+    elif mode == "topk":
+        if k is None or k <= 0:
+            return float("nan")
+        kept = sigmas[: min(k, sigmas.size)]
+    elif mode == "energy":
+        energy = sigmas ** 2
+        cumsum = np.cumsum(energy)
+        cutoff = int(np.searchsorted(cumsum, threshold * cumsum[-1]) + 1)
+        cutoff = max(1, min(cutoff, sigmas.size))
+        kept = sigmas[:cutoff]
+    elif mode == "kaiser":
+        if sigmas.size < 2:
+            kept = sigmas
+        else:
+            diffs = sigmas[:-1] - sigmas[1:]
+            elbow = int(np.argmax(diffs))
+            kept = sigmas[: elbow + 1]
+    else:
+        raise ValueError(f"Unknown mode={mode}")
+
+    if kept.size == 0:
+        return float("nan")
+    p = (kept ** 2) / (kept ** 2).sum()
+    return float(np.exp(-np.sum(p * np.log(p + eps))))
+
+
 def top_concentration(sigmas: np.ndarray) -> float:
     """C = σ_1² / Σ σ_k². NaN on degenerate input."""
     sigmas = np.asarray(sigmas, dtype=np.float64)
@@ -91,12 +159,26 @@ def top_concentration(sigmas: np.ndarray) -> float:
     return float((sigmas[0] ** 2) / total)
 
 
-def step_layer_spectral_summary(H: np.ndarray) -> tuple[float, float, float]:
-    """One-shot (D, V, C) at a single (step, layer)."""
+def step_layer_spectral_summary(H: np.ndarray,
+                                rank_mode: str = "full",
+                                rank_k: int | None = None,
+                                rank_threshold: float = 0.95,
+                                ) -> tuple[float, float, float]:
+    """One-shot (D, V, C) at a single (step, layer).
+
+    The effective rank D supports an optional truncation strategy via the
+    rank_mode argument; see `effective_rank_truncated` for the available
+    modes. The default "full" reproduces the v17 / v18-baseline behaviour.
+    """
     s = token_cloud_singular_values(H)
     if s.size == 0:
         return float("nan"), float("nan"), float("nan")
-    return effective_rank(s), spectral_energy(s), top_concentration(s)
+    if rank_mode == "full":
+        D = effective_rank(s)
+    else:
+        D = effective_rank_truncated(s, mode=rank_mode, k=rank_k,
+                                     threshold=rank_threshold)
+    return D, spectral_energy(s), top_concentration(s)
 
 
 # ---------------------------------------------------------------------------
