@@ -1,7 +1,5 @@
 __pycache__/
 *.pyc
-/data/
-/output/
-pilot/results/
 *.egg-info/
 .env
+data/

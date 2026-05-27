@@ -1,0 +1,29 @@
+============================================================
+Test 1: spectral primitives on synthetic rank-k cloud
+============================================================
+  num σ > 1e-6:            31    (expect ~3)
+  effective_rank:            2.810    (expect ≈ 3)
+  spectral_energy:        1.894e+04
+  top_concentration:         0.507    (≈ 1/3 if uniform)
+
+============================================================
+Test 2: low-rank + sparse decomposition on synthetic M
+============================================================
+  M.shape:                (10, 32)
+  σ[:5]:                  [12.747, 6.4, 0.341, 0.307, 0.289]
+  chain lowrank_k=1:      0.7968    (expect > 0.7)
+  chain lowrank_k=2:      0.9977    (expect > 0.9)
+  argmax row residual:    j_hat = 5  (expect 5)
+  argmax col residual:    l_hat = 20  (expect 20)
+  step_resid[j*]:         4.782
+  step_resid mean (others): 1.194
+  layer-profile corr ρ:   [  nan   nan 1.    1.    1.    0.93  0.998 0.999 0.999 0.999]
+  ρ[j*] vs mean of ρ:     0.930 vs 0.999
+
+============================================================
+Test 3: chain & step AUROC on synthetic (30 correct + 30 error)
+============================================================
+  AUROC(chain_lowrank_k=1, sign-flipped): 1.0000    (expect > 0.85)
+  AUROC(step_residual_norm):              0.9982    (expect > 0.85)
+
+Smoke tests completed.
