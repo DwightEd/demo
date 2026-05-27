@@ -83,15 +83,19 @@ def process_example(example, model, tokenizer, num_layers, k=8, max_seq_len=2048
             break
 
         n_j = tok_end - tok_start + 1
-        if n_j < k:
-            continue
+        if n_j < 2:
+            continue  # need at least 2 tokens
 
         sigma_layers = []
         for l in layer_indices:
             h_l = hidden_states[l + 1][0]  # +1 to skip embedding layer
             H_j_l = h_l[tok_start:tok_end + 1].float()  # (n_j, d)
             _, S, _ = torch.linalg.svd(H_j_l, full_matrices=False)
-            sigma_layers.append(S[:k].cpu())
+            # Zero-pad if fewer singular values than k
+            sigma_l = torch.zeros(k)
+            n_sv = min(len(S), k)
+            sigma_l[:n_sv] = S[:n_sv]
+            sigma_layers.append(sigma_l)
 
         sigma_ml = torch.stack(sigma_layers)  # (L_selected, k)
 
@@ -124,7 +128,7 @@ def main():
     parser.add_argument("--splits", type=str, default="gsm8k")
     parser.add_argument("--max_examples", type=int, default=-1)
     parser.add_argument("--max_seq_len", type=int, default=2048)
-    parser.add_argument("--k", type=int, default=8, help="Number of singular values per layer")
+    parser.add_argument("--k", type=int, default=32, help="Number of singular values per layer (zero-padded if n_tokens < k)")
     parser.add_argument("--layers", type=str, default="all",
                         help="Layer indices: 'all' or comma-separated (e.g., '8,16,24,31')")
     parser.add_argument("--dtype", type=str, default="float16",
