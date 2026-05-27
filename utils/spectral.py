@@ -187,6 +187,12 @@ def compute_unembedding_svd(W_U, cache_path: str | None = None):
     Caching: SVD of (V, d) is expensive but only needs to be done once per
     model. Pass `cache_path` to persist the result.
 
+    Note on execution device: the SVD is always run on CPU. Running it on
+    the same GPU that hosts the LLM has been observed to corrupt subsequent
+    cuBLAS bf16 GEMMs (CUBLAS_STATUS_NOT_SUPPORTED), so we trade ~30–60 s
+    of one-time CPU work for downstream GPU stability. The W_U matrix is
+    copied to CPU once and converted to float32 there.
+
     Args:
         W_U: numpy ndarray or torch.Tensor of shape (V, d).
         cache_path: optional .npz path to load/save (Vt, S).
@@ -200,29 +206,23 @@ def compute_unembedding_svd(W_U, cache_path: str | None = None):
         data = np.load(cache_path)
         return data["Vt"], data["S"]
 
-    # Use torch for the heavy SVD when available, fall back to numpy otherwise.
+    # Always run the SVD on CPU to avoid disturbing GPU cuBLAS state.
     try:
         import torch
-        is_torch = isinstance(W_U, torch.Tensor)
-    except ImportError:
-        torch = None
-        is_torch = False
-
-    if torch is not None and (is_torch or torch.cuda.is_available()):
-        if not is_torch:
-            W_U_t = torch.from_numpy(np.asarray(W_U, dtype=np.float32))
+        if isinstance(W_U, torch.Tensor):
+            W_U_np = W_U.detach().cpu().float().numpy()
         else:
-            W_U_t = W_U
-        if torch.cuda.is_available() and not W_U_t.is_cuda:
-            W_U_t = W_U_t.cuda()
-        W_U_t = W_U_t.float()
-        with torch.no_grad():
-            _, S_t, Vh_t = torch.linalg.svd(W_U_t, full_matrices=False)
-        S = S_t.detach().cpu().numpy().astype(np.float64)
-        Vt = Vh_t.detach().cpu().numpy().astype(np.float64)
-    else:
-        W_U_np = np.asarray(W_U, dtype=np.float64)
-        _, S, Vt = np.linalg.svd(W_U_np, full_matrices=False)
+            W_U_np = np.asarray(W_U, dtype=np.float32)
+    except ImportError:
+        W_U_np = np.asarray(W_U, dtype=np.float32)
+
+    print(f"  Computing SVD of W_U on CPU, shape = {W_U_np.shape} ...")
+    # SVD on float32 is fine for our purposes (we only need the subspace, not
+    # very-small singular values). On a 128k × 4096 matrix this takes ~30–60 s
+    # with LAPACK and is cached afterwards.
+    _, S_f32, Vt_f32 = np.linalg.svd(W_U_np, full_matrices=False)
+    Vt = Vt_f32.astype(np.float64)
+    S = S_f32.astype(np.float64)
 
     if cache_path is not None:
         os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
