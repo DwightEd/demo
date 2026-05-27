@@ -30,7 +30,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from smcd.info_geometry import (
     spectrum_to_distribution, effective_rank, hellinger_distance,
-    window_manifold_rank, trajectory_stability,
 )
 from smcd.probe import TrajectoryProbe
 from smcd.detector import CUSUMDetector, evaluate_detection
@@ -72,16 +71,19 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def build_grid_features(data, meta, window=3):
-    """Build per-(step, layer) feature grid with trajectory manifold features.
+def build_grid_features(data, meta, **kwargs):
+    """Build per-(step, layer) feature grid from natural per-step spectral structure.
 
-    For each step j, layer l, compute:
-        F0: manifold_rank — trajectory dimension in window (CORE: low-dim manifold hypothesis)
-        F1: stability — trajectory stability in window (low = stable evolution)
-        F2: hellinger — step-to-step spectral distance
-        F3: step_eff_rank — per-step effective rank (information density)
-        F4: spectral_gap — σ_1/σ_2
-        F5: energy_concentration — σ_1²/Σσ²
+    Each step's token matrix H_j already has a natural dimensionality via SVD.
+    No windowing needed — the GRU learns temporal patterns.
+
+    Per (step j, layer l):
+        F0: effective_rank — natural dimensionality of this step's subspace
+        F1: spectral_entropy — smoothness of spectral distribution
+        F2: spectral_gap — σ_1/σ_2, dominance of leading direction
+        F3: energy_concentration — σ_1²/Σσ², how much energy in top direction
+        F4: hellinger — distance to previous step's spectrum (0 for j=0)
+        F5: delta_eff_rank — change in effective rank from previous step (0 for j=0)
 
     Output: (T, L, F=6) feature grid per example.
     """
@@ -103,33 +105,36 @@ def build_grid_features(data, meta, window=3):
         ecn_summary = torch.zeros(T, 3)
 
         for l in range(L):
-            p_layer = torch.stack([p_all[j][l] for j in range(T)])      # (T, k)
+            p_layer = torch.stack([p_all[j][l] for j in range(T)])        # (T, k)
             sigma_layer = torch.stack([sigma_all[j][l] for j in range(T)])  # (T, k)
 
-            # F0: trajectory manifold dimension (THE core feature)
-            grid[:, l, 0] = window_manifold_rank(p_layer, window=window)
+            # F0: effective rank (natural subspace dimensionality)
+            eff_r = effective_rank(p_layer)  # (T,)
+            grid[:, l, 0] = eff_r
 
-            # F1: trajectory stability
-            grid[:, l, 1] = trajectory_stability(p_layer, window=window)
+            # F1: spectral entropy
+            from smcd.info_geometry import spectral_entropy
+            grid[:, l, 1] = spectral_entropy(p_layer)
 
-            # F2: step-to-step Hellinger distance
-            for j in range(1, T):
-                grid[j, l, 2] = hellinger_distance(p_layer[j-1:j], p_layer[j:j+1])
+            # F2: spectral gap σ_1/σ_2
+            grid[:, l, 2] = sigma_layer[:, 0] / (sigma_layer[:, 1] + 1e-8)
 
-            # F3: per-step effective rank
-            grid[:, l, 3] = effective_rank(p_layer)
-
-            # F4: spectral gap
-            grid[:, l, 4] = sigma_layer[:, 0] / (sigma_layer[:, 1] + 1e-8)
-
-            # F5: energy concentration
+            # F3: energy concentration σ_1²/Σσ²
             s2 = sigma_layer ** 2
-            grid[:, l, 5] = s2[:, 0] / (s2.sum(dim=-1) + 1e-8)
+            grid[:, l, 3] = s2[:, 0] / (s2.sum(dim=-1) + 1e-8)
+
+            # F4: step-to-step Hellinger distance (evolution signal)
+            for j in range(1, T):
+                grid[j, l, 4] = hellinger_distance(p_layer[j-1:j], p_layer[j:j+1])
+
+            # F5: delta effective rank (evolution signal)
+            for j in range(1, T):
+                grid[j, l, 5] = eff_r[j] - eff_r[j - 1]
 
         # ECN summary for regularization
-        ecn_summary[:, 0] = grid[:, :, 0].mean(dim=1)  # mean manifold rank
-        ecn_summary[:, 1] = grid[:, :, 2].mean(dim=1)  # mean Hellinger
-        ecn_summary[:, 2] = grid[:, :, 1].mean(dim=1)  # mean stability
+        ecn_summary[:, 0] = grid[:, :, 0].mean(dim=1)  # E: mean eff rank
+        ecn_summary[:, 1] = grid[:, :, 4].mean(dim=1)  # C: mean Hellinger
+        ecn_summary[:, 2] = grid[:, :, 5].abs().mean(dim=1)  # N: mean |delta rank|
 
         labels = torch.tensor([s["is_error"] for s in steps], dtype=torch.float32)
 
@@ -401,7 +406,7 @@ def main():
     F = examples[0]["grid"].shape[-1]
     print(f"  {len(examples)} usable examples")
     print(f"  Grid: T × {L} layers × {F} features (window={args.window})")
-    print(f"  Features: manifold_rank, stability, hellinger, step_eff_rank, spectral_gap, energy_conc")
+    print(f"  Features: eff_rank, spectral_entropy, spectral_gap, energy_conc, hellinger, delta_rank")
 
     # Split
     indices = np.arange(len(examples))
