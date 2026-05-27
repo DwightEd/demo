@@ -36,15 +36,18 @@ CHANNELS=(D V C)
 # Skip the smoke test (set to 1 to skip)
 SKIP_SMOKE=${SKIP_SMOKE:-0}
 
-# ---- HuggingFace endpoint mirror --------------------------------------------
-# Route HF Hub traffic (datasets + tokenizer files if missing) through the
-# hf-mirror.com mirror. The local model directory is used directly, so the
-# model itself is not downloaded again.
+# ---- HuggingFace endpoint mirror + cache location ---------------------------
+# Route HF Hub traffic (datasets) through the hf-mirror.com mirror.
+# The local model directory is used directly, so the model itself is not
+# downloaded again from the hub.
 export HF_ENDPOINT="https://hf-mirror.com"
 export HF_HUB_DISABLE_TELEMETRY=1
 export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
-# Optional cache override (uncomment if /gz-data is faster than /root)
-# export HF_HOME="/gz-data/hf-cache"
+
+# Cache HF datasets *inside* the project's data/ folder so the raw dataset
+# lives next to the .npz outputs (and is wiped when data/ is wiped).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export HF_DATASETS_CACHE="${SCRIPT_DIR}/data/hf_datasets"
 
 # ---- Sanity checks -----------------------------------------------------------
 if [ ! -d "$MODEL_DIR" ]; then
@@ -52,7 +55,11 @@ if [ ! -d "$MODEL_DIR" ]; then
     exit 1
 fi
 
-mkdir -p data output logs
+mkdir -p data output logs "$HF_DATASETS_CACHE"
+
+echo "MODEL_DIR          = $MODEL_DIR"
+echo "HF_ENDPOINT        = $HF_ENDPOINT"
+echo "HF_DATASETS_CACHE  = $HF_DATASETS_CACHE"
 
 # ---- 0) Smoke test -----------------------------------------------------------
 if [ "$SKIP_SMOKE" != "1" ]; then
