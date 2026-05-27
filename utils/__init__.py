@@ -1,21 +1,33 @@
-"""Utility functions for CIM-style trajectory manifold analysis."""
+"""Utility primitives for the (step × layer) low-rank spectral analysis."""
 
-from .intrinsic_dim import two_nn_id, participation_ratio, bias_corrected_pr
-from .info_volume import info_volume_cim
-from .tangent_space import local_pca, subspace_angle_principal, manifold_self_consistency
-from .curvature import discrete_curvature, normalized_curvature, turning_angle
-from .step_boundaries import find_step_token_indices
+from .spectral import (
+    token_cloud_singular_values,
+    effective_rank,
+    spectral_energy,
+    top_concentration,
+    step_layer_spectral_summary,
+    lowrank_decompose,
+    chain_lowrankness,
+    step_residual_norms,
+    layer_residual_norms,
+    layer_profile_corr_with_prefix,
+)
+from .step_boundaries import (
+    find_step_token_ranges,
+    split_response_into_steps,
+)
 
 __all__ = [
-    "two_nn_id",
-    "participation_ratio",
-    "bias_corrected_pr",
-    "info_volume_cim",
-    "local_pca",
-    "subspace_angle_principal",
-    "manifold_self_consistency",
-    "discrete_curvature",
-    "normalized_curvature",
-    "turning_angle",
-    "find_step_token_indices",
+    "token_cloud_singular_values",
+    "effective_rank",
+    "spectral_energy",
+    "top_concentration",
+    "step_layer_spectral_summary",
+    "lowrank_decompose",
+    "chain_lowrankness",
+    "step_residual_norms",
+    "layer_residual_norms",
+    "layer_profile_corr_with_prefix",
+    "find_step_token_ranges",
+    "split_response_into_steps",
 ]
