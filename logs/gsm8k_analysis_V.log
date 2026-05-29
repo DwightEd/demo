@@ -1,18 +1,18 @@
 Loading data/gsm8k_spectral.npz ...
   99 trajectories, channel = M_V, rank_k = 1
 Running per-trajectory low-rank decomposition ...
-  0%|                                           | 0/99 [00:00<?, ?it/s]100%|████████████████████████████████| 99/99 [00:00<00:00, 8942.89it/s]
+  0%|                                           | 0/99 [00:00<?, ?it/s]100%|████████████████████████████████| 99/99 [00:00<00:00, 8894.80it/s]
 
 === Hypothesis-test AUROC ===
   channel = M_V,  rank_k = 1
   chain-level     (50+ / 49-)
-    AUROC(chain_lowrank_k=1) = 0.4282
-    AUROC(chain_lowrank_k=2) = 0.4784
+    AUROC(chain_lowrank_k=1) = 0.4237
+    AUROC(chain_lowrank_k=2) = 0.4820
   step-level      (50+ / 455-)
-    AUROC(step_residual_norm) = 0.4011
-    AUROC(neg_layer_profile_corr) = 0.4149
+    AUROC(step_residual_norm) = 0.4287
+    AUROC(neg_layer_profile_corr) = 0.4310
 
-  lowrank_k=1  correct: 0.9989 ± 0.0016    error: 0.9991 ± 0.0013
-  lowrank_k=2  correct: 0.9999 ± 0.0001    error: 0.9999 ± 0.0001
+  lowrank_k=1  correct: 0.9995 ± 0.0008    error: 0.9997 ± 0.0004
+  lowrank_k=2  correct: 1.0000 ± 0.0000    error: 1.0000 ± 0.0001
 
 Saved -> data/gsm8k_analysis_V.npz

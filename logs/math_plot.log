@@ -1,0 +1,6 @@
+Loading data/math_spectral.npz ...
+Loading data/math_analysis_D.npz ...
+Saved -> output/math/fig1_chain_lowrankness.png
+Saved -> output/math/fig2_step_signals.png
+Saved -> output/math/fig3_spectral_field_heatmaps.png
+Saved -> output/math/fig4_lowrank_decomposition.png

@@ -1,0 +1,18 @@
+Loading data/omnimath_spectral.npz ...
+  99 trajectories, channel = M_V, rank_k = 1
+Running per-trajectory low-rank decomposition ...
+  0%|                                           | 0/99 [00:00<?, ?it/s]100%|████████████████████████████████| 99/99 [00:00<00:00, 5876.95it/s]
+
+=== Hypothesis-test AUROC ===
+  channel = M_V,  rank_k = 1
+  chain-level     (50+ / 49-)
+    AUROC(chain_lowrank_k=1) = 0.5735
+    AUROC(chain_lowrank_k=2) = 0.6147
+  step-level      (50+ / 746-)
+    AUROC(step_residual_norm) = 0.5493
+    AUROC(neg_layer_profile_corr) = 0.4489
+
+  lowrank_k=1  correct: 0.9998 ± 0.0003    error: 0.9998 ± 0.0004
+  lowrank_k=2  correct: 1.0000 ± 0.0000    error: 1.0000 ± 0.0000
+
+Saved -> data/omnimath_analysis_V.npz

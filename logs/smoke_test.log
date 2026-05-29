@@ -26,4 +26,17 @@ Test 3: chain & step AUROC on synthetic (30 correct + 30 error)
   AUROC(chain_lowrank_k=1, sign-flipped): 1.0000    (expect > 0.85)
   AUROC(step_residual_norm):              0.9982    (expect > 0.85)
 
+============================================================
+Test 4: reasoning-subspace projection on synthetic W_U (V=1024, d=64)
+============================================================
+  Computing SVD of W_U on CPU, shape = (1024, 64) ...
+  recovered S[:5]            = [10.0, 9.894, 9.787, 9.681, 9.574]
+  recovered S[-5:]           = [0.034, 0.028, 0.022, 0.016, 0.01]
+  σ ratio S[0]/S[-1]         = 1000.00    (expect ~1000)
+  energy mode 0.95           d_semantic=43   d_reasoning=21   reasoning_energy=0.0485
+  dim_ratio mode 0.05        d_semantic=61   d_reasoning=3
+  projection norm (semantic only) = 0.0000
+  projection norm (reasoning only)= 1.2482
+  reasoning/semantic norm ratio   = 28761351.77   (expect >> 1)
+
 Smoke tests completed.

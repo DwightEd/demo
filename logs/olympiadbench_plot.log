@@ -1,0 +1,6 @@
+Loading data/olympiadbench_spectral.npz ...
+Loading data/olympiadbench_analysis_D.npz ...
+Saved -> output/olympiadbench/fig1_chain_lowrankness.png
+Saved -> output/olympiadbench/fig2_step_signals.png
+Saved -> output/olympiadbench/fig3_spectral_field_heatmaps.png
+Saved -> output/olympiadbench/fig4_lowrank_decomposition.png
