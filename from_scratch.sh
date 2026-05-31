@@ -58,7 +58,9 @@ if ! nvidia-smi >/dev/null 2>&1; then
     echo "ERROR: nvidia-smi failed — no GPU visible to container" >&2
     exit 1
 fi
-nvidia-smi | head -n 16
+# NOTE: `nvidia-smi | head` under `set -o pipefail` kills the script via SIGPIPE.
+# Just dump the full table — it's ~20 lines.
+nvidia-smi
 
 mkdir -p "$MODELS_DIR" "$HF_HOME" "$HF_DATASETS_CACHE" \
          "${PROJ_ROOT}/data" "${PROJ_ROOT}/logs" \
