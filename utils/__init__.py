@@ -20,6 +20,18 @@ from .step_boundaries import (
     find_step_token_ranges,
     split_response_into_steps,
 )
+from .geometry import (
+    cloud_geometry,
+    centroid_step_drift,
+    centroid_curvature,
+    principal_angles,
+    principal_angle_drift,
+    grassmann_distance,
+    bures_distance,
+    gaussian_w2,
+    gaussian_w2_step_drift,
+    align_basis,
+)
 
 __all__ = [
     "token_cloud_singular_values",
@@ -38,4 +50,14 @@ __all__ = [
     "project_to_reasoning",
     "find_step_token_ranges",
     "split_response_into_steps",
+    "cloud_geometry",
+    "centroid_step_drift",
+    "centroid_curvature",
+    "principal_angles",
+    "principal_angle_drift",
+    "grassmann_distance",
+    "bures_distance",
+    "gaussian_w2",
+    "gaussian_w2_step_drift",
+    "align_basis",
 ]

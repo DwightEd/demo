@@ -49,6 +49,7 @@ from utils import (
     select_reasoning_subspace,
     project_to_reasoning,
 )
+from utils.geometry import cloud_geometry
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,8 @@ def extract_spectral_field(
     rank_mode: str = "full",
     rank_k: int | None = None,
     rank_threshold: float = 0.95,
+    store_geometry: bool = False,
+    geom_k: int = 4,
 ):
     """Run one forward pass and reduce each (step, layer) token cloud to (D, V, C).
 
@@ -151,15 +154,26 @@ def extract_spectral_field(
     rank_mode argument selects whether to use the full spectrum (default) or
     a truncated form. See `effective_rank_truncated` for the available modes.
 
+    If store_geometry is True, additionally retain, per (step, layer), the
+    token-cloud centroid mu (position) and its top-`geom_k` principal axes
+    (orientation) -- the information that the (D, V, C) scalars throw away.
+    These power the centroid-drift / orientation-drift analysis in
+    05_geometry_analysis.py.
+
     Returns:
         M_D, M_V, M_C: (T, L_sub) float arrays where L_sub = len(layer_indices).
                        Rows in original step order; NaN rows are dropped.
         kept_steps:    indices (in the original 0..T-1) of steps actually kept.
         layers_used:   list of int layer indices that were sampled.
+        GEOM:          None if store_geometry is False; otherwise a dict with
+                         "mu":      (T, L_sub, p) centroids
+                         "eigvals": (T, L_sub, geom_k) leading eigenvalues
+                         "eigvecs": (T, L_sub, p, geom_k) leading axes
+                       where p = d_R (projected) or d (raw).
     """
     ranges = find_step_token_ranges(tokenizer, prompt, response, steps)
     if len(ranges) < 3:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     encoding = tokenizer(
         prompt + response,
@@ -172,7 +186,7 @@ def extract_spectral_field(
     # Keep only steps whose token range fits inside the truncated sequence.
     safe = [(j, a, b) for j, (a, b) in enumerate(ranges) if b < seq_len and b - a + 1 >= 2]
     if len(safe) < 3:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     outputs = model(**encoding, output_hidden_states=True)
     hidden_states = outputs.hidden_states  # tuple of (1, seq_len, d) tensors
@@ -187,6 +201,12 @@ def extract_spectral_field(
     M_D = np.full((T_eff, L_sub), np.nan, dtype=np.float64)
     M_V = np.full((T_eff, L_sub), np.nan, dtype=np.float64)
     M_C = np.full((T_eff, L_sub), np.nan, dtype=np.float64)
+
+    # Optional geometry buffers. p (feature dim after optional projection) is
+    # discovered from the first cloud.
+    GEOM = None
+    geom_mu = geom_eigvals = geom_eigvecs = None
+    p_dim = None
 
     for li, l in enumerate(layer_indices):
         H_l = hidden_states[l][0].float().cpu().numpy()  # (seq_len, d)
@@ -204,8 +224,23 @@ def extract_spectral_field(
             M_V[row, li] = V
             M_C[row, li] = C
 
+            if store_geometry:
+                mu, eigvals, eigvecs = cloud_geometry(H_jl, k=geom_k)
+                if mu is not None:
+                    if p_dim is None:
+                        p_dim = mu.shape[0]
+                        geom_mu = np.full((T_eff, L_sub, p_dim), np.nan, dtype=np.float32)
+                        geom_eigvals = np.full((T_eff, L_sub, geom_k), np.nan, dtype=np.float32)
+                        geom_eigvecs = np.full((T_eff, L_sub, p_dim, geom_k), np.nan, dtype=np.float32)
+                    geom_mu[row, li] = mu.astype(np.float32)
+                    geom_eigvals[row, li] = eigvals.astype(np.float32)
+                    geom_eigvecs[row, li] = eigvecs.astype(np.float32)
+
+    if store_geometry and geom_mu is not None:
+        GEOM = {"mu": geom_mu, "eigvals": geom_eigvals, "eigvecs": geom_eigvecs}
+
     kept_steps = np.array([j for j, _, _ in safe], dtype=np.int32)
-    return M_D, M_V, M_C, kept_steps, layer_indices
+    return M_D, M_V, M_C, kept_steps, layer_indices, GEOM
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +290,16 @@ def main():
     parser.add_argument("--rank_energy_threshold", type=float, default=0.95,
                         help="Cumulative energy threshold for "
                              "--rank_mode energy.")
+    # Geometry storage: keep centroid (position) + top-k principal axes
+    # (orientation) per (step, layer), which the D/V/C scalars discard.
+    parser.add_argument("--store_geometry", action="store_true",
+                        help="Additionally store per-(step,layer) centroid mu "
+                             "and top-k principal axes for the orientation/"
+                             "position drift analysis (05_geometry_analysis.py). "
+                             "Increases output size; off by default.")
+    parser.add_argument("--geom_k", type=int, default=4,
+                        help="Number of leading principal axes to store per "
+                             "(step, layer) when --store_geometry is set.")
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
@@ -313,7 +358,7 @@ def main():
                 skipped += 1
                 continue
             try:
-                M_D, M_V, M_C, kept_steps, layers_used = extract_spectral_field(
+                M_D, M_V, M_C, kept_steps, layers_used, GEOM = extract_spectral_field(
                     model, tokenizer, prompt, response, steps,
                     device, layer_indices=layer_indices,
                     max_seq_len=args.max_seq_len,
@@ -321,6 +366,8 @@ def main():
                     rank_mode=args.rank_mode,
                     rank_k=args.rank_topk,
                     rank_threshold=args.rank_energy_threshold,
+                    store_geometry=args.store_geometry,
+                    geom_k=args.geom_k,
                 )
             except Exception as e:
                 print(f"  warn: extraction failed: {e}")
@@ -353,6 +400,7 @@ def main():
                 "M_C": M_C.astype(np.float32),
                 "kept_steps": kept_steps,
                 "layers_used": np.asarray(layers_used, dtype=np.int32),
+                "GEOM": GEOM,  # None unless --store_geometry
             })
 
     if not rows:
@@ -383,8 +431,26 @@ def main():
         for k, v in V_R_meta.items():
             save_dict[f"V_R_{k}"] = np.array(v)
 
+    # Geometry payload (object arrays of per-trajectory (T, L, ...) tensors).
+    if args.store_geometry:
+        have_geom = any(r["GEOM"] is not None for r in rows)
+        if have_geom:
+            save_dict["geom_stored"] = np.array(True)
+            save_dict["geom_k"] = np.array(args.geom_k)
+            save_dict["geom_mu"] = np.array(
+                [r["GEOM"]["mu"] if r["GEOM"] else None for r in rows], dtype=object)
+            save_dict["geom_eigvals"] = np.array(
+                [r["GEOM"]["eigvals"] if r["GEOM"] else None for r in rows], dtype=object)
+            save_dict["geom_eigvecs"] = np.array(
+                [r["GEOM"]["eigvecs"] if r["GEOM"] else None for r in rows], dtype=object)
+        else:
+            save_dict["geom_stored"] = np.array(False)
+    else:
+        save_dict["geom_stored"] = np.array(False)
+
     np.savez(args.output, **save_dict)
-    print(f"Saved -> {args.output}")
+    print(f"Saved -> {args.output}"
+          + ("  [with geometry]" if args.store_geometry else ""))
 
 
 if __name__ == "__main__":
