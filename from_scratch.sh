@@ -4,7 +4,8 @@
 #
 # What this does, on a freshly-rented machine with NOTHING installed beyond
 # the base conda3 image + NVIDIA driver:
-#   1) create a persistent conda env (python 3.10) under /gz-data
+#   1) create a persistent conda env `research` (python 3.10), location
+#      resolved from .condarc envs_dirs (here: /gz-data/conda_envs/research)
 #   2) install torch (cu121) + transformers/datasets + modelscope
 #   3) download Llama-3.1-8B-Instruct (~16 GB) from ModelScope into /gz-data
 #   4) pre-fetch ProcessBench (gsm8k subset) into /gz-data
@@ -28,7 +29,9 @@ set -euo pipefail
 # ---- Paths (persistent locations all under /gz-data) ------------------------
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MODELS_DIR="/gz-data/models"
-ENV_DIR="/gz-data/envs/research"        # conda env lives here (prefix-based)
+# Conda env is created with `-n` so it lands in whatever envs_dirs the user's
+# .condarc points at (on this gpugeek setup: /gz-data/conda_envs/research).
+ENV_NAME="research"
 PY_VER="3.10"
 export HF_DATASETS_CACHE="${PROJ_ROOT}/data/hf_datasets"
 export HF_HOME="/gz-data/hf_cache"
@@ -63,11 +66,10 @@ fi
 nvidia-smi
 
 mkdir -p "$MODELS_DIR" "$HF_HOME" "$HF_DATASETS_CACHE" \
-         "${PROJ_ROOT}/data" "${PROJ_ROOT}/logs" \
-         "$(dirname "$ENV_DIR")"
+         "${PROJ_ROOT}/data" "${PROJ_ROOT}/logs"
 
 echo "PROJ_ROOT          = $PROJ_ROOT"
-echo "ENV_DIR            = $ENV_DIR  (python $PY_VER)"
+echo "ENV_NAME           = $ENV_NAME  (python $PY_VER, location follows .condarc envs_dirs)"
 echo "MODELS_DIR         = $MODELS_DIR"
 echo "HF_HOME            = $HF_HOME"
 echo "HF_DATASETS_CACHE  = $HF_DATASETS_CACHE"
@@ -78,14 +80,16 @@ CONDA_BASE="$(conda info --base)"
 # shellcheck disable=SC1091
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
 
-if [ ! -x "${ENV_DIR}/bin/python" ]; then
+if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
     echo
     echo "============================================================"
-    echo "[1/6] create conda env at $ENV_DIR  (python $PY_VER)"
+    echo "[1/6] create conda env '$ENV_NAME'  (python $PY_VER)"
+    echo "      target dir resolved from .condarc envs_dirs"
     echo "============================================================"
-    conda create -p "$ENV_DIR" "python=${PY_VER}" -y
+    conda create -n "$ENV_NAME" "python=${PY_VER}" -y
 fi
-conda activate "$ENV_DIR"
+conda activate "$ENV_NAME"
+echo "active env prefix: $CONDA_PREFIX"
 python -m pip install --upgrade pip wheel setuptools
 
 # ---- 2) deps ---------------------------------------------------------------
@@ -213,6 +217,6 @@ echo "Done."
 echo "  geometry npz : $GEOM_NPZ"
 echo "  analysis npz : $GEOM_ANALYSIS_NPZ"
 echo "  logs         : logs/${SUBSET}_geom_*.log"
-echo "  conda env    : $ENV_DIR   (reactivate with: conda activate $ENV_DIR)"
+echo "  conda env    : $ENV_NAME at $CONDA_PREFIX   (reactivate with: conda activate $ENV_NAME)"
 echo "  model        : $MODEL_DIR"
 echo "============================================================"
