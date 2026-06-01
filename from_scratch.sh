@@ -122,20 +122,42 @@ echo "[3/6] download Llama-3.1-8B-Instruct from ModelScope (~16 GB)"
 echo "      target: $EXPECTED_MODEL_DIR"
 echo "============================================================"
 
-if [ -f "${EXPECTED_MODEL_DIR}/config.json" ]; then
-    MODEL_DIR="$EXPECTED_MODEL_DIR"
-    echo "model already present, skip download"
-else
-    MODEL_DIR=$(python - <<'PY'
-import os
+# snapshot_download is file-level resumable: failed shards are retried,
+# completed shards are skipped. We still need a bash-level loop because
+# the python call hard-fails when *any* shard fails after its own retries.
+MAX_TRIES=6
+MODEL_DIR=""
+for try in $(seq 1 "$MAX_TRIES"); do
+    echo "  attempt ${try}/${MAX_TRIES} ..."
+    if MODEL_DIR=$(python - <<'PY' 2>&1
+import os, sys
 from modelscope import snapshot_download
-p = snapshot_download(
-    "LLM-Research/Meta-Llama-3.1-8B-Instruct",
-    cache_dir=os.environ["MODELS_DIR"],
-)
-print(p)
-PY
+try:
+    p = snapshot_download(
+        "LLM-Research/Meta-Llama-3.1-8B-Instruct",
+        cache_dir=os.environ["MODELS_DIR"],
     )
+    print(p)
+except Exception as e:
+    print(f"DOWNLOAD_FAILED: {type(e).__name__}: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
+    ); then
+        # MODEL_DIR captured stdout. The success path prints exactly the local path.
+        if [ -d "$MODEL_DIR" ] && [ -f "${MODEL_DIR}/config.json" ]; then
+            echo "  ok -> $MODEL_DIR"
+            break
+        fi
+    fi
+    echo "  attempt ${try} failed; sleeping 10s then retrying..." >&2
+    MODEL_DIR=""
+    sleep 10
+done
+
+if [ -z "$MODEL_DIR" ] || [ ! -f "${MODEL_DIR}/config.json" ]; then
+    echo "ERROR: model download failed after ${MAX_TRIES} attempts." >&2
+    echo "  check network, or rerun this script — partial files are kept." >&2
+    exit 1
 fi
 echo "MODEL_DIR = $MODEL_DIR"
 
