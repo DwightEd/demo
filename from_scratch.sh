@@ -4,6 +4,7 @@ set -euo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MODELS_DIR="/gz-data/models"
 export HF_DATASETS_CACHE="${PROJ_ROOT}/data/hf_datasets"
+export HF_ENDPOINT="https://hf-mirror.com"
 
 # ---------- 1. 下载数据集 ----------
 pip install -q datasets huggingface_hub
