@@ -4,11 +4,11 @@ set -euo pipefail
 PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MODELS_DIR="/gz-data/models"
 export HF_DATASETS_CACHE="${PROJ_ROOT}/data/hf_datasets"
-export HF_ENDPOINT="https://hf-mirror.com"
+export HF_ENDPOINT="https://huggingface.co"
 
 # ---------- 1. 下载数据集 ----------
 pip install -q datasets huggingface_hub
-huggingface-cli download --repo-type dataset Qwen/ProcessBench --local-dir "${HF_DATASETS_CACHE}/ProcessBench"
+hf download --repo-type dataset Qwen/ProcessBench --local-dir "${HF_DATASETS_CACHE}/ProcessBench"
 
 # ---------- 2. 运行实验 ----------
 cd "$PROJ_ROOT"
