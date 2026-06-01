@@ -12,14 +12,14 @@ hf download --repo-type dataset Qwen/ProcessBench --local-dir "${HF_DATASETS_CAC
 
 # ---------- 2. 运行实验 ----------
 cd "$PROJ_ROOT"
-MODEL_DIR="${MODELS_DIR}/LLM-Research/Meta-Llama-3___1-8B-Instruct"
+MODEL_DIR="${MODELS_DIR}/Meta-Llama-3.1-8B-Instruct"
 SUBSET="gsm8k"
 GEOM_NPZ="data/${SUBSET}_geom.npz"
 
 python 01_extract_spectral_field.py \
     --model "$MODEL_DIR" \
     --subset "$SUBSET" \
-    --n_correct 50 --n_error 50 \
+    --n_correct 99999 --n_error 99999 \
     --store_geometry --geom_k 4 \
     --output "$GEOM_NPZ"
 

@@ -59,7 +59,13 @@ from utils.geometry import cloud_geometry
 def load_processbench_subset(dataset_name, subset, n_correct, n_error, seed=42):
     """Stratified sample of ProcessBench by label sign (-1 = all correct)."""
     print(f"Loading {dataset_name} split={subset} ...")
-    ds = load_dataset(dataset_name, split=subset)
+    import os
+    local_dir = os.path.join(os.environ.get("HF_DATASETS_CACHE", "data/hf_datasets"), "ProcessBench")
+    if os.path.isdir(local_dir):
+        print(f"  using local dataset: {local_dir}")
+        ds = load_dataset(local_dir, split=subset)
+    else:
+        ds = load_dataset(dataset_name, split=subset)
 
     correct = [ex for ex in ds if ex.get("label", -1) == -1]
     error = [ex for ex in ds if ex.get("label", -1) >= 0]
