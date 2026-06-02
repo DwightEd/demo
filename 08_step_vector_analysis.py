@@ -121,6 +121,24 @@ def length_matched_subset(labels, n_steps, n_bins=8, seed=0):
     return np.concatenate(keep) if keep else idx
 
 
+def bootstrap_auroc_ci(scores, labels, n_boot=2000, seed=0, alpha=0.05):
+    """Percentile bootstrap CI for best-direction AUROC."""
+    scores = np.asarray(scores, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.int64)
+    rng = np.random.default_rng(seed)
+    n = scores.size
+    vals = []
+    for _ in range(n_boot):
+        b = rng.integers(0, n, n)
+        a, _ = auroc_bestdir(scores[b], labels[b])
+        if not np.isnan(a):
+            vals.append(a)
+    if not vals:
+        return float("nan"), float("nan")
+    lo, hi = np.percentile(vals, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    return float(lo), float(hi)
+
+
 def band_indices(L_sub, band):
     if band == "all":
         return np.arange(L_sub)
@@ -339,7 +357,8 @@ def main():
                     if np.isfinite(results[m]["matched"]) else -1.0)
     err_idx = np.where(labels_raw >= 1)[0]   # error chains with >=1 pre-error step
     cor_idx = np.where(labels_raw == -1)[0]  # all-correct chains
-    prefix_auroc = full_auroc_raw = float("nan"); n_pref = 0
+    prefix_auroc = full_auroc_raw = float("nan")
+    prefix_matched = full_matched = prho_prefix = float("nan"); n_pref = 0
     if err_idx.size and cor_idx.size:
         full_feat = results[best_mode]["feat"]
         prefix_feat = np.full(N, np.nan)
@@ -353,20 +372,35 @@ def main():
         lab = np.concatenate([np.ones(err_idx.size), np.zeros(cor_idx.size)])
         scF = np.concatenate([full_feat[err_idx],   full_feat[cor_idx]])
         scP = np.concatenate([prefix_feat[err_idx], full_feat[cor_idx]])
+        sub_ns = n_steps[np.concatenate([err_idx, cor_idx])].astype(float)
         full_auroc_raw, _ = auroc_bestdir(scF, lab)
         prefix_auroc, _ = auroc_bestdir(scP, lab)
-        print(f"\n=== (f) Error vs difficulty ({best_mode}, raw AUROC, not "
-              f"length-matched): is the lift already in the PRE-error prefix? ===")
+        # length-match on TOTAL chain length n_steps (same control as section a);
+        # controls difficulty-via-length, NOT the prefix-vs-full averaging-support
+        # asymmetry and NOT cross-problem difficulty (-> needs within-problem, 11).
+        mm = length_matched_subset(lab, sub_ns, n_bins=args.n_match_bins, seed=args.seed)
+        a_len_f, _ = auroc_bestdir(sub_ns[mm], lab[mm])
+        full_matched, _ = auroc_bestdir(scF[mm], lab[mm])
+        prefix_matched, _ = auroc_bestdir(scP[mm], lab[mm])
+        prho_prefix = partial_spearman_given_length(scP, lab, sub_ns)
+        ci_lo, ci_hi = bootstrap_auroc_ci(scP[mm], lab[mm], seed=args.seed)
+        print(f"\n=== (f) Error vs difficulty ({best_mode}): is the lift already in "
+              f"the PRE-error prefix? ===")
         print(f"  error chains with >=1 pre-error step: {n_pref}/{err_idx.size}")
-        print(f"  AUROC(full-chain error vs correct)   = {full_auroc_raw:.4f}")
-        print(f"  AUROC(PRE-error prefix vs correct)   = {prefix_auroc:.4f}")
-        if np.isfinite(prefix_auroc) and np.isfinite(full_auroc_raw):
-            if prefix_auroc >= full_auroc_raw - 0.03:
-                print("  -> prefix already elevated => GLOBAL regime / difficulty signal,")
-                print("     NOT a localized error event (this feature can't localize the error).")
+        print(f"  RAW     : full={full_auroc_raw:.4f}   prefix={prefix_auroc:.4f}")
+        print(f"  MATCHED : {mm.size} chains (len AUROC|matched={a_len_f:.4f} ~0.5)  "
+              f"full={full_matched:.4f}  prefix={prefix_matched:.4f}  "
+              f"[prefix 95% CI {ci_lo:.4f}-{ci_hi:.4f}]")
+        print(f"  partial_rho(prefix, label | n_steps) = {prho_prefix:.4f}")
+        if np.isfinite(prefix_matched) and np.isfinite(full_matched):
+            if prefix_matched >= full_matched - 0.03:
+                print("  -> length-matched prefix still >= full: the lift is present "
+                      "BEFORE the error and is not a chain-length artifact.")
+                print("     CAVEAT: ProcessBench correct/error are DIFFERENT problems, so "
+                      "difficulty is still confounded -> within-problem test (11) decides.")
             else:
-                print("  -> prefix looks more like correct; lift concentrates at/after the error")
-                print("     => genuine error-driven signal with localization potential.")
+                print("  -> after length matching prefix < full: the lift concentrates "
+                      "at/after the error; the raw prefix>full was a length artifact.")
 
     # --- save ---
     np.savez(
@@ -388,6 +422,9 @@ def main():
         rho_participation_vs_D=np.array(rho_D),
         prefix_auroc=np.array(prefix_auroc),
         full_auroc_raw=np.array(full_auroc_raw),
+        prefix_auroc_matched=np.array(prefix_matched),
+        full_auroc_matched=np.array(full_matched),
+        prefix_partial_rho=np.array(prho_prefix),
     )
     print(f"\nSaved -> {args.output}")
 
