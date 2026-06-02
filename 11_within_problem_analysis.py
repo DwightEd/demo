@@ -127,6 +127,25 @@ def _finite_mean(a):
     return float(a.mean()) if a.size else float("nan")
 
 
+def within_pair_auroc(idx_groups, feats, y_inc):
+    """Pooled within-problem AUROC: over all SAME-problem (incorrect, correct)
+    pairs, fraction with feat(incorrect) > feat(correct) (ties = 0.5). Uses all
+    the data and is far more stable at low samples-per-problem than averaging
+    per-problem AUROCs. Returns (auroc, n_pairs)."""
+    conc = 0.0
+    npair = 0
+    for idx in idx_groups:
+        inc = [feats[i] for i in idx if y_inc[i] == 1 and np.isfinite(feats[i])]
+        cor = [feats[i] for i in idx if y_inc[i] == 0 and np.isfinite(feats[i])]
+        if not inc or not cor:
+            continue
+        for a in inc:
+            for b in cor:
+                conc += 1.0 if a > b else (0.5 if a == b else 0.0)
+        npair += len(inc) * len(cor)
+    return (conc / npair if npair else float("nan")), npair
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True,
@@ -184,28 +203,28 @@ def main():
         return _finite_mean(per_step_band_avg(PR[m][i], cols)[:w])
 
     # ---- (A) within-problem AUROC per mode (the gate) ----
-    # For each contrastive problem, AUROC(feat ; incorrect=1) using only that
-    # problem's samples; then average across problems (difficulty-controlled).
-    print("\n=== (A) WITHIN-PROBLEM AUROC (difficulty-controlled gate; "
-          ">0.5 => failing samples have higher participation) ===")
-    print(f"{'mode':10s}  {'wAUROC_full':>11s}  {'wAUROC_early':>12s}  {'#probs':>6s}")
+    # Pooled same-problem (incorrect, correct) pairs (stable at low N), with the
+    # per-problem-averaged AUROC kept as a reference column.
+    idx_groups = [np.array(prob_to_idx[p]) for p in contrastive]
+    n_inc_contrastive = sum(int((y_inc[g] == 1).sum()) for g in idx_groups)
+    print("\n=== (A) WITHIN-PROBLEM AUROC (difficulty-controlled gate; pooled "
+          "same-problem pairs; >0.5 => failing samples have higher participation) ===")
+    print(f"{'mode':10s}  {'wAUROC_full':>11s}  {'wAUROC_early':>12s}  "
+          f"{'#pairs':>7s}  {'macroFull':>9s}")
     A = {}
     for m in modes:
-        au_full, au_early = [], []
-        for p in contrastive:
-            idx = np.array(prob_to_idx[p])
-            lab = y_inc[idx]
-            ff = np.array([feat_full(i, m) for i in idx])
-            fe = np.array([feat_early(i, m, args.early_window) for i in idx])
-            af = auroc(ff, lab); ae_ = auroc(fe, lab)
-            if not np.isnan(af):
-                au_full.append(af)
-            if not np.isnan(ae_):
-                au_early.append(ae_)
-        A[m] = dict(full=float(np.mean(au_full)) if au_full else float("nan"),
-                    early=float(np.mean(au_early)) if au_early else float("nan"),
-                    n=len(au_full))
-        print(f"{m:10s}  {A[m]['full']:11.4f}  {A[m]['early']:12.4f}  {A[m]['n']:6d}")
+        ff = np.array([feat_full(i, m) for i in range(N)])
+        fe = np.array([feat_early(i, m, args.early_window) for i in range(N)])
+        wf, npf = within_pair_auroc(idx_groups, ff, y_inc)
+        we, _ = within_pair_auroc(idx_groups, fe, y_inc)
+        macro = [auroc(ff[g], y_inc[g]) for g in idx_groups]
+        macro = [a for a in macro if not np.isnan(a)]
+        A[m] = dict(full=wf, early=we, n_pairs=npf,
+                    macro=float(np.mean(macro)) if macro else float("nan"))
+        print(f"{m:10s}  {wf:11.4f}  {we:12.4f}  {npf:7d}  {A[m]['macro']:9.4f}")
+    print(f"  power: {len(contrastive)} contrastive problems (independent units), "
+          f"{n_inc_contrastive} incorrect samples in them, "
+          f"{A[modes[0]]['n_pairs']} within-problem pairs")
 
     # ---- (B) paired test across problems for the chosen mode ----
     m = args.mode if args.mode in modes else modes[0]
@@ -280,19 +299,26 @@ def main():
              n_contrastive=np.array(len(contrastive)))
     print(f"\nSaved -> {args.output}")
 
-    # ---- verdict ----
+    # ---- verdict (power-aware: do NOT conclude on too few contrastive problems) ----
     g = A[m]["full"]
-    print("\n=== VERDICT (difficulty-controlled) ===")
     _, pval, _, _ = wilcoxon_signed_rank(diffs_full)
-    if np.isfinite(g) and g > 0.55 and np.isfinite(pval) and pval < 0.05:
-        print(f"  within-problem AUROC={g:.4f} (p={pval:.2e}) -> participation "
+    n_c = len(contrastive)
+    print("\n=== VERDICT (difficulty-controlled) ===")
+    if n_c < 30 or n_inc_contrastive < 40:
+        print(f"  UNDERPOWERED: only {n_c} contrastive problems / "
+              f"{n_inc_contrastive} incorrect samples (mode={m}: within-pair "
+              f"AUROC={g:.4f}, Wilcoxon p={pval:.2e}). NOT interpretable yet.")
+        print("  -> scale up before concluding: --n_problems 300+, --k_samples 12-16,"
+              " --temperature 1.0 (need >=30 contrastive problems).")
+    elif np.isfinite(g) and g > 0.55 and np.isfinite(pval) and pval < 0.05:
+        print(f"  within-pair AUROC={g:.4f} (p={pval:.2e}) -> participation "
               "PREDICTS failure with difficulty controlled. (b) supported.")
-    elif np.isfinite(g) and g < 0.53:
-        print(f"  within-problem AUROC={g:.4f} ~ chance -> the cross-problem "
-              "signal was DIFFICULTY, not error. (a). Pivot needed.")
+    elif np.isfinite(g) and abs(g - 0.5) <= 0.03:
+        print(f"  within-pair AUROC={g:.4f} ~ chance -> the cross-problem signal "
+              "was DIFFICULTY, not error. (a).")
     else:
-        print(f"  within-problem AUROC={g:.4f} (p={pval:.2e}) -> inconclusive; "
-              "need more contrastive problems / samples.")
+        print(f"  within-pair AUROC={g:.4f} (p={pval:.2e}) -> weak / inconclusive; "
+              "scale up to pin the sign.")
 
 
 if __name__ == "__main__":
