@@ -329,6 +329,45 @@ def main():
         print(f"  rho = {rho_D:.4f}  (n={nD})   "
               f"[|rho|->1 means participation ~ effective-rank D, NOT a new signal]")
 
+    # --- (f) ERROR vs DIFFICULTY: is the lift already in the PRE-error prefix? ---
+    # If (c) says the signal is a global level shift (mean >> cusum/max), the danger
+    # is that participation marks "hard / diffuse trajectory" rather than the error
+    # event. Score error chains by their PRE-error steps only and compare to the
+    # full-chain score on the same chains. prefix ~ full => global/difficulty signal
+    # (cannot localize); prefix << full => lift concentrates at/after the error.
+    best_mode = max(modes, key=lambda m: results[m]["matched"]
+                    if np.isfinite(results[m]["matched"]) else -1.0)
+    err_idx = np.where(labels_raw >= 1)[0]   # error chains with >=1 pre-error step
+    cor_idx = np.where(labels_raw == -1)[0]  # all-correct chains
+    prefix_auroc = full_auroc_raw = float("nan"); n_pref = 0
+    if err_idx.size and cor_idx.size:
+        full_feat = results[best_mode]["feat"]
+        prefix_feat = np.full(N, np.nan)
+        for i in err_idx:
+            k = int(labels_raw[i])
+            ps = per_step_band_avg(PR[best_mode][i], cols)[:k]   # steps before 1st error
+            ps = ps[np.isfinite(ps)]
+            if ps.size:
+                prefix_feat[i] = ps.mean()
+        n_pref = int(np.isfinite(prefix_feat[err_idx]).sum())
+        lab = np.concatenate([np.ones(err_idx.size), np.zeros(cor_idx.size)])
+        scF = np.concatenate([full_feat[err_idx],   full_feat[cor_idx]])
+        scP = np.concatenate([prefix_feat[err_idx], full_feat[cor_idx]])
+        full_auroc_raw, _ = auroc_bestdir(scF, lab)
+        prefix_auroc, _ = auroc_bestdir(scP, lab)
+        print(f"\n=== (f) Error vs difficulty ({best_mode}, raw AUROC, not "
+              f"length-matched): is the lift already in the PRE-error prefix? ===")
+        print(f"  error chains with >=1 pre-error step: {n_pref}/{err_idx.size}")
+        print(f"  AUROC(full-chain error vs correct)   = {full_auroc_raw:.4f}")
+        print(f"  AUROC(PRE-error prefix vs correct)   = {prefix_auroc:.4f}")
+        if np.isfinite(prefix_auroc) and np.isfinite(full_auroc_raw):
+            if prefix_auroc >= full_auroc_raw - 0.03:
+                print("  -> prefix already elevated => GLOBAL regime / difficulty signal,")
+                print("     NOT a localized error event (this feature can't localize the error).")
+            else:
+                print("  -> prefix looks more like correct; lift concentrates at/after the error")
+                print("     => genuine error-driven signal with localization potential.")
+
     # --- save ---
     np.savez(
         args.output,
@@ -347,6 +386,8 @@ def main():
         per_layer_auroc=(per_layer if per_layer is not None
                          else np.array(None, dtype=object)),
         rho_participation_vs_D=np.array(rho_D),
+        prefix_auroc=np.array(prefix_auroc),
+        full_auroc_raw=np.array(full_auroc_raw),
     )
     print(f"\nSaved -> {args.output}")
 
