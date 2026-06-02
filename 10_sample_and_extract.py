@@ -188,8 +188,14 @@ def build_gen_inputs(tokenizer, question, device):
     messages = [{"role": "user", "content": PROMPT_TEMPLATE.format(q=question)}]
     enc = tokenizer.apply_chat_template(
         messages, add_generation_prompt=True, return_tensors="pt")
-    if isinstance(enc, dict):
+    # apply_chat_template may return a tensor, a dict, or a BatchEncoding
+    # (a UserDict, so NOT caught by isinstance(dict)). Extract input_ids robustly.
+    try:
         enc = enc["input_ids"]
+    except (TypeError, KeyError, IndexError):
+        pass                                   # already a tensor
+    if hasattr(enc, "dim") and enc.dim() == 1:
+        enc = enc.unsqueeze(0)                 # -> (1, L)
     return enc.to(device)
 
 
