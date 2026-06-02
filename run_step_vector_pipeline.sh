@@ -151,7 +151,7 @@ for subset in "${SUBSETS[@]}"; do
             echo
             echo "--- subset=$subset  band=$band  metric=$metric ---"
             if [ -f "$log" ]; then
-                grep -E "AUROC\(n_steps\)|last|mean|linear|step_exp|best weighting|rho\(|carries a length|does not clearly" "$log" \
+                grep -E "AUROC\(n_steps\)|last|mean|linear|step_exp|best weighting|rho\(|Step-aggregation|Identity check|rho =|carries a length|does not clearly" "$log" \
                     || echo "(no matching lines)"
             else
                 echo "(log missing)"

@@ -140,19 +140,53 @@ def per_step_band_avg(M, cols):
         return np.nanmean(M, axis=1)
 
 
+def step_agg_scalar(ps, agg="mean"):
+    """Aggregate a (T,) per-step series into one scalar (NaN-aware, finite steps in order).
+
+    mean/std/max/min/range/last : summary statistics over steps
+    slope                       : OLS trend over step index (does dimensionality diverge?)
+    cusum                       : max one-sided upward CUSUM deviation from the chain's
+                                  own mean -- a localizable spike, not a global level
+    The point of the sweep: mean tests a GLOBAL level shift; max/cusum/slope test a
+    LOCALIZED / DYNAMIC anomaly. Which one wins says whether step-level localization
+    is even possible with this feature.
+    """
+    ps = np.asarray(ps, dtype=np.float64)
+    v = ps[np.isfinite(ps)]
+    if v.size == 0:
+        return float("nan")
+    if agg == "mean":  return float(v.mean())
+    if agg == "std":   return float(v.std())
+    if agg == "max":   return float(v.max())
+    if agg == "min":   return float(v.min())
+    if agg == "range": return float(v.max() - v.min())
+    if agg == "last":  return float(v[-1])
+    if agg == "slope":
+        if v.size < 2:
+            return float("nan")
+        return float(np.polyfit(np.arange(v.size, dtype=np.float64), v, 1)[0])
+    if agg == "cusum":
+        mu = v.mean(); s = 0.0; smax = 0.0
+        for val in v:
+            s = max(0.0, s + (val - mu)); smax = max(smax, s)
+        return float(smax)
+    raise ValueError(f"unknown step agg {agg!r}")
+
+
 def chain_scalar(M, cols, agg="mean"):
     """Band-average a (T, L) matrix over cols, then aggregate over steps."""
-    per_step = per_step_band_avg(M, cols)
-    with np.errstate(invalid="ignore"):
-        if agg == "mean":
-            return float(np.nanmean(per_step))
-        if agg == "std":
-            return float(np.nanstd(per_step))
-        if agg == "min":
-            return float(np.nanmin(per_step))
-        if agg == "max":
-            return float(np.nanmax(per_step))
-    return float("nan")
+    return step_agg_scalar(per_step_band_avg(M, cols), agg)
+
+
+def layer_feat(Mobj, li, N):
+    """Per-chain step-mean of one single layer li -> (N,) feature."""
+    out = np.full(N, np.nan)
+    for i in range(N):
+        col = np.asarray(Mobj[i], dtype=np.float64)[:, li]
+        col = col[np.isfinite(col)]
+        if col.size:
+            out[i] = col.mean()
+    return out
 
 
 def main():
@@ -164,6 +198,10 @@ def main():
                     help="pr = participation ratio, ae = activation entropy")
     ap.add_argument("--n_match_bins", type=int, default=8)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--step_aggs", default="mean,max,std,slope,cusum",
+                    help="comma list of step-level aggregations to sweep (section c)")
+    ap.add_argument("--per_layer", action="store_true",
+                    help="also print the per-layer matchAUROC profile (section d)")
     ap.add_argument("--output", default="data/step_vector_analysis.npz")
     args = ap.parse_args()
 
@@ -184,7 +222,7 @@ def main():
     L_sub = PR[modes[0]][0].shape[1]
     cols = band_indices(L_sub, args.layer_band)
     metric_name = "participation_ratio" if args.metric == "pr" else "activation_entropy"
-    print(f"Loaded {N} chains, L_sub={L_sub}, band={args.layer_band} -> cols {list(cols)}")
+    print(f"Loaded {N} chains, L_sub={L_sub}, band={args.layer_band} -> cols {[int(c) for c in cols]}")
     print(f"  metric: {metric_name}   modes: {modes}")
     print(f"  labels: {int(y.sum())} error / {int((1 - y).sum())} correct")
 
@@ -233,6 +271,64 @@ def main():
         rhos[m] = dict(rho=rho, n=n_pairs)
         print(f"  rho({m:8s}, out_entropy) = {rho:7.4f}   (n={n_pairs} steps)")
 
+    # --- (c) STEP-AGGREGATION sweep: global level shift vs localizable spike? ---
+    step_aggs = [s.strip() for s in args.step_aggs.split(",") if s.strip()]
+    print("\n=== (c) Step-aggregation sweep (matchAUROC; mean=global level, "
+          "max/cusum=localized spike, slope=divergence) ===")
+    print("mode      " + "".join(f"{a:>10s}" for a in step_aggs))
+    agg_results = {}
+    for m in modes:
+        row = {}
+        cells = []
+        for agg in step_aggs:
+            feat = np.array([step_agg_scalar(per_step_band_avg(PR[m][i], cols), agg)
+                             for i in range(N)], dtype=np.float64)
+            a_sub, _ = auroc_bestdir(feat[sub], y[sub])
+            row[agg] = a_sub
+            cells.append(f"{a_sub:10.4f}")
+        agg_results[m] = row
+        print(f"{m:10s}" + "".join(cells))
+
+    # --- (d) PER-LAYER profile: which single layers carry the signal? ---
+    per_layer = None
+    layers_used = (data["layers_used"] if "layers_used" in data
+                   else np.arange(L_sub)).astype(int)
+    if args.per_layer:
+        print("\n=== (d) Per-layer matchAUROC profile (step-mean; ALL layers; "
+              "DIAGNOSTIC -- do not cherry-pick the best layer on small N) ===")
+        print("layer       " + "".join(f"{m:>10s}" for m in modes))
+        per_layer = np.full((L_sub, len(modes)), np.nan)
+        for li in range(L_sub):
+            cells = []
+            for mi, m in enumerate(modes):
+                feat = layer_feat(PR[m], li, N)
+                a_sub, _ = auroc_bestdir(feat[sub], y[sub])
+                per_layer[li, mi] = a_sub
+                cells.append(f"{a_sub:10.4f}")
+            net = int(layers_used[li]) if li < len(layers_used) else li
+            print(f"L{li:02d}(net{net:>2d}) " + "".join(cells))
+        print("  best single layer per mode:")
+        for mi, m in enumerate(modes):
+            bi = int(np.nanargmax(per_layer[:, mi]))
+            net = int(layers_used[bi]) if bi < len(layers_used) else bi
+            print(f"    {m:10s} layer idx {bi} (net {net}) "
+                  f"matchAUROC={per_layer[bi, mi]:.4f}")
+
+    # --- (e) IDENTITY check: is participation just effective rank D in disguise? ---
+    rho_D = float("nan")
+    if "M_D" in data:
+        M_D = data["M_D"]
+        best_overlap = max(
+            modes, key=lambda m: results[m]["matched"]
+            if np.isfinite(results[m]["matched"]) else -1.0)
+        chainD = np.array([chain_scalar(M_D[i], cols, "mean") for i in range(N)],
+                          dtype=np.float64)
+        rho_D, nD = spearman(results[best_overlap]["feat"], chainD)
+        print(f"\n=== (e) Identity check: rho(chain-mean {metric_name} [{best_overlap}], "
+              f"chain-mean effective-rank M_D) ===")
+        print(f"  rho = {rho_D:.4f}  (n={nD})   "
+              f"[|rho|->1 means participation ~ effective-rank D, NOT a new signal]")
+
     # --- save ---
     np.savez(
         args.output,
@@ -246,6 +342,11 @@ def main():
         results=np.array({m: {k: v for k, v in results[m].items() if k != "feat"}
                           for m in modes}, dtype=object),
         rhos=np.array(rhos, dtype=object),
+        step_aggs=np.array(step_aggs, dtype=object),
+        agg_results=np.array(agg_results, dtype=object),
+        per_layer_auroc=(per_layer if per_layer is not None
+                         else np.array(None, dtype=object)),
+        rho_participation_vs_D=np.array(rho_D),
     )
     print(f"\nSaved -> {args.output}")
 
