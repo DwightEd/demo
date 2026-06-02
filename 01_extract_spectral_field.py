@@ -150,6 +150,8 @@ def extract_spectral_field(
     tle_k: int | None = None,
     step_vectors: bool = False,
     sv_modes: tuple[str, ...] = ("last", "mean", "linear", "step_exp"),
+    whiten: dict | None = None,
+    whiten_eps: float = 1e-6,
 ):
     """Run one forward pass and reduce each (step, layer) token cloud to (D, V, C).
 
@@ -269,9 +271,18 @@ def extract_spectral_field(
                 # H_jl is the (possibly projected) step token cloud, in token
                 # order. Aggregate with each weighting mode, then measure how
                 # many dimensions the resulting step vector activates.
+                # If `whiten` is given (per-layer healthy mean/std), express the
+                # step vector as a per-dimension deviation from healthy reasoning
+                # BEFORE counting active dims -> "how many dims are abnormally
+                # active vs correct" (the anchor). Use raw (un-L2-normalized)
+                # vectors then, since the deviation magnitude is the signal.
+                wl = whiten.get(l) if whiten is not None else None
                 for m in sv_modes:
-                    z = step_vector(H_jl, mode=m, l2_normalize=True)
+                    z = step_vector(H_jl, mode=m, l2_normalize=(wl is None))
                     if z is not None:
+                        if wl is not None:
+                            mu_l, sg_l = wl
+                            z = (z - mu_l) / (sg_l + whiten_eps)
                         sv_pr[m][row, li] = participation_ratio(z)
                         sv_ae[m][row, li] = activation_entropy(z)
 

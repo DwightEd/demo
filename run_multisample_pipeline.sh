@@ -44,6 +44,13 @@ NO_SUBSPACE=${NO_SUBSPACE:-1}
 SUBSPACE_FLAG=""
 [ "$NO_SUBSPACE" = "1" ] && SUBSPACE_FLAG="--no_reasoning_subspace"
 
+# WHITEN_BASELINE=path/to/healthy_baseline.npz -> anchor-faithful participation
+# (per-dim standardize each step vector vs correct reasoning before PR/AE).
+# Build it first with build_healthy_baseline.py (same subspace setting!).
+WHITEN_BASELINE=${WHITEN_BASELINE:-}
+WHITEN_FLAG=""
+[ -n "$WHITEN_BASELINE" ] && WHITEN_FLAG="--whiten_baseline $WHITEN_BASELINE"
+
 FORCE=${FORCE:-0}
 
 export HF_ENDPOINT="https://hf-mirror.com"
@@ -64,6 +71,7 @@ echo "MODEL_DIR  = $MODEL_DIR"
 echo "DATASET    = $DATASET_FORMAT:$DATASET/$SUBSET"
 echo "N_PROBLEMS = $N_PROBLEMS   K = $K   TEMP = $TEMP"
 echo "SUBSPACE   = $([ "$NO_SUBSPACE" = "1" ] && echo 'OFF (full space, clean)' || echo 'ON (HARP projection)')"
+echo "WHITEN     = $([ -n "$WHITEN_BASELINE" ] && echo "ON ($WHITEN_BASELINE)" || echo 'OFF (raw participation)')"
 
 # ---- 1) sample + extract (GPU) ----
 if [ -f "$npz" ] && [ "$FORCE" != "1" ]; then
@@ -74,7 +82,7 @@ else
         --dataset_format "$DATASET_FORMAT" --dataset "$DATASET" --subset "$SUBSET" \
         --n_problems "$N_PROBLEMS" --k_samples "$K" \
         --temperature "$TEMP" --top_p "$TOP_P" --max_new_tokens "$MAX_NEW" \
-        --seed "$SEED" $SUBSPACE_FLAG --output "$npz" \
+        --seed "$SEED" $SUBSPACE_FLAG $WHITEN_FLAG --output "$npz" \
         2>&1 | tee "logs/gsm8k_multisample_extract.log"
 fi
 

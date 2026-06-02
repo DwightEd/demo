@@ -228,6 +228,10 @@ def main():
     ap.add_argument("--reasoning_threshold", type=float, default=0.95)
     ap.add_argument("--unembedding_cache", default="data/unembedding_svd.npz")
     ap.add_argument("--sv_modes", default="last,mean,linear,step_exp")
+    ap.add_argument("--whiten_baseline", default=None,
+                    help="healthy_baseline.npz from build_healthy_baseline.py: "
+                         "standardize each step vector per-dim vs correct reasoning "
+                         "BEFORE participation (the anchor-faithful 'abnormal dims').")
     ap.add_argument("--output", default="data/gsm8k_multisample_sv.npz")
     args = ap.parse_args()
 
@@ -262,6 +266,23 @@ def main():
     layer_indices = None if args.layers == "all" else \
         [int(x) for x in args.layers.split(",") if x.strip()]
     sv_modes = tuple(args.sv_modes.split(","))
+
+    # Optional healthy baseline -> per-layer (mu, sigma) for vector-level
+    # standardization of step vectors before participation (the anchor).
+    whiten = None
+    if args.whiten_baseline:
+        wb = np.load(args.whiten_baseline, allow_pickle=True)
+        if bool(wb["reasoning_subspace_used"]) != (V_R is not None):
+            raise SystemExit(
+                "whiten_baseline subspace setting != extraction setting "
+                f"(baseline projected={bool(wb['reasoning_subspace_used'])}, "
+                f"eval projected={V_R is not None}). Rebuild with matching setting.")
+        wlayers = wb["whiten_layers"].astype(int)
+        wmu, wsg = wb["whiten_mu"].astype(np.float64), wb["whiten_sigma"].astype(np.float64)
+        whiten = {int(l): (wmu[i], wsg[i]) for i, l in enumerate(wlayers)
+                  if np.isfinite(wmu[i]).all()}
+        print(f"  whitening ON: healthy baseline over {len(whiten)} layers "
+              f"(d={wmu.shape[1]}) from {args.whiten_baseline}")
 
     print(f"Loading problems ({args.dataset_format}: {args.dataset} / {args.subset}) ...")
     problems = load_problems(args)
@@ -308,7 +329,7 @@ def main():
                 M_D, _, _, kept_steps, layers_used, _, _, SV = _ex.extract_spectral_field(
                     model, tokenizer, extract_prompt, response, steps, device,
                     layer_indices=layer_indices, max_seq_len=args.max_seq_len,
-                    V_R=V_R, step_vectors=True, sv_modes=sv_modes)
+                    V_R=V_R, step_vectors=True, sv_modes=sv_modes, whiten=whiten)
             except Exception as e:
                 print(f"  warn: extraction failed (p{pi} s{si}): {e}")
                 n_dropped += 1
@@ -347,6 +368,8 @@ def main():
         sv_modes=np.array(modes, dtype=object),
         model_name=np.array(args.model),
         dataset=np.array(f"{args.dataset_format}:{args.dataset}/{args.subset}"),
+        whitened=np.array(whiten is not None),
+        whiten_baseline=np.array(args.whiten_baseline or ""),
     )
     for m in modes:
         save[f"sv_pr_{m}"] = np.array(
