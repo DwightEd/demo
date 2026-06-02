@@ -186,17 +186,14 @@ def load_problems(args):
 
 def build_gen_inputs(tokenizer, question, device):
     messages = [{"role": "user", "content": PROMPT_TEMPLATE.format(q=question)}]
-    enc = tokenizer.apply_chat_template(
-        messages, add_generation_prompt=True, return_tensors="pt")
-    # apply_chat_template may return a tensor, a dict, or a BatchEncoding
-    # (a UserDict, so NOT caught by isinstance(dict)). Extract input_ids robustly.
-    try:
-        enc = enc["input_ids"]
-    except (TypeError, KeyError, IndexError):
-        pass                                   # already a tensor
-    if hasattr(enc, "dim") and enc.dim() == 1:
-        enc = enc.unsqueeze(0)                 # -> (1, L)
-    return enc.to(device)
+    # Render the chat string first (tokenize=False), then tokenize explicitly:
+    # apply_chat_template's tensor/BatchEncoding return type varies by version,
+    # but tokenizer(...) ALWAYS returns a BatchEncoding whose ["input_ids"] is a
+    # (1, L) tensor. add_special_tokens=False: the template already adds them.
+    text = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False)
+    enc = tokenizer(text, return_tensors="pt", add_special_tokens=False)
+    return enc["input_ids"].to(device)
 
 
 def main():
