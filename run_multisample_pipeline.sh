@@ -18,9 +18,11 @@
 set -euo pipefail
 
 MODEL_DIR="/gz-data/models/Meta-Llama-3.1-8B-Instruct"
-DATASET_NAME=${DATASET_NAME:-openai/gsm8k}
-DATASET_CONFIG=${DATASET_CONFIG:-main}
-SPLIT=${SPLIT:-test}
+# Use the LOCAL ProcessBench (gsm8k subset): problem = GSM8K question, gold is
+# derived from correct (label==-1) solutions. No external dataset needed.
+DATASET_FORMAT=${DATASET_FORMAT:-processbench}
+DATASET=${DATASET:-/gz-data/research/demo/data/hf_datasets/ProcessBench}
+SUBSET=${SUBSET:-gsm8k}
 
 N_PROBLEMS=${N_PROBLEMS:-300}
 K=${K:-8}
@@ -51,7 +53,7 @@ mkdir -p data output logs "$HF_DATASETS_CACHE"
 npz="data/gsm8k_multisample_sv.npz"
 
 echo "MODEL_DIR  = $MODEL_DIR"
-echo "DATASET    = $DATASET_NAME/$DATASET_CONFIG/$SPLIT"
+echo "DATASET    = $DATASET_FORMAT:$DATASET/$SUBSET"
 echo "N_PROBLEMS = $N_PROBLEMS   K = $K   TEMP = $TEMP"
 
 # ---- 1) sample + extract (GPU) ----
@@ -60,7 +62,7 @@ if [ -f "$npz" ] && [ "$FORCE" != "1" ]; then
 else
     python 10_sample_and_extract.py \
         --model "$MODEL_DIR" \
-        --dataset_name "$DATASET_NAME" --dataset_config "$DATASET_CONFIG" --split "$SPLIT" \
+        --dataset_format "$DATASET_FORMAT" --dataset "$DATASET" --subset "$SUBSET" \
         --n_problems "$N_PROBLEMS" --k_samples "$K" \
         --temperature "$TEMP" --top_p "$TOP_P" --max_new_tokens "$MAX_NEW" \
         --seed "$SEED" --output "$npz" \

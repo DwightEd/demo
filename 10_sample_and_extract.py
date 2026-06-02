@@ -141,6 +141,49 @@ PROMPT_TEMPLATE = (
 )
 
 
+def load_problems(args):
+    """Return a list of (question, gold_number) pairs.
+
+    gsm8k       : openai/gsm8k, gold = number after '#### ' in the answer field.
+    processbench: LOCAL ProcessBench dir, split=subset. The `problem` is the
+                  GSM8K question; gold is taken from an explicit gold field if
+                  present, else derived from a CORRECT solution (label==-1 /
+                  final_answer_correct) whose final answer is the gold by
+                  definition. No external dataset / no LLM judge needed.
+    """
+    if args.dataset_format == "gsm8k":
+        ds = load_dataset(args.dataset, args.subset, split=args.split)
+        out = []
+        for ex in ds:
+            g = gold_answer(ex["answer"])
+            if g is not None:
+                out.append((ex["question"], g))
+        return out
+
+    ds = load_dataset(args.dataset, split=args.subset)   # ProcessBench local dir
+    gold_fields = ["answer", "final_answer", "gt_answer", "ground_truth",
+                   "gold_answer"]
+    probs = {}
+    for ex in ds:
+        prob = ex.get("problem")
+        if not prob:
+            continue
+        gold = None
+        for f in gold_fields:
+            if ex.get(f) is not None:
+                gold = _to_number(str(ex[f]))
+                if gold is not None:
+                    break
+        if gold is None:
+            lab = int(ex.get("label", -1))
+            fac = ex.get("final_answer_correct", None)
+            if lab == -1 or fac is True:        # a correct solution -> gold
+                gold = predicted_answer("\n".join(ex.get("steps", []) or []))
+        if gold is not None and prob not in probs:
+            probs[prob] = gold
+    return list(probs.items())
+
+
 def build_gen_inputs(tokenizer, question, device):
     messages = [{"role": "user", "content": PROMPT_TEMPLATE.format(q=question)}]
     enc = tokenizer.apply_chat_template(
@@ -153,9 +196,16 @@ def build_gen_inputs(tokenizer, question, device):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="meta-llama/Llama-3.1-8B-Instruct")
-    ap.add_argument("--dataset_name", default="openai/gsm8k")
-    ap.add_argument("--dataset_config", default="main")
-    ap.add_argument("--split", default="test")
+    ap.add_argument("--dataset_format", default="processbench",
+                    choices=["gsm8k", "processbench"],
+                    help="gsm8k=openai/gsm8k (needs net); processbench=local "
+                         "ProcessBench dir (problem + gold derived from correct "
+                         "solutions).")
+    ap.add_argument("--dataset", default="data/hf_datasets/ProcessBench",
+                    help="HF name (gsm8k) or local path (processbench).")
+    ap.add_argument("--subset", default="gsm8k",
+                    help="processbench split / gsm8k config.")
+    ap.add_argument("--split", default="test", help="only used for gsm8k format.")
     ap.add_argument("--n_problems", type=int, default=300)
     ap.add_argument("--k_samples", type=int, default=8,
                     help="solutions sampled per problem")
@@ -208,11 +258,13 @@ def main():
         [int(x) for x in args.layers.split(",") if x.strip()]
     sv_modes = tuple(args.sv_modes.split(","))
 
-    print(f"Loading {args.dataset_name}/{args.dataset_config} split={args.split} ...")
-    ds = load_dataset(args.dataset_name, args.dataset_config, split=args.split)
-    n_prob = min(args.n_problems, len(ds))
-    print(f"  using {n_prob} problems x K={args.k_samples} samples "
-          f"(T={args.temperature}, top_p={args.top_p})")
+    print(f"Loading problems ({args.dataset_format}: {args.dataset} / {args.subset}) ...")
+    problems = load_problems(args)
+    if not problems:
+        raise SystemExit("No problems with a usable gold answer were found.")
+    n_prob = min(args.n_problems, len(problems))
+    print(f"  {len(problems)} problems with gold; using {n_prob} "
+          f"x K={args.k_samples} samples (T={args.temperature}, top_p={args.top_p})")
 
     rows = []
     n_gen = n_correct = n_dropped = 0
@@ -222,9 +274,7 @@ def main():
         pad_token_id=tokenizer.pad_token_id)
 
     for pi in tqdm(range(n_prob), desc="problems"):
-        ex = ds[pi]
-        question = ex["question"] if "question" in ex else ex.get("problem", "")
-        gold = gold_answer(ex["answer"]) if "answer" in ex else None
+        question, gold = problems[pi]
         if gold is None:
             continue
 
@@ -290,7 +340,7 @@ def main():
         sv_stored=np.array(True),
         sv_modes=np.array(modes, dtype=object),
         model_name=np.array(args.model),
-        dataset=np.array(f"{args.dataset_name}/{args.dataset_config}/{args.split}"),
+        dataset=np.array(f"{args.dataset_format}:{args.dataset}/{args.subset}"),
     )
     for m in modes:
         save[f"sv_pr_{m}"] = np.array(
