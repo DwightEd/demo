@@ -36,6 +36,13 @@ METRICS=(${METRICS:-ae pr})
 MODE=${MODE:-step_exp}
 EARLY=${EARLY:-3}
 
+# NO_SUBSPACE=1 -> compute participation in the FULL hidden space (no HARP
+# reasoning-subspace projection). This is the cleanest, choice-free setting; the
+# projection is an UNVALIDATED transform (never ablated for participation).
+NO_SUBSPACE=${NO_SUBSPACE:-0}
+SUBSPACE_FLAG=""
+[ "$NO_SUBSPACE" = "1" ] && SUBSPACE_FLAG="--no_reasoning_subspace"
+
 FORCE=${FORCE:-0}
 
 export HF_ENDPOINT="https://hf-mirror.com"
@@ -55,6 +62,7 @@ npz="data/gsm8k_multisample_sv.npz"
 echo "MODEL_DIR  = $MODEL_DIR"
 echo "DATASET    = $DATASET_FORMAT:$DATASET/$SUBSET"
 echo "N_PROBLEMS = $N_PROBLEMS   K = $K   TEMP = $TEMP"
+echo "SUBSPACE   = $([ "$NO_SUBSPACE" = "1" ] && echo 'OFF (full space, clean)' || echo 'ON (HARP projection)')"
 
 # ---- 1) sample + extract (GPU) ----
 if [ -f "$npz" ] && [ "$FORCE" != "1" ]; then
@@ -65,7 +73,7 @@ else
         --dataset_format "$DATASET_FORMAT" --dataset "$DATASET" --subset "$SUBSET" \
         --n_problems "$N_PROBLEMS" --k_samples "$K" \
         --temperature "$TEMP" --top_p "$TOP_P" --max_new_tokens "$MAX_NEW" \
-        --seed "$SEED" --output "$npz" \
+        --seed "$SEED" $SUBSPACE_FLAG --output "$npz" \
         2>&1 | tee "logs/gsm8k_multisample_extract.log"
 fi
 
