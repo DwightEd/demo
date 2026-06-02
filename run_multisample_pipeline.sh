@@ -36,10 +36,11 @@ METRICS=(${METRICS:-ae pr})
 MODE=${MODE:-step_exp}
 EARLY=${EARLY:-3}
 
-# NO_SUBSPACE=1 -> compute participation in the FULL hidden space (no HARP
-# reasoning-subspace projection). This is the cleanest, choice-free setting; the
-# projection is an UNVALIDATED transform (never ablated for participation).
-NO_SUBSPACE=${NO_SUBSPACE:-0}
+# DEFAULT = full hidden space, NO HARP projection (cleanest, choice-free). The
+# HARP reasoning-subspace projection is an UNVALIDATED transform (never ablated
+# for participation; the geometry experiments run inside it largely failed), so
+# it is OFF by default here. Set NO_SUBSPACE=0 to explicitly opt back into it.
+NO_SUBSPACE=${NO_SUBSPACE:-1}
 SUBSPACE_FLAG=""
 [ "$NO_SUBSPACE" = "1" ] && SUBSPACE_FLAG="--no_reasoning_subspace"
 
