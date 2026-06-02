@@ -1,0 +1,28 @@
+Loaded 99 chains, L_sub=33, band=mid -> cols [np.int64(9), np.int64(10), np.int64(11), np.int64(12), np.int64(13), np.int64(14), np.int64(15), np.int64(16), np.int64(17), np.int64(18), np.int64(19), np.int64(20), np.int64(21), np.int64(22)]
+  labels: 50 error / 49 correct
+
+=== Length baseline (the thing to beat) ===
+  AUROC(n_steps)              = 0.5412  (dir +)
+  matched: 78 chains, AUROC(n_steps|matched) = 0.5030  (~0.5)
+
+=== CIM metrics & joint anchors (RAW vs MATCHED vs partial-rho) ===
+feature                    rawAUROC dir  matchAUROC  partial_rho|len
+mean_D(linear)               0.5714   +      0.5608           0.1058
+mean_V(energy)               0.5882   +      0.5759           0.1071
+mean_Dtle                    0.6041   +      0.5924           0.2264
+mean_Vld                     0.5743   +      0.5628           0.1112
+std_Dtle                     0.5800   -      0.5477          -0.2256
+std_Vld                      0.5580   +      0.5352          -0.0622
+Vld_over_Dtle                0.5845   +      0.5707           0.0858
+Vld/exp(0.1*Dtle)            0.5784   +      0.5628           0.0927
+Vld-0.1*Dtle                 0.5743   +      0.5628           0.1104
+Vld-0.5*Dtle                 0.5739   +      0.5621           0.1075
+Vld-1.0*Dtle                 0.5743   +      0.5621           0.1069
+
+Saved -> data/gsm8k_cim_analysis_mid.npz
+
+=== VERDICT ===
+  linear mean_D matched AUROC (the 0.62 baseline) = 0.5608
+  best feature here: mean_Dtle = 0.5924
+  -> CIM-faithful metric BEATS linear mean_D. The 'low-dim + non-degenerate'
+     anchor adds signal. Promote 'mean_Dtle' to the next stage.

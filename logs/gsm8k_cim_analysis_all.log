@@ -1,0 +1,29 @@
+Loaded 99 chains, L_sub=33, band=all -> cols [np.int64(0), np.int64(1), np.int64(2), np.int64(3), np.int64(4), np.int64(5), np.int64(6), np.int64(7), np.int64(8), np.int64(9), np.int64(10), np.int64(11), np.int64(12), np.int64(13), np.int64(14), np.int64(15), np.int64(16), np.int64(17), np.int64(18), np.int64(19), np.int64(20), np.int64(21), np.int64(22), np.int64(23), np.int64(24), np.int64(25), np.int64(26), np.int64(27), np.int64(28), np.int64(29), np.int64(30), np.int64(31), np.int64(32)]
+  labels: 50 error / 49 correct
+
+=== Length baseline (the thing to beat) ===
+  AUROC(n_steps)              = 0.5412  (dir +)
+  matched: 78 chains, AUROC(n_steps|matched) = 0.5030  (~0.5)
+
+=== CIM metrics & joint anchors (RAW vs MATCHED vs partial-rho) ===
+feature                    rawAUROC dir  matchAUROC  partial_rho|len
+mean_D(linear)               0.5735   +      0.5648           0.1080
+mean_V(energy)               0.6016   +      0.5773           0.1221
+mean_Dtle                    0.5796   +      0.5457           0.1445
+mean_Vld                     0.5739   +      0.5595           0.1036
+std_Dtle                     0.5673   -      0.5358          -0.2183
+std_Vld                      0.5637   +      0.5365          -0.0521
+Vld_over_Dtle                0.5927   +      0.5799           0.1089
+Vld/exp(0.1*Dtle)            0.5861   +      0.5713           0.1070
+Vld-0.1*Dtle                 0.5731   +      0.5588           0.1016
+Vld-0.5*Dtle                 0.5739   +      0.5595           0.1019
+Vld-1.0*Dtle                 0.5763   +      0.5615           0.1053
+
+Saved -> data/gsm8k_cim_analysis_all.npz
+
+=== VERDICT ===
+  linear mean_D matched AUROC (the 0.62 baseline) = 0.5648
+  best feature here: Vld_over_Dtle = 0.5799
+  -> No CIM-faithful metric clearly beats linear mean_D on this band.
+     The anchor's single-chain signal is capped near the mean_D level;
+     try other bands, or move to a learned aggregator (trajectory model).
