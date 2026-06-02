@@ -51,6 +51,19 @@ ANALYSIS_SEED=${ANALYSIS_SEED:-0}
 # also compute CIM metrics in the same forward pass (1) or not (0)
 WITH_CIM=${WITH_CIM:-1}
 
+# DEFAULT full hidden space, no HARP projection (clean; projection unvalidated).
+# NO_SUBSPACE=0 to opt back into the HARP projection.
+NO_SUBSPACE=${NO_SUBSPACE:-1}
+SUBSPACE_FLAG=""
+[ "$NO_SUBSPACE" = "1" ] && SUBSPACE_FLAG="--no_reasoning_subspace"
+
+# STORE_VECTORS=1 -> also save raw step vectors (fp16) so participation can be
+# re-normalized (raw / healthy-standardized) in analysis WITHOUT re-extracting.
+# Big with 4 modes; set SV_MODES=step_exp to keep it small.
+STORE_VECTORS=${STORE_VECTORS:-0}
+STORE_FLAG=""
+[ "$STORE_VECTORS" = "1" ] && STORE_FLAG="--store_vectors"
+
 # skip re-extraction if *_sv.npz exists (FORCE=1 to redo)
 FORCE=${FORCE:-0}
 
@@ -86,6 +99,8 @@ echo "SUBSETS     = ${SUBSETS[*]}"
 echo "SV_MODES    = $SV_MODES"
 echo "BANDS       = ${BANDS[*]}    METRICS = ${METRICS[*]}"
 echo "WITH_CIM    = $WITH_CIM"
+echo "SUBSPACE    = $([ "$NO_SUBSPACE" = "1" ] && echo 'OFF (full space, clean)' || echo 'ON (HARP projection)')"
+echo "STORE_VEC   = $([ "$STORE_VECTORS" = "1" ] && echo 'ON' || echo 'OFF')"
 
 TIMINGS=()
 
@@ -113,7 +128,7 @@ for subset in "${SUBSETS[@]}"; do
             --seed "$SEED" \
             --step_vectors \
             --sv_modes "$SV_MODES" \
-            $CIM_FLAG \
+            $CIM_FLAG $SUBSPACE_FLAG $STORE_FLAG \
             --output "$npz" \
             2>&1 | tee "logs/${subset}_sv_extract.log"
     fi

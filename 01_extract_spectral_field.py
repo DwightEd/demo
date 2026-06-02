@@ -152,6 +152,7 @@ def extract_spectral_field(
     sv_modes: tuple[str, ...] = ("last", "mean", "linear", "step_exp"),
     whiten: dict | None = None,
     whiten_eps: float = 1e-6,
+    store_vectors: bool = False,
 ):
     """Run one forward pass and reduce each (step, layer) token cloud to (D, V, C).
 
@@ -229,10 +230,15 @@ def extract_spectral_field(
     SV = None
     sv_pr = sv_ae = None
     out_entropy = None
+    sv_vec = None
     if step_vectors:
         sv_pr = {m: np.full((T_eff, L_sub), np.nan, dtype=np.float32) for m in sv_modes}
         sv_ae = {m: np.full((T_eff, L_sub), np.nan, dtype=np.float32) for m in sv_modes}
         out_entropy = np.full(T_eff, np.nan, dtype=np.float32)
+        # optional: keep the raw (un-normalized) step vectors so participation can
+        # be re-normalized (raw / healthy-standardized / whitened) in analysis
+        # WITHOUT re-running the model. Lazily sized once d is known.
+        sv_vec = {m: None for m in sv_modes} if store_vectors else None
 
     for li, l in enumerate(layer_indices):
         H_l = hidden_states[l][0].float().cpu().numpy()  # (seq_len, d)
@@ -277,14 +283,22 @@ def extract_spectral_field(
                 # active vs correct" (the anchor). Use raw (un-L2-normalized)
                 # vectors then, since the deviation magnitude is the signal.
                 wl = whiten.get(l) if whiten is not None else None
+                # store raw (un-normalized) vectors when keeping them for analysis
+                l2 = (wl is None) and not store_vectors
                 for m in sv_modes:
-                    z = step_vector(H_jl, mode=m, l2_normalize=(wl is None))
+                    z = step_vector(H_jl, mode=m, l2_normalize=l2)
                     if z is not None:
+                        if store_vectors:
+                            if sv_vec[m] is None:
+                                sv_vec[m] = np.full((T_eff, L_sub, z.shape[0]),
+                                                    np.nan, dtype=np.float16)
+                            sv_vec[m][row, li] = z.astype(np.float16)
+                        z_metric = z
                         if wl is not None:
                             mu_l, sg_l = wl
-                            z = (z - mu_l) / (sg_l + whiten_eps)
-                        sv_pr[m][row, li] = participation_ratio(z)
-                        sv_ae[m][row, li] = activation_entropy(z)
+                            z_metric = (z - mu_l) / (sg_l + whiten_eps)
+                        sv_pr[m][row, li] = participation_ratio(z_metric)
+                        sv_ae[m][row, li] = activation_entropy(z_metric)
 
     # Per-step output-token entropy (layer-independent): entropy of the model's
     # next-token distribution at the step's last token position. Tests whether
@@ -308,6 +322,8 @@ def extract_spectral_field(
     if step_vectors:
         SV = {"pr": sv_pr, "ae": sv_ae, "out_entropy": out_entropy,
               "modes": list(sv_modes)}
+        if store_vectors:
+            SV["vec"] = sv_vec
     return M_D, M_V, M_C, kept_steps, layer_indices, GEOM, CIM, SV
 
 
@@ -388,6 +404,13 @@ def main():
     parser.add_argument("--sv_modes", default="last,mean,linear,step_exp",
                         help="Comma list of step-vector weighting modes to "
                              "compare. step_exp is the Streaming-HD optimum.")
+    parser.add_argument("--store_vectors", action="store_true",
+                        help="Also store the raw (un-normalized) step vectors "
+                             "(fp16) per (step,layer,mode), so participation can be "
+                             "re-normalized (raw / healthy-standardized / whitened) "
+                             "in analysis WITHOUT re-running the model. Storage ~ "
+                             "n_chains x T x L x d x 2 bytes per mode; restrict with "
+                             "--sv_modes step_exp to keep it small.")
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
@@ -460,6 +483,7 @@ def main():
                     tle_k=args.tle_k,
                     step_vectors=args.step_vectors,
                     sv_modes=tuple(args.sv_modes.split(",")) if args.step_vectors else (),
+                    store_vectors=args.store_vectors,
                 )
             except Exception as e:
                 print(f"  warn: extraction failed: {e}")
@@ -571,6 +595,15 @@ def main():
                     [r["SV"]["ae"][m] if r["SV"] else None for r in rows], dtype=object)
             save_dict["sv_out_entropy"] = np.array(
                 [r["SV"]["out_entropy"] if r["SV"] else None for r in rows], dtype=object)
+            # raw step vectors (fp16), for post-hoc re-normalization in analysis
+            if args.store_vectors and rows[0]["SV"].get("vec") is not None:
+                save_dict["sv_vectors_stored"] = np.array(True)
+                for m in modes:
+                    save_dict[f"sv_vec_{m}"] = np.array(
+                        [r["SV"]["vec"][m] if (r["SV"] and r["SV"].get("vec"))
+                         else None for r in rows], dtype=object)
+            else:
+                save_dict["sv_vectors_stored"] = np.array(False)
         else:
             save_dict["sv_stored"] = np.array(False)
     else:
