@@ -64,6 +64,8 @@ def main():
     ap.add_argument("--layer_band", default="mid")
     ap.add_argument("--kfold", type=int, default=5)
     ap.add_argument("--C", type=float, default=0.05, help="inverse L2 strength")
+    ap.add_argument("--n_seeds", type=int, default=5,
+                    help="average the probe over this many group-kfold shufflings")
     ap.add_argument("--metric", default="ae", choices=["pr", "ae"],
                     help="unsupervised baseline metric for comparison")
     ap.add_argument("--seed", type=int, default=0)
@@ -101,42 +103,62 @@ def main():
           f"(d={d}, band={args.layer_band}, mode={args.mode}); "
           f"{int(y.sum())} incorrect / {int((1 - y).sum())} correct")
 
-    # ---- unsupervised baseline: participation of the chain-mean vector ----
-    mfn = participation_ratio if args.metric == "pr" else activation_entropy
-    base = np.array([mfn(X[i]) for i in range(N)])
-
-    # ---- LEARNED probe: group-kfold over problems ----
-    gkf = GroupKFold(n_splits=args.kfold)
-    oof = np.full(N, np.nan)                            # out-of-fold probe scores
-    for tr, te in gkf.split(X, y, groups=problem_ids):
-        clf = make_pipeline(
-            StandardScaler(),
-            LogisticRegression(C=args.C, max_iter=2000, class_weight="balanced"))
-        clf.fit(X[tr], y[tr])
-        oof[te] = clf.predict_proba(X[te])[:, 1]
+    n_steps = (data["n_steps"].astype(float)[ok] if "n_steps" in data
+               else np.full(N, np.nan))
 
     idx_groups = [np.array(v) for v in prob_to_idx.values()
                   if any(y[v] == 1) and any(y[v] == 0)]
     n_contrastive = len(idx_groups)
 
-    base_wa, npair = within_pair_auroc(idx_groups, base, y)
-    probe_wa, _ = within_pair_auroc(idx_groups, oof, y)
-
     def bd(a):
         return (max(a, 1 - a), "+" if a >= 0.5 else "-") if np.isfinite(a) else (a, "?")
-    b_bd, b_d = bd(base_wa); p_bd, p_d = bd(probe_wa)
 
-    print(f"\n=== Within-problem AUROC (group-{args.kfold}fold, held-out problems; "
-          f"{n_contrastive} contrastive problems, {npair} pairs) ===")
+    # ---- baselines: unsupervised participation + LENGTH (the thing to beat) ----
+    mfn = participation_ratio if args.metric == "pr" else activation_entropy
+    base = np.array([mfn(X[i]) for i in range(N)])
+    base_wa, npair = within_pair_auroc(idx_groups, base, y)
+    len_wa, _ = within_pair_auroc(idx_groups, n_steps, y)
+    b_bd, b_d = bd(base_wa); l_bd, l_d = bd(len_wa)
+
+    # ---- LEARNED probe: group-kfold over problems, averaged over seeds ----
+    def group_folds(groups, k, seed):
+        uniq = np.unique(groups); rng = np.random.default_rng(seed); rng.shuffle(uniq)
+        fold_of = {int(g): i % k for i, g in enumerate(uniq)}
+        f = np.array([fold_of[int(g)] for g in groups])
+        return [(np.where(f != j)[0], np.where(f == j)[0]) for j in range(k)]
+
+    seeds = [args.seed + s for s in range(args.n_seeds)]
+    probe_was = []
+    oof_last = None
+    for sd in seeds:
+        oof = np.full(N, np.nan)
+        for tr, te in group_folds(problem_ids, args.kfold, sd):
+            clf = make_pipeline(
+                StandardScaler(),
+                LogisticRegression(C=args.C, max_iter=2000, class_weight="balanced"))
+            clf.fit(X[tr], y[tr])
+            oof[te] = clf.predict_proba(X[te])[:, 1]
+        probe_was.append(within_pair_auroc(idx_groups, oof, y)[0])
+        oof_last = oof
+    probe_was = np.array(probe_was)
+    p_mean, p_std = float(probe_was.mean()), float(probe_was.std())
+    p_d = "+" if p_mean >= 0.5 else "-"; p_bd = max(p_mean, 1 - p_mean)
+
+    print(f"\n=== Within-problem AUROC (group-{args.kfold}fold x {len(seeds)} seeds, "
+          f"held-out problems; {n_contrastive} contrastive problems, {npair} pairs) ===")
     print(f"  unsupervised participation ({args.metric}) = {b_bd:.4f}  (dir {b_d})")
-    print(f"  LEARNED probe (OOF)                        = {p_bd:.4f}  (dir {p_d})")
-    print(f"  -> probe {'LIFTS' if p_bd > b_bd + 0.02 else 'does not lift'} "
-          f"separability (delta {p_bd - b_bd:+.4f}).")
-    print("  (probe scored on UNSEEN problems -> difficulty-controlled + not overfit.)")
+    print(f"  LENGTH baseline (n_steps)                  = {l_bd:.4f}  (dir {l_d})  <- must beat this")
+    print(f"  LEARNED probe (OOF)                        = {p_bd:.4f} +/- {p_std:.4f}  (dir {p_d})")
+    print(f"  -> probe vs length: delta {p_bd - l_bd:+.4f}   probe vs unsup: delta {p_bd - b_bd:+.4f}")
+    if p_bd > l_bd + 0.03:
+        print("  -> probe BEATS the length baseline (signal is not just length).")
+    else:
+        print("  -> probe ~ length: the lift may be length-driven; check.")
 
-    np.savez(args.output, oof=oof, base=base, y=y, problem_ids=problem_ids,
-             probe_within_auroc=np.array(p_bd), base_within_auroc=np.array(b_bd),
-             n_contrastive=np.array(n_contrastive))
+    np.savez(args.output, oof=oof_last, base=base, y=y, problem_ids=problem_ids,
+             n_steps=n_steps, probe_within_auroc=np.array(p_bd),
+             probe_within_std=np.array(p_std), base_within_auroc=np.array(b_bd),
+             length_within_auroc=np.array(l_bd), n_contrastive=np.array(n_contrastive))
     print(f"\nSaved -> {args.output}")
 
 
