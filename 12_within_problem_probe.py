@@ -24,8 +24,8 @@ import numpy as np
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import make_pipeline
+from sklearn.metrics import roc_auc_score
 
 from utils.step_vector import participation_ratio, activation_entropy
 
@@ -120,45 +120,65 @@ def main():
     len_wa, _ = within_pair_auroc(idx_groups, n_steps, y)
     b_bd, b_d = bd(base_wa); l_bd, l_d = bd(len_wa)
 
-    # ---- LEARNED probe: group-kfold over problems, averaged over seeds ----
+    # ---- LEARNED probe under TWO cross-validation regimes (the headline figure):
+    #   group : fold by PROBLEM (test problems unseen) -> difficulty-controlled, honest
+    #   random: fold by SAMPLE (same problem in train AND test) -> difficulty leaks in
+    # The gap = how much cross-problem evaluation inflates the number (our methodology
+    # contribution: most papers do the random/cross-problem version).
     def group_folds(groups, k, seed):
         uniq = np.unique(groups); rng = np.random.default_rng(seed); rng.shuffle(uniq)
         fold_of = {int(g): i % k for i, g in enumerate(uniq)}
         f = np.array([fold_of[int(g)] for g in groups])
         return [(np.where(f != j)[0], np.where(f == j)[0]) for j in range(k)]
 
-    seeds = [args.seed + s for s in range(args.n_seeds)]
-    probe_was = []
-    oof_last = None
-    for sd in seeds:
+    def random_folds(n, k, seed):
+        idx = np.arange(n); rng = np.random.default_rng(seed); rng.shuffle(idx)
+        f = np.empty(n, int); f[idx] = np.arange(n) % k
+        return [(np.where(f != j)[0], np.where(f == j)[0]) for j in range(k)]
+
+    def run_cv(fold_fn):
         oof = np.full(N, np.nan)
-        for tr, te in group_folds(problem_ids, args.kfold, sd):
+        for tr, te in fold_fn:
             clf = make_pipeline(
                 StandardScaler(),
                 LogisticRegression(C=args.C, max_iter=2000, class_weight="balanced"))
             clf.fit(X[tr], y[tr])
             oof[te] = clf.predict_proba(X[te])[:, 1]
-        probe_was.append(within_pair_auroc(idx_groups, oof, y)[0])
-        oof_last = oof
-    probe_was = np.array(probe_was)
-    p_mean, p_std = float(probe_was.mean()), float(probe_was.std())
+        return oof
+
+    seeds = [args.seed + s for s in range(args.n_seeds)]
+    g_within, g_pooled, r_pooled = [], [], []
+    oof_last = None
+    for sd in seeds:
+        oof_g = run_cv(group_folds(problem_ids, args.kfold, sd))
+        oof_r = run_cv(random_folds(N, args.kfold, sd))
+        g_within.append(within_pair_auroc(idx_groups, oof_g, y)[0])
+        g_pooled.append(roc_auc_score(y, oof_g))
+        r_pooled.append(roc_auc_score(y, oof_r))
+        oof_last = oof_g
+    g_within = np.array(g_within); g_pooled = np.array(g_pooled); r_pooled = np.array(r_pooled)
+    p_mean, p_std = float(g_within.mean()), float(g_within.std())
     p_d = "+" if p_mean >= 0.5 else "-"; p_bd = max(p_mean, 1 - p_mean)
 
-    print(f"\n=== Within-problem AUROC (group-{args.kfold}fold x {len(seeds)} seeds, "
-          f"held-out problems; {n_contrastive} contrastive problems, {npair} pairs) ===")
-    print(f"  unsupervised participation ({args.metric}) = {b_bd:.4f}  (dir {b_d})")
-    print(f"  LENGTH baseline (n_steps)                  = {l_bd:.4f}  (dir {l_d})  <- must beat this")
-    print(f"  LEARNED probe (OOF)                        = {p_bd:.4f} +/- {p_std:.4f}  (dir {p_d})")
-    print(f"  -> probe vs length: delta {p_bd - l_bd:+.4f}   probe vs unsup: delta {p_bd - b_bd:+.4f}")
+    print(f"\n=== Probe AUROC, {args.kfold}fold x {len(seeds)} seeds "
+          f"({n_contrastive} contrastive problems, {npair} pairs) ===")
+    print(f"  unsupervised participation ({args.metric})   = {b_bd:.4f}  (dir {b_d})")
+    print(f"  LENGTH baseline (n_steps, within-problem)    = {l_bd:.4f}  (dir {l_d})  <- must beat")
+    print(f"  probe, CROSS-problem (random split, pooled)  = {r_pooled.mean():.4f} +/- {r_pooled.std():.4f}  <- INFLATED")
+    print(f"  probe, within-problem grouping (pooled)      = {g_pooled.mean():.4f} +/- {g_pooled.std():.4f}")
+    print(f"  probe, within-problem PAIRED (honest)        = {p_bd:.4f} +/- {p_std:.4f}  (dir {p_d})  <- HEADLINE")
+    print(f"  -> difficulty-inflation gap (cross - paired) = {r_pooled.mean() - p_bd:+.4f}")
+    print(f"  -> probe vs length: {p_bd - l_bd:+.4f}   probe vs unsup: {p_bd - b_bd:+.4f}")
     if p_bd > l_bd + 0.03:
-        print("  -> probe BEATS the length baseline (signal is not just length).")
-    else:
-        print("  -> probe ~ length: the lift may be length-driven; check.")
+        print("  -> probe BEATS length; and CROSS-problem >> paired shows difficulty inflation.")
 
     np.savez(args.output, oof=oof_last, base=base, y=y, problem_ids=problem_ids,
              n_steps=n_steps, probe_within_auroc=np.array(p_bd),
              probe_within_std=np.array(p_std), base_within_auroc=np.array(b_bd),
-             length_within_auroc=np.array(l_bd), n_contrastive=np.array(n_contrastive))
+             length_within_auroc=np.array(l_bd),
+             probe_cross_pooled=np.array(r_pooled.mean()),
+             probe_group_pooled=np.array(g_pooled.mean()),
+             n_contrastive=np.array(n_contrastive))
     print(f"\nSaved -> {args.output}")
 
 
