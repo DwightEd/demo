@@ -317,6 +317,7 @@ def main():
                 ps_s[p][li] += s; ps_q[p][li] += q; ps_n[p][li] += nr
 
         feat_std = np.full(N, np.nan)
+        feat_mahal = np.full(N, np.nan)
         chains_of = {}
         for i in range(N):
             chains_of.setdefault(int(problem_ids[i]), []).append(i)
@@ -331,28 +332,38 @@ def main():
                 mu = s / n; mu_ex[li] = mu
                 sg_ex[li] = np.sqrt(np.clip(q / n - mu ** 2, 0.0, None))
             for i in members:
-                V = np.asarray(VEC[i], dtype=np.float64); per_step = []
+                V = np.asarray(VEC[i], dtype=np.float64); ps_pr = []; ps_mh = []
                 for t in range(V.shape[0]):
-                    vals = []
+                    vpr = []; vmh = []
                     for li in cols:
                         if li not in mu_ex:
                             continue
                         z = V[t, li, :]
                         if not np.isfinite(z).all():
                             continue
-                        vals.append(mfn((z - mu_ex[li]) / (sg_ex[li] + args.eps)))
-                    if vals:
-                        per_step.append(np.nanmean(vals))
-                feat_std[i] = float(np.nanmean(per_step)) if per_step else np.nan
-        std_full, _ = within_pair_auroc(idx_groups, feat_std, y_inc)
-        print(f"\n=== (F) Healthy-STANDARDIZED participation (anchor; leave-one-"
-              f"problem-out), within-pair AUROC ===")
-        print(f"  raw          within-pair AUROC = {A[m]['full']:.4f}")
-        print(f"  standardized within-pair AUROC = {std_full:.4f}")
-        if np.isfinite(std_full):
-            dlt = std_full - A[m]['full']
-            print(f"  -> standardization {'HELPS' if dlt > 0.02 else ('HURTS' if dlt < -0.02 else 'no change')} "
-                  f"(delta {dlt:+.4f}); this is the anchor-faithful 'abnormal dims vs healthy'.")
+                        zp = (z - mu_ex[li]) / (sg_ex[li] + args.eps)
+                        vpr.append(mfn(zp))           # PR of the deviation vector
+                        vmh.append(float(np.mean(zp ** 2)))  # mean sq z-score = (Mahalanobis^2)/d
+                    if vpr:
+                        ps_pr.append(np.nanmean(vpr)); ps_mh.append(np.nanmean(vmh))
+                feat_std[i] = float(np.nanmean(ps_pr)) if ps_pr else np.nan
+                feat_mahal[i] = float(np.nanmean(ps_mh)) if ps_mh else np.nan
+
+        def _bd(a):
+            return (max(a, 1.0 - a), "+" if a >= 0.5 else "-") if np.isfinite(a) else (a, "?")
+        raw_bd, raw_d = _bd(A[m]["full"])
+        std_bd, std_d = _bd(within_pair_auroc(idx_groups, feat_std, y_inc)[0])
+        mah_bd, mah_d = _bd(within_pair_auroc(idx_groups, feat_mahal, y_inc)[0])
+        print(f"\n=== (F) Healthy-referenced participation (anchor; leave-one-problem-"
+              f"out; best-direction within-pair AUROC) ===")
+        print(f"  raw participation          = {raw_bd:.4f}  (dir {raw_d}: "
+              f"{'failing more diffuse' if raw_d=='+' else 'failing more concentrated'})")
+        print(f"  standardized-PR(deviation) = {std_bd:.4f}  (dir {std_d}: "
+              f"{'failing deviation more diffuse' if std_d=='+' else 'failing deviation more concentrated'})")
+        print(f"  Mahalanobis dist^2/d       = {mah_bd:.4f}  (dir {mah_d}: "
+              f"{'failing FARTHER from healthy' if mah_d=='+' else 'failing closer to healthy'})")
+        print("  NOTE: best-direction (sign theory-fixed: deviation from healthy). "
+              "Mahalanobis = direct 'distance from healthy reasoning'.")
 
     np.savez(args.output,
              modes=np.array(modes, dtype=object), mode=np.array(m),
