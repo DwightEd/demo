@@ -297,24 +297,38 @@ def main():
     std_full = float("nan")
     vkey = f"sv_vec_{m}"
     if bool(data.get("sv_vectors_stored", np.array(False))) and vkey in data:
-        from utils.step_vector import participation_ratio, activation_entropy
-        mfn = participation_ratio if args.metric == "pr" else activation_entropy
         VEC = data[vkey]
+        cols = np.asarray(cols, dtype=int)
+        nc = cols.size
         d = np.asarray(VEC[0]).shape[2]
-        # per-(layer,dim) correct-sample sums: total and per-problem
-        tot_s = np.zeros((L_sub, d)); tot_q = np.zeros((L_sub, d)); tot_n = np.zeros(L_sub)
+
+        def pr_vec(Z):                       # PR over last axis, NaN-safe
+            with np.errstate(invalid="ignore", divide="ignore"):
+                s2 = np.nansum(Z ** 2, axis=-1); s4 = np.nansum(Z ** 4, axis=-1)
+                return np.where(s4 > 1e-12, s2 ** 2 / s4, np.nan)
+
+        def ae_vec(Z):                       # activation entropy over last axis
+            with np.errstate(invalid="ignore", divide="ignore"):
+                s2 = np.nansum(Z ** 2, axis=-1, keepdims=True)
+                P = np.where(s2 > 1e-12, Z ** 2 / s2, 0.0)
+                H = -np.nansum(np.where(P > 1e-12, P * np.log(P), 0.0), axis=-1)
+                return np.where(s2[..., 0] > 1e-12, np.exp(H), np.nan)
+
+        mfn_vec = pr_vec if args.metric == "pr" else ae_vec
+
+        # per-(band-layer, dim) correct-sample sums: total and per-problem (vectorized)
+        tot_s = np.zeros((nc, d)); tot_q = np.zeros((nc, d)); tot_n = np.zeros(nc)
         ps_s, ps_q, ps_n = {}, {}, {}
         for i in np.where(y_inc == 0)[0]:
-            V = np.asarray(VEC[i], dtype=np.float64); p = int(problem_ids[i])
+            V = np.asarray(VEC[i], dtype=np.float64)[:, cols, :]   # (T, nc, d)
+            fin = np.isfinite(V).all(axis=-1)                      # (T, nc)
+            Vz = np.where(fin[..., None], V, 0.0)
+            s = Vz.sum(0); q = (Vz ** 2).sum(0); nr = fin.sum(0)   # (nc,d),(nc,d),(nc,)
+            tot_s += s; tot_q += q; tot_n += nr
+            p = int(problem_ids[i])
             if p not in ps_s:
-                ps_s[p] = np.zeros((L_sub, d)); ps_q[p] = np.zeros((L_sub, d)); ps_n[p] = np.zeros(L_sub)
-            for li in cols:
-                X = V[:, li, :]; X = X[np.isfinite(X).all(axis=1)]
-                if X.size == 0:
-                    continue
-                s = X.sum(0); q = (X ** 2).sum(0); nr = X.shape[0]
-                tot_s[li] += s; tot_q[li] += q; tot_n[li] += nr
-                ps_s[p][li] += s; ps_q[p][li] += q; ps_n[p][li] += nr
+                ps_s[p] = np.zeros((nc, d)); ps_q[p] = np.zeros((nc, d)); ps_n[p] = np.zeros(nc)
+            ps_s[p] += s; ps_q[p] += q; ps_n[p] += nr
 
         feat_std = np.full(N, np.nan)
         feat_mahal = np.full(N, np.nan)
@@ -322,32 +336,21 @@ def main():
         for i in range(N):
             chains_of.setdefault(int(problem_ids[i]), []).append(i)
         for p, members in chains_of.items():
-            mu_ex = {}; sg_ex = {}
-            for li in cols:
-                n = tot_n[li] - (ps_n[p][li] if p in ps_n else 0.0)
-                if n < 2:
-                    continue
-                s = tot_s[li] - (ps_s[p][li] if p in ps_s else 0.0)
-                q = tot_q[li] - (ps_q[p][li] if p in ps_q else 0.0)
-                mu = s / n; mu_ex[li] = mu
-                sg_ex[li] = np.sqrt(np.clip(q / n - mu ** 2, 0.0, None))
+            n = tot_n - ps_n.get(p, 0.0)                           # (nc,)
+            s = tot_s - ps_s.get(p, 0.0); q = tot_q - ps_q.get(p, 0.0)
+            ok = n >= 2
+            nn = np.maximum(n, 1)[:, None]
+            mu = s / nn                                            # (nc,d)
+            sg = np.sqrt(np.clip(q / nn - mu ** 2, 0.0, None))
+            mu[~ok] = np.nan; sg[~ok] = np.nan                     # missing band-layers -> NaN
             for i in members:
-                V = np.asarray(VEC[i], dtype=np.float64); ps_pr = []; ps_mh = []
-                for t in range(V.shape[0]):
-                    vpr = []; vmh = []
-                    for li in cols:
-                        if li not in mu_ex:
-                            continue
-                        z = V[t, li, :]
-                        if not np.isfinite(z).all():
-                            continue
-                        zp = (z - mu_ex[li]) / (sg_ex[li] + args.eps)
-                        vpr.append(mfn(zp))           # PR of the deviation vector
-                        vmh.append(float(np.mean(zp ** 2)))  # mean sq z-score = (Mahalanobis^2)/d
-                    if vpr:
-                        ps_pr.append(np.nanmean(vpr)); ps_mh.append(np.nanmean(vmh))
-                feat_std[i] = float(np.nanmean(ps_pr)) if ps_pr else np.nan
-                feat_mahal[i] = float(np.nanmean(ps_mh)) if ps_mh else np.nan
+                V = np.asarray(VEC[i], dtype=np.float64)[:, cols, :]   # (T, nc, d)
+                Zp = (V - mu[None]) / (sg[None] + args.eps)            # (T, nc, d)
+                pr_tc = mfn_vec(Zp)                                   # (T, nc)
+                mh_tc = np.nanmean(Zp ** 2, axis=-1)                  # (T, nc)
+                with np.errstate(invalid="ignore"):
+                    feat_std[i] = np.nanmean(np.nanmean(pr_tc, axis=1))
+                    feat_mahal[i] = np.nanmean(np.nanmean(mh_tc, axis=1))
 
         def _bd(a):
             return (max(a, 1.0 - a), "+" if a >= 0.5 else "-") if np.isfinite(a) else (a, "?")
