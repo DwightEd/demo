@@ -58,8 +58,14 @@ def main():
     ap.add_argument("--input", required=True, help="multisample npz with stored vectors")
     ap.add_argument("--mode", default="step_exp")
     ap.add_argument("--layer_band", default="mid")
-    ap.add_argument("--shrink", type=float, default=0.1, help="ZCA covariance shrinkage")
+    ap.add_argument("--pca_k", type=int, default=100,
+                    help="PCA dims for well-conditioned full Mahalanobis (n>d so "
+                         "raw d=4096 covariance is rank-deficient)")
+    ap.add_argument("--kfold", type=int, default=5,
+                    help="cross-fit folds over PROBLEMS (healthy stats fit on "
+                         "OTHER problems -> no leakage)")
     ap.add_argument("--topk", type=int, default=50, help="# outlier dims to drop")
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--eps", type=float, default=1e-6)
     ap.add_argument("--output", default="data/norm_ablation.npz")
     args = ap.parse_args()
@@ -91,43 +97,45 @@ def main():
                   if any(y[v] == 1) and any(y[v] == 0)]
     n_contrastive = len(idx_groups)
 
-    # healthy stats from CORRECT chains
-    Xc = X[y == 0]
-    mu = Xc.mean(0)
-    sig = Xc.std(0)
-    Xc0 = Xc - mu
-    Sigma = (Xc0.T @ Xc0) / max(1, Xc0.shape[0] - 1)
-    Sigma = (1 - args.shrink) * Sigma + args.shrink * (np.trace(Sigma) / d) * np.eye(d)
-    w, Q = np.linalg.eigh(Sigma)
-    w = np.clip(w, 1e-8, None)
-    W_zca = (Q * (1.0 / np.sqrt(w))) @ Q.T                    # Sigma^{-1/2}
-    drop = np.argsort(sig)[::-1][:args.topk]                  # highest-variance dims
-    keep_mask = np.ones(d, bool); keep_mask[drop] = False
-
+    Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + args.eps)   # L2-normalized
     print(f"Loaded {N} chains, {n_contrastive} contrastive problems, d={d}, "
-          f"band={args.layer_band}, mode={args.mode}")
-    print(f"  healthy outlier dims (top sigma): max sigma={sig.max():.2f}, "
-          f"median sigma={np.median(sig):.3f}, dropping top {args.topk}")
+          f"band={args.layer_band}, mode={args.mode}; "
+          f"CROSS-FIT {args.kfold}-fold over problems (no leakage), PCA k={args.pca_k}")
 
-    # feature variants (all chain-level)
-    Z_raw = X
-    Z_zscore = (X - mu) / (sig + args.eps)
-    Z_zca = (X - mu) @ W_zca
-    Z_drop = X[:, keep_mask]
+    # ---- cross-fit over problems: healthy stats fit on OTHER problems ----
+    uniq = np.unique(problem_ids); rng = np.random.default_rng(args.seed); rng.shuffle(uniq)
+    fold_of = {int(g): i % args.kfold for i, g in enumerate(uniq)}
+    fold = np.array([fold_of[int(p)] for p in problem_ids])
 
-    feats = {
-        "PR raw":              pr_vec(Z_raw),
-        "PR zscore(diag)":     pr_vec(Z_zscore),
-        "PR drop-top%d" % args.topk: pr_vec(Z_drop),
-        "PR ZCA(full)":        pr_vec(Z_zca),
-        "Mahal diag":          np.sum(Z_zscore ** 2, axis=1),
-        "Mahal full(ZCA)":     np.sum(Z_zca ** 2, axis=1),
-        "Mahal++ (L2norm)":    None,   # filled below
-    }
-    # Mahalanobis++ : L2-normalize x to unit sphere, then diagonal Mahalanobis
-    Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + args.eps)
-    mun = Xn[y == 0].mean(0); sign = Xn[y == 0].std(0)
-    feats["Mahal++ (L2norm)"] = np.sum(((Xn - mun) / (sign + args.eps)) ** 2, axis=1)
+    names = ["PR raw", "PR zscore(diag)", f"PR drop-top{args.topk}", "PR PCA-whiten",
+             "Mahal diag", f"Mahal PCA{args.pca_k}", "Mahal++ (L2norm)"]
+    F = {n: np.full(N, np.nan) for n in names}
+    F["PR raw"] = pr_vec(X)                                   # no fit needed
+
+    for f in range(args.kfold):
+        tr = (fold != f) & (y == 0)                          # healthy = correct, other folds
+        te = fold == f
+        if tr.sum() < args.pca_k + 5 or te.sum() == 0:
+            continue
+        Xc = X[tr]; mu = Xc.mean(0); sig = Xc.std(0)
+        drop = np.argsort(sig)[::-1][:args.topk]; keep = np.ones(d, bool); keep[drop] = False
+        # PCA on healthy (top-k directions + per-PC std)
+        U, S, Vt = np.linalg.svd(Xc - mu, full_matrices=False)
+        k = min(args.pca_k, Vt.shape[0])
+        Vk = Vt[:k]; pcstd = (S[:k] / np.sqrt(max(1, Xc.shape[0] - 1))) + args.eps
+        # L2-normalized healthy stats
+        Xcn = Xn[tr]; mun = Xcn.mean(0); sign = Xcn.std(0)
+
+        Xt = X[te]; Zz = (Xt - mu) / (sig + args.eps)
+        PC = (Xt - mu) @ Vk.T / pcstd                        # PCA-whitened (k-dim)
+        F["PR zscore(diag)"][te] = pr_vec(Zz)
+        F[f"PR drop-top{args.topk}"][te] = pr_vec(Xt[:, keep])
+        F["PR PCA-whiten"][te] = pr_vec(PC)
+        F["Mahal diag"][te] = np.sum(Zz ** 2, axis=1)
+        F[f"Mahal PCA{args.pca_k}"][te] = np.sum(PC ** 2, axis=1)
+        F["Mahal++ (L2norm)"][te] = np.sum(((Xn[te] - mun) / (sign + args.eps)) ** 2, axis=1)
+
+    feats = F
 
     def bd(a):
         return (max(a, 1 - a), "+" if a >= 0.5 else "-") if np.isfinite(a) else (a, "?")
@@ -145,8 +153,11 @@ def main():
     np.savez(args.output, results=np.array(out, dtype=object),
              band=np.array(args.layer_band), n_contrastive=np.array(n_contrastive))
     print(f"\nSaved -> {args.output}")
-    print("\nRead: if 'PR ZCA(full)' and 'PR drop-topK' stay well above 0.5, the "
-          "participation signal is genuine geometry, NOT just massive activations.")
+    print("\nRead: all stats are CROSS-FIT (healthy fit on OTHER problems) so no "
+          "leakage. If 'PR PCA-whiten' / 'PR drop-top' stay >0.5 -> participation is "
+          "genuine geometry, not a massive-activation artifact. 'Mahal PCA' is the "
+          "leak-free 'distance from healthy manifold' (the earlier full-ZCA 1.0 was "
+          "leakage: correct chains were in the covariance fit + d>n ill-conditioning).")
 
 
 if __name__ == "__main__":
