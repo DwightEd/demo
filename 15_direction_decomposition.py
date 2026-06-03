@@ -113,50 +113,61 @@ def main():
 
     scaler = StandardScaler().fit(X)
     Xs = scaler.transform(X)
+    hard = (diff > np.median(diff)).astype(int)
 
     print(f"Loaded {N} chains, {len(idx_groups)} contrastive problems, d={d}, "
           f"band={args.layer_band}, window=last{args.window}; "
           f"{int(y.sum())} incorrect / {int((1-y).sum())} correct")
 
-    # ---- directions (fit on all data, standardized space) ----
-    w_fail = LogisticRegression(C=args.C, max_iter=2000, class_weight="balanced"
-                                ).fit(Xs, y).coef_.ravel()
-    w_diff = Ridge(alpha=1.0).fit(Xs, diff).coef_.ravel()
-    cos = float(np.dot(w_fail, w_diff) /
-                (np.linalg.norm(w_fail) * np.linalg.norm(w_diff) + 1e-12))
+    # ---- FULLY CROSS-FIT over problems (no in-sample leakage) ----
+    # per fold: fit w_fail (logistic) and w_diff (ridge) on TRAIN problems; on TEST
+    # problems collect (a) difficulty prediction, (b) failure prob, (c) failure prob
+    # after projecting the difficulty axis OUT of the features (refit on residual).
+    cosines = []
+    raw_seeds, resid_seeds, diffauroc_seeds = [], [], []
+    for s in range(args.n_seeds):
+        diff_oof = np.full(N, np.nan); fail_oof = np.full(N, np.nan)
+        fres_oof = np.full(N, np.nan)
+        for tr, te in group_folds(problem_ids, args.kfold, args.seed + s):
+            if len(np.unique(y[tr])) < 2:
+                continue
+            wf = LogisticRegression(C=args.C, max_iter=2000, class_weight="balanced").fit(Xs[tr], y[tr])
+            wd = Ridge(alpha=1.0).fit(Xs[tr], diff[tr])
+            cf, cd = wf.coef_.ravel(), wd.coef_.ravel()
+            cosines.append(float(np.dot(cf, cd) /
+                                 (np.linalg.norm(cf) * np.linalg.norm(cd) + 1e-12)))
+            diff_oof[te] = wd.predict(Xs[te])
+            fail_oof[te] = wf.predict_proba(Xs[te])[:, 1]
+            u = cd / (np.linalg.norm(cd) + 1e-12)             # difficulty axis (train-only)
+            Xtr_r = Xs[tr] - np.outer(Xs[tr] @ u, u)
+            Xte_r = Xs[te] - np.outer(Xs[te] @ u, u)
+            wfr = LogisticRegression(C=args.C, max_iter=2000, class_weight="balanced").fit(Xtr_r, y[tr])
+            fres_oof[te] = wfr.predict_proba(Xte_r)[:, 1]
+        raw_seeds.append(max(within_pair_auroc(idx_groups, fail_oof, y)[0],
+                             1 - within_pair_auroc(idx_groups, fail_oof, y)[0]))
+        resid_seeds.append(max(within_pair_auroc(idx_groups, fres_oof, y)[0],
+                               1 - within_pair_auroc(idx_groups, fres_oof, y)[0]))
+        m = np.isfinite(diff_oof)
+        diffauroc_seeds.append(roc_auc_score(hard[m], diff_oof[m])
+                               if len(np.unique(hard[m])) == 2 else np.nan)
 
-    # how well does activation predict difficulty? (cross-problem regression R-ish:
-    # AUROC of predicting "hard" = problem fail-rate above median)
-    hard = (diff > np.median(diff)).astype(int)
-    diff_auroc = roc_auc_score(hard, Xs @ w_diff) if len(np.unique(hard)) == 2 else float("nan")
-
-    # ---- failure AUROC: original vs after projecting OUT the difficulty direction ----
-    u = w_diff / (np.linalg.norm(w_diff) + 1e-12)
-    Xs_resid = Xs - np.outer(Xs @ u, u)                       # remove difficulty axis
-
-    def within_seeds(Xfeat):
-        vals = []
-        for s in range(args.n_seeds):
-            oof = failure_oof(Xfeat, y, problem_ids, args.kfold, args.seed + s, args.C)
-            a = within_pair_auroc(idx_groups, oof, y)[0]
-            vals.append(max(a, 1 - a))
-        return float(np.mean(vals)), float(np.std(vals))
-
-    a0, s0 = within_seeds(Xs)
-    a1, s1 = within_seeds(Xs_resid)
+    cos = float(np.mean(cosines)); cos_s = float(np.std(cosines))
+    diff_auroc = float(np.nanmean(diffauroc_seeds))
+    a0, s0 = float(np.mean(raw_seeds)), float(np.std(raw_seeds))
+    a1, s1 = float(np.mean(resid_seeds)), float(np.std(resid_seeds))
 
     print(f"\n=== Difficulty vs Failure directions (last-{args.window} window, "
-          f"band={args.layer_band}) ===")
-    print(f"  cosine(w_fail, w_diff)                      = {cos:+.4f}")
-    print(f"  activation predicts difficulty (hard, AUROC)= {diff_auroc:.4f}")
-    print(f"\n  within-problem FAILURE AUROC, raw features  = {a0:.4f} +/- {s0:.4f}")
+          f"band={args.layer_band}; ALL cross-fit, held-out) ===")
+    print(f"  cosine(w_fail, w_diff)                      = {cos:+.4f} +/- {cos_s:.4f}")
+    print(f"  activation predicts difficulty (held-out AUROC) = {diff_auroc:.4f}")
+    print(f"\n  within-problem FAILURE AUROC, raw           = {a0:.4f} +/- {s0:.4f}")
     print(f"  within-problem FAILURE AUROC, difficulty-OUT = {a1:.4f} +/- {s1:.4f}")
     print(f"  -> failure survives removing difficulty axis: delta {a1 - a0:+.4f}")
-    if abs(cos) < 0.2 and a1 > a0 - 0.03:
-        print("  => difficulty and failure are ~ORTHOGONAL directions: TWO distinct "
-              "mechanisms (failure is not just difficulty re-encoded).")
+    if abs(cos) < 0.25 and a1 > a0 - 0.03:
+        print("  => difficulty & failure largely SEPARABLE: failure is not just "
+              "difficulty re-encoded (survives removing the difficulty axis).")
     elif a1 < a0 - 0.05:
-        print("  => removing difficulty hurts failure: the two share substantial axis.")
+        print("  => removing difficulty hurts failure: they share substantial axis.")
     else:
         print("  => partially separable; see cosine + delta.")
 
