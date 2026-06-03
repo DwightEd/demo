@@ -51,6 +51,12 @@ WHITEN_BASELINE=${WHITEN_BASELINE:-}
 WHITEN_FLAG=""
 [ -n "$WHITEN_BASELINE" ] && WHITEN_FLAG="--whiten_baseline $WHITEN_BASELINE"
 
+# STORE_VECTORS=1 -> save raw step vectors so 11 can compute raw vs
+# healthy-standardized (anchor) participation without re-sampling.
+STORE_VECTORS=${STORE_VECTORS:-0}
+STORE_FLAG=""
+[ "$STORE_VECTORS" = "1" ] && STORE_FLAG="--store_vectors"
+
 FORCE=${FORCE:-0}
 
 export HF_ENDPOINT="https://hf-mirror.com"
@@ -82,7 +88,7 @@ else
         --dataset_format "$DATASET_FORMAT" --dataset "$DATASET" --subset "$SUBSET" \
         --n_problems "$N_PROBLEMS" --k_samples "$K" \
         --temperature "$TEMP" --top_p "$TOP_P" --max_new_tokens "$MAX_NEW" \
-        --seed "$SEED" $SUBSPACE_FLAG $WHITEN_FLAG --output "$npz" \
+        --seed "$SEED" $SUBSPACE_FLAG $WHITEN_FLAG $STORE_FLAG --output "$npz" \
         2>&1 | tee "logs/gsm8k_multisample_extract.log"
 fi
 

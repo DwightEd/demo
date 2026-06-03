@@ -232,6 +232,11 @@ def main():
                     help="healthy_baseline.npz from build_healthy_baseline.py: "
                          "standardize each step vector per-dim vs correct reasoning "
                          "BEFORE participation (the anchor-faithful 'abnormal dims').")
+    ap.add_argument("--store_vectors", action="store_true",
+                    help="store raw step vectors (fp16) so participation can be "
+                         "re-normalized (raw / healthy-standardized) in analysis "
+                         "(11) WITHOUT re-sampling. Use --sv_modes step_exp to keep "
+                         "storage small.")
     ap.add_argument("--output", default="data/gsm8k_multisample_sv.npz")
     args = ap.parse_args()
 
@@ -329,7 +334,8 @@ def main():
                 M_D, _, _, kept_steps, layers_used, _, _, SV = _ex.extract_spectral_field(
                     model, tokenizer, extract_prompt, response, steps, device,
                     layer_indices=layer_indices, max_seq_len=args.max_seq_len,
-                    V_R=V_R, step_vectors=True, sv_modes=sv_modes, whiten=whiten)
+                    V_R=V_R, step_vectors=True, sv_modes=sv_modes, whiten=whiten,
+                    store_vectors=args.store_vectors)
             except Exception as e:
                 print(f"  warn: extraction failed (p{pi} s{si}): {e}")
                 n_dropped += 1
@@ -378,6 +384,13 @@ def main():
             [r["SV"]["ae"][m] for r in rows], dtype=object)
     save["sv_out_entropy"] = np.array(
         [r["SV"]["out_entropy"] for r in rows], dtype=object)
+    if args.store_vectors and rows[0]["SV"].get("vec") is not None:
+        save["sv_vectors_stored"] = np.array(True)
+        for m in modes:
+            save[f"sv_vec_{m}"] = np.array(
+                [r["SV"]["vec"][m] for r in rows], dtype=object)
+    else:
+        save["sv_vectors_stored"] = np.array(False)
 
     np.savez(args.output, **save)
 

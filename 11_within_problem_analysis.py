@@ -160,6 +160,8 @@ def main():
                     help="min correct AND incorrect samples for a problem to "
                          "count as contrastive")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--eps", type=float, default=1e-6,
+                    help="sigma floor for healthy standardization (section F)")
     ap.add_argument("--output", default="data/within_problem_analysis.npz")
     args = ap.parse_args()
 
@@ -286,6 +288,71 @@ def main():
     print(f"  AUROC(chain-mean {metric_name}, {m}) = {a_pool:.4f}  "
           f"[95% CI {lo:.4f}-{hi:.4f}]")
     print(f"  AUROC(n_steps)                        = {a_len:.4f}  (length proxy)")
+
+    # ---- (F) HEALTHY-STANDARDIZED participation (the anchor), if vectors stored ----
+    # raw participation can be dominated by massive activations. The anchor counts
+    # dims ABNORMAL vs correct reasoning: standardize z per-dim against the healthy
+    # (correct-sample) mean/std, then PR. Healthy stats use leave-one-PROBLEM-out
+    # (exclude the chain's own problem's correct samples) -> no within-problem leak.
+    std_full = float("nan")
+    vkey = f"sv_vec_{m}"
+    if bool(data.get("sv_vectors_stored", np.array(False))) and vkey in data:
+        from utils.step_vector import participation_ratio, activation_entropy
+        mfn = participation_ratio if args.metric == "pr" else activation_entropy
+        VEC = data[vkey]
+        d = np.asarray(VEC[0]).shape[2]
+        # per-(layer,dim) correct-sample sums: total and per-problem
+        tot_s = np.zeros((L_sub, d)); tot_q = np.zeros((L_sub, d)); tot_n = np.zeros(L_sub)
+        ps_s, ps_q, ps_n = {}, {}, {}
+        for i in np.where(y_inc == 0)[0]:
+            V = np.asarray(VEC[i], dtype=np.float64); p = int(problem_ids[i])
+            if p not in ps_s:
+                ps_s[p] = np.zeros((L_sub, d)); ps_q[p] = np.zeros((L_sub, d)); ps_n[p] = np.zeros(L_sub)
+            for li in cols:
+                X = V[:, li, :]; X = X[np.isfinite(X).all(axis=1)]
+                if X.size == 0:
+                    continue
+                s = X.sum(0); q = (X ** 2).sum(0); nr = X.shape[0]
+                tot_s[li] += s; tot_q[li] += q; tot_n[li] += nr
+                ps_s[p][li] += s; ps_q[p][li] += q; ps_n[p][li] += nr
+
+        feat_std = np.full(N, np.nan)
+        chains_of = {}
+        for i in range(N):
+            chains_of.setdefault(int(problem_ids[i]), []).append(i)
+        for p, members in chains_of.items():
+            mu_ex = {}; sg_ex = {}
+            for li in cols:
+                n = tot_n[li] - (ps_n[p][li] if p in ps_n else 0.0)
+                if n < 2:
+                    continue
+                s = tot_s[li] - (ps_s[p][li] if p in ps_s else 0.0)
+                q = tot_q[li] - (ps_q[p][li] if p in ps_q else 0.0)
+                mu = s / n; mu_ex[li] = mu
+                sg_ex[li] = np.sqrt(np.clip(q / n - mu ** 2, 0.0, None))
+            for i in members:
+                V = np.asarray(VEC[i], dtype=np.float64); per_step = []
+                for t in range(V.shape[0]):
+                    vals = []
+                    for li in cols:
+                        if li not in mu_ex:
+                            continue
+                        z = V[t, li, :]
+                        if not np.isfinite(z).all():
+                            continue
+                        vals.append(mfn((z - mu_ex[li]) / (sg_ex[li] + args.eps)))
+                    if vals:
+                        per_step.append(np.nanmean(vals))
+                feat_std[i] = float(np.nanmean(per_step)) if per_step else np.nan
+        std_full, _ = within_pair_auroc(idx_groups, feat_std, y_inc)
+        print(f"\n=== (F) Healthy-STANDARDIZED participation (anchor; leave-one-"
+              f"problem-out), within-pair AUROC ===")
+        print(f"  raw          within-pair AUROC = {A[m]['full']:.4f}")
+        print(f"  standardized within-pair AUROC = {std_full:.4f}")
+        if np.isfinite(std_full):
+            dlt = std_full - A[m]['full']
+            print(f"  -> standardization {'HELPS' if dlt > 0.02 else ('HURTS' if dlt < -0.02 else 'no change')} "
+                  f"(delta {dlt:+.4f}); this is the anchor-faithful 'abnormal dims vs healthy'.")
 
     np.savez(args.output,
              modes=np.array(modes, dtype=object), mode=np.array(m),
