@@ -79,6 +79,14 @@ def summarize(path):
             out.append("  windows: " + ", ".join(
                 f"{n}={_f(v[0])}" for n, v in wr.items()))
 
+    elif "bands" in k and "pooled" in k and "pairwise" in k:        # 22
+        out.append("**pooled vs within-problem PAIRWISE training** "
+                   f"(PCA={d.get('pca_k','?')})")
+        bs = d["bands"]; po = d["pooled"]; pa = d["pairwise"]
+        for j in range(len(bs)):
+            out.append(f"- {str(bs[j]):6s} pooled={_f(po[j])}  pairwise={_f(pa[j])}"
+                       f"  delta={_f(pa[j]-po[j])}")
+
     elif "feat_names" in k and "within" in k and "cloud_layer" in k:  # 21
         out.append(f"**token-cloud geometry vs pooled centroid** "
                    f"(layer={d.get('cloud_layer','?')}, k={d.get('k','?')}, "
