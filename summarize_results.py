@@ -79,6 +79,15 @@ def summarize(path):
             out.append("  windows: " + ", ".join(
                 f"{n}={_f(v[0])}" for n, v in wr.items()))
 
+    elif "off_diff_to_fail" in k:                                   # 24
+        out.append(f"**difficulty/failure geometric decoupling** (band={d.get('band','?')})")
+        out.append(f"- cos POOLED (contaminated) = {_f(d['cos_pooled'],3)} ; "
+                   f"cos CLEAN = {_f(d['cos_clean'],3)} (random ~ {_f(d.get('rand_cos',0),3)})")
+        out.append(f"- [diag] clean w_fail->within-failure = {_f(d['diag_fail'],3)}")
+        out.append(f"- [diag] clean w_diff->difficulty     = {_f(d['diag_diff'],3)}")
+        out.append(f"- [KEY off] clean w_diff->within-failure = {_f(d['off_diff_to_fail'],3)} (chance=0.5)")
+        out.append(f"- [off] clean w_fail->difficulty|correct = {_f(d['off_fail_to_diff_correct'],3)} (chance=0.5)")
+
     elif "methods" in k and "within" in k:                          # 23
         out.append(f"**trajectory amplifier vs simple pooling** (band={d.get('band','?')})")
         mn = d["methods"]; wi = d["within"]
