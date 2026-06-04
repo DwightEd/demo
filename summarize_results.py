@@ -87,10 +87,13 @@ def summarize(path):
                    f"cos(w, mean-act) = {_f(d['cos_meanact'],3)}; cos(w, sigma) = {_f(d['cos_sigma'],3)}")
         out.append(f"- sparsity: eff #neurons (PR) = {_f(d['pr_neurons'],1)}; "
                    f"50% mass in {int(d['n50'])} neurons, 90% in {int(d['n90'])}")
+        tc = d.get('top_centered', np.array([]))
+        if len(tc):
+            out.append(f"- logit-lens CENTERED TOP: {list(tc[:15])}")
+            out.append(f"- logit-lens CENTERED BOT: {list(d.get('bot_centered', np.array([]))[:15])}")
         tt = d.get('top_tokens', np.array([]))
         if len(tt):
-            out.append(f"- logit-lens TOP: {list(tt[:15])}")
-            out.append(f"- logit-lens BOT: {list(d.get('bot_tokens', np.array([]))[:15])}")
+            out.append(f"- logit-lens RAW TOP (artifact): {list(tt[:10])}")
 
     elif "fail_base" in k and "fail_resid" in k:                    # 24
         out.append(f"**difficulty/failure decoupling (residualization)** (band={d.get('band','?')})")

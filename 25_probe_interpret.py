@@ -110,8 +110,9 @@ def main():
           f"({'tens' if n50 < 50 else 'many'} of neurons carry it)")
 
     top_tokens = bot_tokens = None
+    top_centered = bot_centered = None
     if args.model:
-        print(f"\n=== (A) logit lens  w_raw @ W_U  (model {args.model}) ===")
+        print(f"\n=== (A) logit lens (model {args.model}) ===")
         import importlib.util, os, torch
         spec = importlib.util.spec_from_file_location(
             "ex01", os.path.join(os.path.dirname(os.path.abspath(__file__)), "01_extract_spectral_field.py"))
@@ -120,12 +121,30 @@ def main():
         tok = AutoTokenizer.from_pretrained(args.model, use_fast=True)
         model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.float32, device_map="cpu")
         W_U = ex01.get_unembedding_matrix(model).float().cpu().numpy()      # (V, d)
-        logits = W_U @ u_raw                                                # (V,)
-        ti = np.argsort(logits)[::-1][:args.topk]; bi = np.argsort(logits)[:args.topk]
-        top_tokens = [tok.decode([int(t)]) for t in ti]
-        bot_tokens = [tok.decode([int(t)]) for t in bi]
-        print(f"  TOP (failure direction promotes): {top_tokens}")
-        print(f"  BOTTOM (suppresses):             {bot_tokens}")
+        # CENTER the unembedding: subtract the mean token-embedding row. This removes the
+        # anisotropy / common-rare-token bias that makes ANY direction surface the same junk
+        # tokens; without it logit-lens is uninformative.
+        W_c = W_U - W_U.mean(0, keepdims=True)
+
+        def lens(u, W, kk):
+            lg = W @ u
+            ti = np.argsort(lg)[::-1][:kk]; bi = np.argsort(lg)[:kk]
+            return [tok.decode([int(t)]).strip() for t in ti], [tok.decode([int(t)]).strip() for t in bi]
+
+        u_mdiff = diff_means / (np.linalg.norm(diff_means) + 1e-12)
+        u_rand = np.random.default_rng(0).standard_normal(d); u_rand /= np.linalg.norm(u_rand)
+
+        top_tokens, bot_tokens = lens(u_raw, W_U, args.topk)               # raw (shows the artifact)
+        top_centered, bot_centered = lens(u_raw, W_c, args.topk)          # centered (the real signal)
+        mdiff_top, mdiff_bot = lens(u_mdiff, W_c, args.topk)
+        rand_top, _ = lens(u_rand, W_c, args.topk)
+
+        print(f"  [probe w, RAW W_U]     TOP: {top_tokens[:20]}")
+        print(f"  [probe w, CENTERED]    TOP: {top_centered[:20]}")
+        print(f"  [probe w, CENTERED]    BOT: {bot_centered[:20]}")
+        print(f"  [mean-diff, CENTERED]  TOP: {mdiff_top[:20]}")
+        print(f"  [mean-diff, CENTERED]  BOT: {mdiff_bot[:20]}")
+        print(f"  [RANDOM dir, CENTERED] TOP: {rand_top[:20]}   <- control; if probe looks like this, no signal")
     else:
         print("\n  (A) logit lens skipped (pass --model <path> to enable).")
 
@@ -136,6 +155,8 @@ def main():
              pr_neurons=np.array(pr_neurons), n50=np.array(n50), n90=np.array(n90),
              top_tokens=np.array(top_tokens or [], dtype=object),
              bot_tokens=np.array(bot_tokens or [], dtype=object),
+             top_centered=np.array(top_centered or [], dtype=object),
+             bot_centered=np.array(bot_centered or [], dtype=object),
              band=np.array(args.layer_band))
     print(f"\nSaved -> {args.output}")
 
