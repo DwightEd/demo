@@ -1,0 +1,111 @@
+"""Collate all analysis .npz outputs in data/ into one readable summary.
+
+The per-script .npz (data/decomp_*, frac_*, probe_*, norm_*, temporal_*,
+sparse_*, within_*) are machine-readable arrays saved for plotting; they are
+gitignored and live only on the machine that ran them. This script loads
+whatever is present and prints + writes a single human-readable
+`results_summary.md` so you can see every result in one place.
+
+Usage:  python summarize_results.py            # globs data/*.npz
+        python summarize_results.py --glob 'data/decomp_*.npz'
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import os
+
+import numpy as np
+
+
+def _f(x, nd=4):
+    try:
+        return f"{float(x):.{nd}f}"
+    except Exception:
+        return "nan"
+
+
+def summarize(path):
+    try:
+        d = np.load(path, allow_pickle=True)
+    except Exception as e:
+        return f"## {os.path.basename(path)}\n  (could not load: {e})\n"
+    k = set(d.files)
+    name = os.path.basename(path)
+    out = [f"## {name}"]
+
+    if "probe_within_auroc" in k:                                   # 12
+        out.append("**learned probe + difficulty inflation**")
+        out.append(f"- within-problem probe (HONEST) = {_f(d['probe_within_auroc'])}"
+                   f" +/- {_f(d.get('probe_within_std', 0))}")
+        out.append(f"- cross-problem pooled (INFLATED) = {_f(d.get('probe_cross_pooled','nan'))}")
+        out.append(f"- length baseline = {_f(d.get('length_within_auroc','nan'))}"
+                   f"   unsupervised = {_f(d.get('base_within_auroc','nan'))}")
+
+    elif "cosine" in k:                                             # 15
+        out.append("**difficulty vs failure directions**")
+        out.append(f"- cosine(w_fail,w_diff) = {_f(d['cosine'])};  "
+                   f"difficulty held-out AUROC = {_f(d['diff_auroc'])}")
+        out.append(f"- failure raw = {_f(d['fail_auroc_raw'])};  "
+                   f"difficulty-removed = {_f(d['fail_auroc_diffout'])}")
+
+    elif "curve" in k and "n_bins" in k:                            # 16
+        out.append("**fractional-position emergence (within | cross)**")
+        cur = d["curve"]
+        nb = int(d["n_bins"])
+        for b, (w, c) in enumerate(cur):
+            out.append(f"- frac {b/nb:.1f}-{(b+1)/nb:.1f}: within={_f(w)}  cross={_f(c)}")
+
+    elif "position_curve" in k:                                     # 14
+        out.append("**per-step-position (within | cross)**")
+        for t, (w, c) in enumerate(d["position_curve"]):
+            out.append(f"- pos {t}: within={_f(w)}  cross={_f(c)}")
+        if "window_results" in k:
+            wr = d["window_results"].item()
+            out.append("  windows: " + ", ".join(
+                f"{n}={_f(v[0])}" for n, v in wr.items()))
+
+    elif "l1" in k:                                                 # 17
+        out.append("**sparse(L1) vs low-rank(PCA)**")
+        l1 = d["l1"].item(); pca = d["pca"].item()
+        out.append("- L1 (C: AUROC, #nonzero): " +
+                   ", ".join(f"{c}:{_f(a)}/{int(nz) if nz==nz else 'nan'}"
+                             for c, (a, nz) in l1.items()))
+        out.append("- PCA (k: AUROC): " + ", ".join(f"{kk}:{_f(a)}" for kk, a in pca.items()))
+
+    elif "results" in k:                                            # 13 / 11
+        r = d["results"].item()
+        out.append(f"**normalization / metric variants** (band={d.get('layer_band','?')})")
+        for name2, v in r.items():
+            try:
+                out.append(f"- {name2}: {_f(v)}")
+            except Exception:
+                out.append(f"- {name2}: {v}")
+
+    else:
+        out.append(f"  keys: {sorted(k)}")
+    return "\n".join(out) + "\n"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--glob", default="data/*.npz")
+    ap.add_argument("--out", default="results_summary.md")
+    args = ap.parse_args()
+    files = sorted(glob.glob(args.glob))
+    # only the analysis outputs (skip raw extraction npz which are huge)
+    skip = ("_sv.npz", "multisample_sv.npz", "unembedding", "healthy_baseline")
+    files = [f for f in files if not any(s in os.path.basename(f) for s in skip)]
+    blocks = ["# Results summary (data/*.npz)\n"]
+    for f in files:
+        blocks.append(summarize(f))
+    text = "\n".join(blocks)
+    with open(args.out, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    print(text)
+    print(f"\n[wrote {args.out} ; {len(files)} result files]")
+
+
+if __name__ == "__main__":
+    main()
