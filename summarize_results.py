@@ -179,8 +179,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--glob", default="data/*.npz")
     ap.add_argument("--out", default="results_summary.md")
+    ap.add_argument("--all", action="store_true",
+                    help="also show the SETTLED detection results (probe/ens/frac/...); "
+                         "by default only the actively-investigated ones are shown")
     args = ap.parse_args()
     files = sorted(glob.glob(args.glob))
+    # settled / exhausted detection experiments -> hidden by default (use --all to see)
+    settled = ("amplifier", "decomp_", "ens_", "frac_", "mc_", "norm_",
+               "pairwise", "probe_all", "probe_mid", "probe_deep", "sparse_", "temporal_")
+    if not args.all:
+        files = [f for f in files if not any(s in os.path.basename(f) for s in settled)]
     # skip raw extraction npz (huge) and the obsolete effective-rank / M_D outputs
     # (the old approach that printed all-nan here)
     skip = ("_sv.npz", "multisample_sv.npz", "unembedding", "healthy_baseline",
