@@ -53,7 +53,9 @@ def summarize(path):
         out.append("**learned probe + difficulty inflation**")
         out.append(f"- within-problem probe (HONEST) = {_f(d['probe_within_auroc'])}"
                    f" +/- {_f(d.get('probe_within_std', 0))}")
-        out.append(f"- cross-problem pooled (INFLATED) = {_f(d.get('probe_cross_pooled','nan'))}")
+        out.append(f"- GROUP-kfold pooled (held-out probs, pooled metric) = "
+                   f"{_f(d.get('probe_group_pooled','nan'))}  <- same held-out preds as within, pooled")
+        out.append(f"- cross-problem pooled (random split, INFLATED) = {_f(d.get('probe_cross_pooled','nan'))}")
         out.append(f"- length baseline = {_f(d.get('length_within_auroc','nan'))}"
                    f"   unsupervised = {_f(d.get('base_within_auroc','nan'))}")
 
