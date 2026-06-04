@@ -79,6 +79,21 @@ def summarize(path):
             out.append("  windows: " + ", ".join(
                 f"{n}={_f(v[0])}" for n, v in wr.items()))
 
+    elif "ks" in k and "within" in k and "norm_within" in k:        # 19
+        out.append(f"**manifold-constraint SPE: within-AUROC vs healthy-subspace dim k** "
+                   f"(band={d.get('band','?')}, agg={d.get('agg','?')})")
+        ks_ = d["ks"]; wi = d["within"]; cr = d.get("cross", np.full(len(wi), np.nan))
+        for j in range(len(ks_)):
+            out.append(f"- k={int(ks_[j]):<4d} within={_f(wi[j])}  cross={_f(cr[j])}")
+        out.append(f"- ||z|| norm baseline (within) = {_f(d['norm_within'])}")
+
+    elif "variants" in k and "within" in k:                         # 18
+        out.append(f"**signal-strengthening ladder** (band={d.get('band','?')})")
+        vs = d["variants"]; wi = d["within"]; ws = d.get("within_std", np.zeros(len(wi)))
+        cr = d.get("cross", np.full(len(wi), np.nan))
+        for j in range(len(vs)):
+            out.append(f"- {str(vs[j]):38s} within={_f(wi[j])} +/- {_f(ws[j],3)}  cross={_f(cr[j])}")
+
     elif "l1" in k:                                                 # 17
         out.append("**sparse(L1) vs low-rank(PCA)**")
         l1 = d["l1"].item(); pca = d["pca"].item()
