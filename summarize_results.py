@@ -79,6 +79,13 @@ def summarize(path):
             out.append("  windows: " + ", ".join(
                 f"{n}={_f(v[0])}" for n, v in wr.items()))
 
+    elif "methods" in k and "within" in k:                          # 23
+        out.append(f"**trajectory amplifier vs simple pooling** (band={d.get('band','?')})")
+        mn = d["methods"]; wi = d["within"]
+        for j in range(len(mn)):
+            tag = {"mean": "  <- simple", "attn": "  <- amplifier"}.get(str(mn[j]), "")
+            out.append(f"- {str(mn[j]):5s} within={_f(wi[j])}{tag}")
+
     elif "bands" in k and "pooled" in k and "pairwise" in k:        # 22
         out.append("**pooled vs within-problem PAIRWISE training** "
                    f"(PCA={d.get('pca_k','?')})")
