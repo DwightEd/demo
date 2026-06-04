@@ -79,6 +79,14 @@ def summarize(path):
             out.append("  windows: " + ", ".join(
                 f"{n}={_f(v[0])}" for n, v in wr.items()))
 
+    elif "comp_within" in k:                                        # 20
+        out.append(f"**ensemble vs best single** (band={d.get('band','?')})")
+        cn = d["comp_names"]; cw = d["comp_within"]
+        for j in range(len(cn)):
+            out.append(f"- {str(cn[j]):8s} within={_f(cw[j])}")
+        out.append(f"- ensemble z-mean = {_f(d['ens_zmean'])} ; meta = {_f(d['ens_meta'])} "
+                   f"; best single = {_f(d['best_single'])}")
+
     elif "ks" in k and "within" in k and "norm_within" in k:        # 19
         out.append(f"**manifold-constraint SPE: within-AUROC vs healthy-subspace dim k** "
                    f"(band={d.get('band','?')}, agg={d.get('agg','?')})")
@@ -122,8 +130,11 @@ def main():
     ap.add_argument("--out", default="results_summary.md")
     args = ap.parse_args()
     files = sorted(glob.glob(args.glob))
-    # only the analysis outputs (skip raw extraction npz which are huge)
-    skip = ("_sv.npz", "multisample_sv.npz", "unembedding", "healthy_baseline")
+    # skip raw extraction npz (huge) and the obsolete effective-rank / M_D outputs
+    # (the old approach that printed all-nan here)
+    skip = ("_sv.npz", "multisample_sv.npz", "unembedding", "healthy_baseline",
+            "d_dynamics", "gsm8k_cim", "gsm8k_geom", "gsm8k_sv_analysis",
+            "step_vector_analysis", "geometry_analysis")
     files = [f for f in files if not any(s in os.path.basename(f) for s in skip)]
     blocks = ["# Results summary (data/*.npz)\n"]
     for f in files:
