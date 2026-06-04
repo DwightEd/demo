@@ -79,14 +79,13 @@ def summarize(path):
             out.append("  windows: " + ", ".join(
                 f"{n}={_f(v[0])}" for n, v in wr.items()))
 
-    elif "off_diff_to_fail" in k:                                   # 24
-        out.append(f"**difficulty/failure geometric decoupling** (band={d.get('band','?')})")
-        out.append(f"- cos POOLED (contaminated) = {_f(d['cos_pooled'],3)} ; "
-                   f"cos CLEAN = {_f(d['cos_clean'],3)} (random ~ {_f(d.get('rand_cos',0),3)})")
-        out.append(f"- [diag] clean w_fail->within-failure = {_f(d['diag_fail'],3)}")
-        out.append(f"- [diag] clean w_diff->difficulty     = {_f(d['diag_diff'],3)}")
-        out.append(f"- [KEY off] clean w_diff->within-failure = {_f(d['off_diff_to_fail'],3)} (chance=0.5)")
-        out.append(f"- [off] clean w_fail->difficulty|correct = {_f(d['off_fail_to_diff_correct'],3)} (chance=0.5)")
+    elif "fail_base" in k and "fail_resid" in k:                    # 24
+        out.append(f"**difficulty/failure decoupling (residualization)** (band={d.get('band','?')})")
+        out.append(f"- (1) cos(w_diff,w_fail) = {_f(d['cos'],3)} (random ~ {_f(d.get('rand_cos',0),3)})")
+        out.append(f"- (2) within-failure AUROC: base {_f(d['fail_base'],3)} -> "
+                   f"after removing w_diff {_f(d['fail_resid'],3)}")
+        out.append(f"- (3) difficulty corr^2: base {_f(d['diff_r2_base'],3)} -> "
+                   f"after removing w_fail {_f(d['diff_r2_resid'],3)}")
 
     elif "methods" in k and "within" in k:                          # 23
         out.append(f"**trajectory amplifier vs simple pooling** (band={d.get('band','?')})")

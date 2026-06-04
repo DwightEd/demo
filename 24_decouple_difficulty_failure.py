@@ -1,23 +1,25 @@
-"""Step 24: is difficulty-vs-failure separability a GEOMETRIC structure, not just a number?
+"""Step 24 (revised v2): geometric decoupling of difficulty vs failure (well-posed).
 
-We have two learned linear directions (all cross-fit over problems):
-  w_fail : logistic predicting WITHIN-problem failure (sample-level)
-  w_diff : ridge predicting the problem's fail-rate from activation (problem-level difficulty)
+CRITICAL fix over v1: in the full d~4096 space with only ~200 problems, the difficulty
+direction (Ridge over per-problem means) is UNDER-DETERMINED -> w_diff is essentially
+regularization noise, and any cosine with it is ~0 trivially (an artifact, not orthogonality).
+We therefore reduce to the top-k PCs (k << #problems, fit on train) FIRST, so both
+directions are well-determined, then measure decoupling.
 
-The worry: reasoning errors may be CAUSED by hard problems, and "hard" and "failed" might
-both look "diffuse" -> the two could be the same direction. A single cosine is weak
-(and in d~4096, cos=0.24 is ~15 sigma above the ~0 of random directions, i.e. they DO
-share a real component). So we give a stronger, functional test: the 2x2 TRANSFER MATRIX.
+Standardization: mu/sigma from {train problems' CORRECT solutions}, applied to all.
+PCA: top-k components fit on train solutions; all activations -> k-dim Z.
 
-Score every held-out solution by each direction, then ask each direction to do BOTH jobs:
-                       within-problem FAILURE        problem DIFFICULTY (per-problem)
-  w_fail               ~0.71 (its job)               ? -> if ~chance, fail-dir is difficulty-blind
-  w_diff               ? -> if ~chance, diff-dir      ~0.60-0.65 (its job)
-                            is within-failure-blind
-If BOTH off-diagonals collapse to chance, the two signals occupy functionally distinct
-directions (each predicts only its own target) -> geometric decoupling, far stronger than
-a cosine. We also report cos(w_fail,w_diff) WITH the random-direction baseline (1/sqrt(d)),
-and the variance of w_fail that lies along w_diff (cos^2).
+w_diff (problem-level): Ridge( per-problem CORRECT-mean(Z) -> diff_p=fail-rate ).
+w_fail (sample-level) : one diff per problem d_p = mean_inc(Z) - mean_corr(Z);
+                        logistic on {d_p->+1, -d_p->-1}, no intercept.
+
+Decoupling (three together, all held-out, GroupKFold over problems):
+  (1) cos(w_diff, w_fail)  (random baseline ~ 1/sqrt(k))
+  (2) within-problem FAILURE paired AUROC: score with w_fail vs with w_fail RESIDUALIZED
+      against w_diff (= activations with the w_diff axis removed). Stays ~baseline => the
+      failure signal is orthogonal to difficulty (not reducible to it).  [KEY]
+  (3) DIFFICULTY held-out corr^2: w_diff vs w_diff residualized against w_fail.  [reverse]
+Sensitivity: if w_fail == w_diff (failure IS difficulty), (2) collapses to 0.5.
 """
 
 from __future__ import annotations
@@ -25,8 +27,7 @@ from __future__ import annotations
 import argparse
 import numpy as np
 from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import roc_auc_score
+from sklearn.decomposition import PCA
 
 
 def band_indices(L_sub, band):
@@ -64,15 +65,20 @@ def bd(a):
     return max(a, 1 - a) if np.isfinite(a) else float("nan")
 
 
+def perp(w, axis):
+    u = axis / (np.linalg.norm(axis) + 1e-12)
+    return w - (w @ u) * u
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--mode", default="step_exp")
     ap.add_argument("--layer_band", default="mid")
     ap.add_argument("--late_lo", type=float, default=0.6)
+    ap.add_argument("--pca_k", type=int, default=50, help="PCs (<< #problems) so directions are well-posed")
     ap.add_argument("--kfold", type=int, default=5)
     ap.add_argument("--n_seeds", type=int, default=5)
-    ap.add_argument("--C", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--output", default="data/decouple.npz")
     args = ap.parse_args()
@@ -80,12 +86,11 @@ def main():
     data = np.load(args.input, allow_pickle=True)
     VEC = data[f"sv_vec_{args.mode}"]
     problem_ids = data["problem_ids"].astype(int)
-    y = (data["is_correct"].astype(int) == 0).astype(int)             # 1 = incorrect
+    y = (data["is_correct"].astype(int) == 0).astype(int)
     N = len(VEC)
     L_sub = np.asarray(VEC[0]).shape[1]; d = np.asarray(VEC[0]).shape[2]
     cols = band_indices(L_sub, args.layer_band)
 
-    # late-window band-mean vector per solution
     X = np.full((N, d), np.nan)
     for i in range(N):
         V = np.asarray(VEC[i], dtype=np.float64)[:, cols, :]
@@ -97,102 +102,95 @@ def main():
         if not m.any(): m = fr >= fr.max()
         with np.errstate(invalid="ignore"):
             X[i] = np.nanmean(P[m], axis=0)
-    ok = np.isfinite(X).all(1)
-    X, y, problem_ids = X[ok], y[ok], problem_ids[ok]
+    okm = np.isfinite(X).all(1)
+    X, y, problem_ids = X[okm], y[okm], problem_ids[okm]
     N = len(y)
 
     prob = {}
     for i, p in enumerate(problem_ids):
         prob.setdefault(int(p), []).append(i)
-    diff = np.zeros(N)                                                # per-problem fail-rate
-    for p, v in prob.items():
-        diff[v] = y[np.array(v)].mean()
-    hard = (diff > np.median(diff)).astype(int)
+    diffmap = {p: float(y[np.array(v)].mean()) for p, v in prob.items()}
     idx_groups = [np.array(v) for v in prob.values() if any(y[v] == 1) and any(y[v] == 0)]
-
+    k = min(args.pca_k, d)
     print(f"Loaded {N} solutions over {len(prob)} problems ({len(idx_groups)} contrastive); "
-          f"d={d}, band={args.layer_band}; random-direction cos baseline ~ {1/np.sqrt(d):.3f}")
+          f"d={d} -> PCA k={k}; random cos ~ {1/np.sqrt(k):.3f}")
 
-    def build_diffs(Xs, ytr, gtr, seed, max_pairs=60):
-        rng = np.random.default_rng(seed); pr = {}
-        for i in range(len(ytr)):
-            pr.setdefault(int(gtr[i]), []).append(i)
+    def wdiff_of(Z, yy, gg, plist):
+        Xb, yb = [], []
+        for p in plist:
+            ip = [i for i in range(len(yy)) if gg[i] == p and yy[i] == 0]
+            if ip: Xb.append(Z[ip].mean(0)); yb.append(diffmap[p])
+        if len(Xb) < 5: return None
+        return Ridge(alpha=1.0).fit(np.asarray(Xb), np.asarray(yb)).coef_.ravel()
+
+    def wfail_of(Z, yy, gg, plist):
         D = []
-        for p, v in pr.items():
-            inc = [i for i in v if ytr[i] == 1]; cor = [i for i in v if ytr[i] == 0]
-            pairs = [(a, b) for a in inc for b in cor]
-            if len(pairs) > max_pairs:
-                pairs = [pairs[s] for s in rng.choice(len(pairs), max_pairs, replace=False)]
-            for a, b in pairs:
-                D.append(Xs[a] - Xs[b])
-        return np.asarray(D)
+        for p in plist:
+            ip = [i for i in range(len(yy)) if gg[i] == p]
+            inc = [i for i in ip if yy[i] == 1]; cor = [i for i in ip if yy[i] == 0]
+            if inc and cor: D.append(Z[inc].mean(0) - Z[cor].mean(0))
+        if len(D) < 5: return None
+        D = np.asarray(D); Xtr = np.vstack([D, -D]); yt = np.concatenate([np.ones(len(D)), np.zeros(len(D))])
+        return LogisticRegression(C=0.5, max_iter=4000, fit_intercept=False).fit(Xtr, yt).coef_.ravel()
 
-    cosP, cosC = [], []                   # cos(pooled fail, pooled diff) ; cos(clean fail, clean diff)
-    ff, df_fail, dd, fd_corr = [], [], [], []
+    cos_l = []
+    fb, fr_, r2b, r2r = [], [], [], []
     for s in range(args.n_seeds):
-        sfc = np.full(N, np.nan); sdc = np.full(N, np.nan)
+        sfb = np.full(N, np.nan); sfr = np.full(N, np.nan)
+        dt_t, dt_b, dt_r = [], [], []
         for tr, te in group_folds(problem_ids, args.kfold, args.seed + s):
-            if len(np.unique(y[tr])) < 2:
-                continue
-            sc = StandardScaler().fit(X[tr]); Xtr, Xte = sc.transform(X[tr]), sc.transform(X[te])
-            ytr, gtr, difftr = y[tr], problem_ids[tr], diff[tr]
-            # --- POOLED (contaminated) directions ---
-            wfp = LogisticRegression(C=args.C, max_iter=2000, class_weight="balanced").fit(Xtr, ytr).coef_.ravel()
-            wdp = Ridge(alpha=1.0).fit(Xtr, difftr).coef_.ravel()
-            cosP.append(float(wfp @ wdp / (np.linalg.norm(wfp) * np.linalg.norm(wdp) + 1e-12)))
-            # --- CLEAN directions ---
-            # failure: within-problem differences cancel the problem-level (difficulty) component
-            Dpairs = build_diffs(Xtr, ytr, gtr, args.seed + s)
-            if len(Dpairs) < 10:
-                continue
-            Xd = np.vstack([Dpairs, -Dpairs]); yd = np.concatenate([np.ones(len(Dpairs)), np.zeros(len(Dpairs))])
-            wfc = LogisticRegression(C=args.C, max_iter=3000, fit_intercept=False).fit(Xd, yd).coef_.ravel()
-            # difficulty: estimated from CORRECT solutions only (no failure component present)
-            cmask = ytr == 0
-            wdc = Ridge(alpha=1.0).fit(Xtr[cmask], difftr[cmask]).coef_.ravel()
-            cosC.append(float(wfc @ wdc / (np.linalg.norm(wfc) * np.linalg.norm(wdc) + 1e-12)))
-            sfc[te] = Xte @ wfc; sdc[te] = Xte @ wdc
+            cm = (y[tr] == 0)
+            if cm.sum() < 5: continue
+            mu = X[tr][cm].mean(0); sd = X[tr][cm].std(0) + 1e-6
+            Xs = (X - mu) / sd
+            pca = PCA(n_components=k, random_state=0).fit(Xs[tr])
+            Z = pca.transform(Xs)                                  # (N, k)
+            g = problem_ids; tr_p = np.unique(g[tr]); te_p = np.unique(g[te])
+            wd = wdiff_of(Z[tr], y[tr], g[tr], tr_p)
+            wf = wfail_of(Z[tr], y[tr], g[tr], tr_p)
+            if wd is None or wf is None: continue
+            cos_l.append(float(wd @ wf / (np.linalg.norm(wd) * np.linalg.norm(wf) + 1e-12)))
 
-        ff.append(bd(within_pair_auroc(idx_groups, sfc, y)[0]))           # clean w_fail -> within-failure (job)
-        df_fail.append(bd(within_pair_auroc(idx_groups, sdc, y)[0]))      # clean w_diff -> within-failure (KEY off)
-        pids = list(prob.keys())
-        sd_p = np.array([np.nanmean(sdc[np.array(prob[p])]) for p in pids])
-        sf_p_corr = np.array([np.nanmean(sfc[np.array([i for i in prob[p] if y[i] == 0])])
-                              if any(y[i] == 0 for i in prob[p]) else np.nan for p in pids])
-        ph = np.array([hard[np.array(prob[p])][0] for p in pids])
-        m1 = np.isfinite(sd_p)
-        if len(np.unique(ph[m1])) == 2:
-            dd.append(bd(roc_auc_score(ph[m1], sd_p[m1])))               # clean w_diff -> difficulty (job)
-        m2 = np.isfinite(sf_p_corr)
-        if len(np.unique(ph[m2])) == 2:
-            fd_corr.append(bd(roc_auc_score(ph[m2], sf_p_corr[m2])))     # clean w_fail -> difficulty|correct (off)
+            wf_perp = perp(wf, wd)                                  # failure with difficulty axis removed
+            for i in te:
+                sfb[i] = Z[i] @ wf; sfr[i] = Z[i] @ wf_perp
+            wd_perp = perp(wd, wf)                                  # difficulty with failure axis removed
+            for p in te_p:
+                ipc = [i for i in prob[p] if y[i] == 0]
+                if not ipc: continue
+                m = Z[ipc].mean(0)
+                dt_t.append(diffmap[p]); dt_b.append(float(m @ wd)); dt_r.append(float(m @ wd_perp))
 
-    cp = float(np.mean(cosP)); cc = float(np.mean(cosC))
-    A = float(np.mean(ff)); B = float(np.mean(df_fail))
-    C = float(np.mean(dd)); D = float(np.mean(fd_corr)) if fd_corr else float("nan")
+        fb.append(bd(within_pair_auroc(idx_groups, sfb, y)[0]))
+        fr_.append(bd(within_pair_auroc(idx_groups, sfr, y)[0]))
 
-    print(f"\n=== cosine of failure vs difficulty directions (random ~ {1/np.sqrt(d):.3f}) ===")
-    print(f"  POOLED estimation  : cos = {cp:+.3f}   <- contaminated (failures cluster in hard problems)")
-    print(f"  CLEAN  estimation  : cos = {cc:+.3f}   <- failure from within-problem contrasts, difficulty from correct-only")
-    print(f"  -> if POOLED high but CLEAN ~0: the apparent coupling is an estimation artifact, "
-          f"the underlying directions are distinct.")
-    print(f"\n=== transfer tests on CLEAN directions (chance = 0.50) ===")
-    print(f"  [diag] clean w_fail -> within-failure        = {A:.3f}   (its job)")
-    print(f"  [diag] clean w_diff -> per-problem difficulty = {C:.3f}  (its job)")
-    print(f"  [KEY off] clean w_diff -> within-failure     = {B:.3f}   (expect ~chance)")
-    print(f"  [off] clean w_fail -> difficulty|correct     = {D:.3f}   (expect ~chance)")
-    if B < 0.58 and (not np.isfinite(D) or D < 0.60):
-        print("\n  => GEOMETRIC DECOUPLING confirmed (clean directions): difficulty cannot pick "
-              "the failing solution within a problem; failure does not track difficulty among "
-              "correct solutions. Two functionally distinct directions.")
+        def cr2(t, p):
+            t, p = np.array(t), np.array(p)
+            if len(t) < 5 or np.std(p) < 1e-9 or np.std(t) < 1e-9: return np.nan
+            return float(np.corrcoef(t, p)[0, 1] ** 2)
+        r2b.append(cr2(dt_t, dt_b)); r2r.append(cr2(dt_t, dt_r))
+
+    cos = float(np.mean(cos_l)); cos_s = float(np.std(cos_l))
+    FB, FR = float(np.mean(fb)), float(np.mean(fr_))
+    RB, RR = float(np.nanmean(r2b)), float(np.nanmean(r2r))
+
+    print(f"\n=== (1) cos(w_diff, w_fail) = {cos:+.3f} +/- {cos_s:.3f}  (random ~ {1/np.sqrt(k):.3f}) ===")
+    print(f"\n=== (2) within-problem FAILURE paired AUROC ===")
+    print(f"  with w_fail (baseline)            = {FB:.3f}")
+    print(f"  w_fail with w_diff axis removed   = {FR:.3f}   (delta {FR-FB:+.3f})")
+    print(f"\n=== (3) DIFFICULTY held-out corr^2 ===")
+    print(f"  with w_diff (baseline)            = {RB:.3f}")
+    print(f"  w_diff with w_fail axis removed   = {RR:.3f}   (delta {RR-RB:+.3f})")
+    if FR > FB - 0.03 and RR > RB - 0.05:
+        print("\n  => DECOUPLED: failure survives removing the difficulty axis AND difficulty "
+              "survives removing the failure axis -> functionally orthogonal directions.")
     else:
-        print("\n  => residual coupling on a clean off-diagonal -> report honestly.")
+        print("\n  => coupling: removing one axis hurts the other (report honestly).")
 
-    np.savez(args.output, cos_pooled=np.array(cp), cos_clean=np.array(cc),
-             rand_cos=np.array(1/np.sqrt(d)),
-             diag_fail=np.array(A), diag_diff=np.array(C),
-             off_diff_to_fail=np.array(B), off_fail_to_diff_correct=np.array(D),
-             band=np.array(args.layer_band))
+    np.savez(args.output, cos=np.array(cos), cos_std=np.array(cos_s), rand_cos=np.array(1/np.sqrt(k)),
+             fail_base=np.array(FB), fail_resid=np.array(FR),
+             diff_r2_base=np.array(RB), diff_r2_resid=np.array(RR),
+             pca_k=np.array(k), band=np.array(args.layer_band))
     print(f"\nSaved -> {args.output}")
 
 
