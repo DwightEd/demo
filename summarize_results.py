@@ -166,7 +166,8 @@ def main():
     # (the old approach that printed all-nan here)
     skip = ("_sv.npz", "multisample_sv.npz", "unembedding", "healthy_baseline",
             "d_dynamics", "gsm8k_cim", "gsm8k_geom", "gsm8k_sv_analysis",
-            "step_vector_analysis", "geometry_analysis")
+            "step_vector_analysis", "geometry_analysis",
+            "_pr.npz", "_ae.npz")        # old per-step PR/AE per band (all ~chance, not informative)
     files = [f for f in files if not any(s in os.path.basename(f) for s in skip)]
     blocks = ["# Results summary (data/*.npz)\n"]
     for f in files:
