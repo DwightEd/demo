@@ -26,6 +26,20 @@ def _f(x, nd=4):
         return "nan"
 
 
+def _pairs(arr):
+    """Robustly coerce a saved curve (list of (within,cross)) into an (n,2) float
+    array, regardless of whether numpy stored it as (n,2), flattened, or an
+    object array of tuples."""
+    flat = []
+    for x in np.asarray(arr, dtype=object).ravel():
+        try:
+            flat.extend(float(v) for v in x)
+        except TypeError:
+            flat.append(float(x))
+    a = np.asarray(flat, dtype=float)
+    return a.reshape(-1, 2) if a.size % 2 == 0 else a.reshape(-1, 1)
+
+
 def summarize(path):
     try:
         d = np.load(path, allow_pickle=True)
@@ -52,14 +66,13 @@ def summarize(path):
 
     elif "curve" in k and "n_bins" in k:                            # 16
         out.append("**fractional-position emergence (within | cross)**")
-        cur = d["curve"]
         nb = int(d["n_bins"])
-        for b, (w, c) in enumerate(cur):
+        for b, (w, c) in enumerate(_pairs(d["curve"])):
             out.append(f"- frac {b/nb:.1f}-{(b+1)/nb:.1f}: within={_f(w)}  cross={_f(c)}")
 
     elif "position_curve" in k:                                     # 14
         out.append("**per-step-position (within | cross)**")
-        for t, (w, c) in enumerate(d["position_curve"]):
+        for t, (w, c) in enumerate(_pairs(d["position_curve"])):
             out.append(f"- pos {t}: within={_f(w)}  cross={_f(c)}")
         if "window_results" in k:
             wr = d["window_results"].item()
