@@ -81,6 +81,17 @@ def summarize(path):
             out.append("  windows: " + ", ".join(
                 f"{n}={_f(v[0])}" for n, v in wr.items()))
 
+    elif "w_raw" in k and "pr_neurons" in k:                        # 25
+        out.append(f"**probe weight w interpretation** (band={d.get('band','?')})")
+        out.append(f"- cos(w, mean-diff incorrect-correct) = {_f(d['cos_diffmeans'],3)}; "
+                   f"cos(w, mean-act) = {_f(d['cos_meanact'],3)}; cos(w, sigma) = {_f(d['cos_sigma'],3)}")
+        out.append(f"- sparsity: eff #neurons (PR) = {_f(d['pr_neurons'],1)}; "
+                   f"50% mass in {int(d['n50'])} neurons, 90% in {int(d['n90'])}")
+        tt = d.get('top_tokens', np.array([]))
+        if len(tt):
+            out.append(f"- logit-lens TOP: {list(tt[:15])}")
+            out.append(f"- logit-lens BOT: {list(d.get('bot_tokens', np.array([]))[:15])}")
+
     elif "fail_base" in k and "fail_resid" in k:                    # 24
         out.append(f"**difficulty/failure decoupling (residualization)** (band={d.get('band','?')})")
         out.append(f"- (1) cos(w_diff,w_fail) = {_f(d['cos'],3)} (random ~ {_f(d.get('rand_cos',0),3)})")
