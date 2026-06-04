@@ -26,6 +26,28 @@ import argparse
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import roc_auc_score
+
+
+def within_pair_auroc(idx_groups, feats, y_inc):
+    conc = 0.0; npair = 0
+    for idx in idx_groups:
+        inc = [feats[i] for i in idx if y_inc[i] == 1 and np.isfinite(feats[i])]
+        cor = [feats[i] for i in idx if y_inc[i] == 0 and np.isfinite(feats[i])]
+        if not inc or not cor:
+            continue
+        for a in inc:
+            for b in cor:
+                conc += 1.0 if a > b else (0.5 if a == b else 0.0)
+        npair += len(inc) * len(cor)
+    return (conc / npair if npair else float("nan")), npair
+
+
+def group_folds(groups, k, seed):
+    uniq = np.unique(groups); rng = np.random.default_rng(seed); rng.shuffle(uniq)
+    fo = {int(g): i % k for i, g in enumerate(uniq)}
+    f = np.array([fo[int(g)] for g in groups])
+    return [(np.where(f != j)[0], np.where(f == j)[0]) for j in range(k)]
 
 
 def band_indices(L_sub, band):
@@ -77,8 +99,12 @@ def main():
         with np.errstate(invalid="ignore"):
             X[i] = np.nanmean(P[m], axis=0)
     ok = np.isfinite(X).all(1)
-    X, y = X[ok], y[ok]
+    X, y, problem_ids = X[ok], y[ok], problem_ids[ok]
     N = len(y)
+    prob = {}
+    for i, p in enumerate(problem_ids):
+        prob.setdefault(int(p), []).append(i)
+    idx_groups = [np.array(v) for v in prob.values() if any(y[v] == 1) and any(y[v] == 0)]
     print(f"Loaded {N} solutions; d={d}, band={args.layer_band} -> model layers "
           f"{layers_used[cols].tolist() if len(layers_used) >= L_sub else cols.tolist()}; "
           f"{int(y.sum())} incorrect / {int((1-y).sum())} correct")
@@ -109,6 +135,29 @@ def main():
     print(f"  -> {'axis-aligned SPARSE' if n90 < 100 else 'DISTRIBUTED'} "
           f"({'tens' if n50 < 50 else 'many'} of neurons carry it)")
 
+    # (D) does the INTERPRETABLE direction (class-mean diff) actually DETECT failure?
+    #     cross-fit: fit mean-diff on train problems, score held-out, within-pair + cross AUROC.
+    def random_folds(n, k, seed):
+        idx = np.arange(n); rng = np.random.default_rng(seed); rng.shuffle(idx)
+        f = np.empty(n, int); f[idx] = np.arange(n) % k
+        return [(np.where(f != j)[0], np.where(f == j)[0]) for j in range(k)]
+    win, cro = [], []
+    for s in range(5):
+        og = np.full(N, np.nan); orr = np.full(N, np.nan)
+        for tr, te in group_folds(problem_ids, 5, s):
+            if len(np.unique(y[tr])) < 2: continue
+            dm = X[tr][y[tr] == 1].mean(0) - X[tr][y[tr] == 0].mean(0)
+            og[te] = X[te] @ dm
+        for tr, te in random_folds(N, 5, s):
+            dm = X[tr][y[tr] == 1].mean(0) - X[tr][y[tr] == 0].mean(0)
+            orr[te] = X[te] @ dm
+        a = within_pair_auroc(idx_groups, og, y)[0]; win.append(max(a, 1 - a))
+        m = np.isfinite(orr); cr = roc_auc_score(y[m], orr[m]); cro.append(max(cr, 1 - cr))
+    md_within, md_cross = float(np.mean(win)), float(np.mean(cro))
+    print(f"\n=== (D) the INTERPRETABLE direction (class-mean diff) as a detector ===")
+    print(f"  within-problem paired AUROC = {md_within:.3f}   (cross-problem = {md_cross:.3f})")
+    print(f"  (vs L2 probe within ~0.71; mean-diff is the interpretable, slightly weaker axis)")
+
     top_tokens = bot_tokens = None
     top_centered = bot_centered = None
     if args.model:
@@ -138,6 +187,11 @@ def main():
         top_centered, bot_centered = lens(u_raw, W_c, args.topk)          # centered (the real signal)
         mdiff_top, mdiff_bot = lens(u_mdiff, W_c, args.topk)
         rand_top, _ = lens(u_rand, W_c, args.topk)
+        # SHUFFLE-LABEL control: mean-diff of permuted labels should be junk if the
+        # real semantics is genuinely label-dependent (not an averaging artifact).
+        ysh = np.random.default_rng(1).permutation(y)
+        dm_sh = X[ysh == 1].mean(0) - X[ysh == 0].mean(0)
+        sh_top, _ = lens(dm_sh / (np.linalg.norm(dm_sh) + 1e-12), W_c, args.topk)
 
         print(f"  [probe w, RAW W_U]     TOP: {top_tokens[:20]}")
         print(f"  [probe w, CENTERED]    TOP: {top_centered[:20]}")
@@ -145,6 +199,7 @@ def main():
         print(f"  [mean-diff, CENTERED]  TOP: {mdiff_top[:20]}")
         print(f"  [mean-diff, CENTERED]  BOT: {mdiff_bot[:20]}")
         print(f"  [RANDOM dir, CENTERED] TOP: {rand_top[:20]}   <- control; if probe looks like this, no signal")
+        print(f"  [SHUFFLED-label diff]  TOP: {sh_top[:20]}   <- control; should be JUNK if semantics is label-real")
     else:
         print("\n  (A) logit lens skipped (pass --model <path> to enable).")
 
@@ -153,6 +208,7 @@ def main():
              cos_meanact=np.array(cosv(w_raw, mean_act)),
              cos_sigma=np.array(cosv(w_raw, sigma)),
              pr_neurons=np.array(pr_neurons), n50=np.array(n50), n90=np.array(n90),
+             meandiff_within=np.array(md_within), meandiff_cross=np.array(md_cross),
              top_tokens=np.array(top_tokens or [], dtype=object),
              bot_tokens=np.array(bot_tokens or [], dtype=object),
              top_centered=np.array(top_centered or [], dtype=object),

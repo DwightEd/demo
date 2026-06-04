@@ -87,6 +87,9 @@ def summarize(path):
                    f"cos(w, mean-act) = {_f(d['cos_meanact'],3)}; cos(w, sigma) = {_f(d['cos_sigma'],3)}")
         out.append(f"- sparsity: eff #neurons (PR) = {_f(d['pr_neurons'],1)}; "
                    f"50% mass in {int(d['n50'])} neurons, 90% in {int(d['n90'])}")
+        if "meandiff_within" in k:
+            out.append(f"- INTERPRETABLE dir (mean-diff) detector: within={_f(d['meandiff_within'],3)} "
+                       f"cross={_f(d['meandiff_cross'],3)}")
         tc = d.get('top_centered', np.array([]))
         if len(tc):
             out.append(f"- logit-lens CENTERED TOP: {list(tc[:15])}")
