@@ -153,6 +153,8 @@ def extract_spectral_field(
     whiten: dict | None = None,
     whiten_eps: float = 1e-6,
     store_vectors: bool = False,
+    store_clouds: bool = False,
+    cloud_layer_indices: tuple | None = None,
 ):
     """Run one forward pass and reduce each (step, layer) token cloud to (D, V, C).
 
@@ -240,10 +242,22 @@ def extract_spectral_field(
         # WITHOUT re-running the model. Lazily sized once d is known.
         sv_vec = {m: None for m in sv_modes} if store_vectors else None
 
+    # Raw per-step token clouds (the structure step-vector pooling destroys). Stored
+    # BEFORE any reasoning-subspace projection, for a restricted set of layers only
+    # (full hidden dim x all tokens is large). cloud_acc[l] accumulates one (n_j, d)
+    # array per kept step; concatenated at the end. cloud_sizes records n_j per step
+    # so the per-step clouds can be split back on the analysis side.
+    cloud_set = set(cloud_layer_indices) if (store_clouds and cloud_layer_indices) else set()
+    cloud_set = {l for l in cloud_set if l in layer_indices}
+    cloud_acc = {l: [] for l in cloud_set}
+    cloud_sizes = [int(b - a + 1) for (_, a, b) in safe] if cloud_set else None
+
     for li, l in enumerate(layer_indices):
         H_l = hidden_states[l][0].float().cpu().numpy()  # (seq_len, d)
         for row, (_, a, b) in enumerate(safe):
-            H_jl = H_l[a : b + 1]  # (n_j, d)
+            H_jl = H_l[a : b + 1]  # (n_j, d)  -- raw token cloud
+            if l in cloud_set:
+                cloud_acc[l].append(H_jl.astype(np.float16))
             if V_R is not None:
                 H_jl = project_to_reasoning(H_jl, V_R)  # (n_j, d_R)
             D, V, C = step_layer_spectral_summary(
@@ -318,12 +332,23 @@ def extract_spectral_field(
     CIM = None
     if cim_metrics:
         CIM = {"M_Dtle": M_Dtle, "M_Vld": M_Vld}
+    # Assemble the raw token-cloud payload (concatenate per-step clouds per layer).
+    CLOUDS = None
+    if cloud_set and all(len(cloud_acc[l]) == len(safe) for l in cloud_set):
+        ls = sorted(cloud_set)
+        per_layer = [np.concatenate(cloud_acc[l], axis=0) for l in ls]  # each (n_tot, d)
+        CLOUDS = {"clouds": np.stack(per_layer, axis=1),                # (n_tot, L_cloud, d)
+                  "sizes": np.asarray(cloud_sizes, dtype=np.int32),
+                  "layers": np.asarray(ls, dtype=np.int32)}
+
     SV = None
     if step_vectors:
         SV = {"pr": sv_pr, "ae": sv_ae, "out_entropy": out_entropy,
               "modes": list(sv_modes)}
         if store_vectors:
             SV["vec"] = sv_vec
+        if CLOUDS is not None:
+            SV["clouds"] = CLOUDS
     return M_D, M_V, M_C, kept_steps, layer_indices, GEOM, CIM, SV
 
 

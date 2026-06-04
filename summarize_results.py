@@ -79,6 +79,15 @@ def summarize(path):
             out.append("  windows: " + ", ".join(
                 f"{n}={_f(v[0])}" for n, v in wr.items()))
 
+    elif "feat_names" in k and "within" in k and "cloud_layer" in k:  # 21
+        out.append(f"**token-cloud geometry vs pooled centroid** "
+                   f"(layer={d.get('cloud_layer','?')}, k={d.get('k','?')}, "
+                   f"tok_cap={d.get('tok_cap','?')})")
+        fn = d["feat_names"]; wi = d["within"]
+        for j in range(len(fn)):
+            tag = "  <- pooled baseline" if str(fn[j]) == "centroid_spe" else ""
+            out.append(f"- {str(fn[j]):13s} within={_f(wi[j])}{tag}")
+
     elif "comp_within" in k:                                        # 20
         out.append(f"**ensemble vs best single** (band={d.get('band','?')})")
         cn = d["comp_names"]; cw = d["comp_within"]

@@ -237,6 +237,16 @@ def main():
                          "re-normalized (raw / healthy-standardized) in analysis "
                          "(11) WITHOUT re-sampling. Use --sv_modes step_exp to keep "
                          "storage small.")
+    ap.add_argument("--store_clouds", action="store_true",
+                    help="ALSO store the raw per-step token clouds (n_j x d, fp16, "
+                         "BEFORE reasoning-subspace projection) for the layers in "
+                         "--cloud_layers. This preserves the within-step token "
+                         "structure that step-vector pooling destroys (21 analyses "
+                         "it). Storage ~ n_samples x response_tokens x d x 2 bytes per "
+                         "cloud layer; keep --cloud_layers to 1-2 layers.")
+    ap.add_argument("--cloud_layers", default="16",
+                    help="comma list of layer indices to store token clouds for "
+                         "(only with --store_clouds). Default a single mid layer.")
     ap.add_argument("--output", default="data/gsm8k_multisample_sv.npz")
     args = ap.parse_args()
 
@@ -271,6 +281,10 @@ def main():
     layer_indices = None if args.layers == "all" else \
         [int(x) for x in args.layers.split(",") if x.strip()]
     sv_modes = tuple(args.sv_modes.split(","))
+    cloud_layers = tuple(int(x) for x in args.cloud_layers.split(",") if x.strip()) \
+        if args.store_clouds else None
+    if args.store_clouds:
+        print(f"  storing raw token clouds for layers {cloud_layers} (fp16, pre-projection)")
 
     # Optional healthy baseline -> per-layer (mu, sigma) for vector-level
     # standardization of step vectors before participation (the anchor).
@@ -335,7 +349,8 @@ def main():
                     model, tokenizer, extract_prompt, response, steps, device,
                     layer_indices=layer_indices, max_seq_len=args.max_seq_len,
                     V_R=V_R, step_vectors=True, sv_modes=sv_modes, whiten=whiten,
-                    store_vectors=args.store_vectors)
+                    store_vectors=args.store_vectors,
+                    store_clouds=args.store_clouds, cloud_layer_indices=cloud_layers)
             except Exception as e:
                 print(f"  warn: extraction failed (p{pi} s{si}): {e}")
                 n_dropped += 1
@@ -391,6 +406,19 @@ def main():
                 [r["SV"]["vec"][m] for r in rows], dtype=object)
     else:
         save["sv_vectors_stored"] = np.array(False)
+
+    # raw token clouds (fp16): per solution (n_tok, L_cloud, d) + per-step token sizes
+    if args.store_clouds and rows[0]["SV"].get("clouds") is not None:
+        save["clouds_stored"] = np.array(True)
+        save["cloud_layers"] = rows[0]["SV"]["clouds"]["layers"]
+        save["sv_clouds"] = np.array(
+            [r["SV"]["clouds"]["clouds"] if r["SV"].get("clouds") is not None else None
+             for r in rows], dtype=object)
+        save["cloud_sizes"] = np.array(
+            [r["SV"]["clouds"]["sizes"] if r["SV"].get("clouds") is not None else None
+             for r in rows], dtype=object)
+    else:
+        save["clouds_stored"] = np.array(False)
 
     np.savez(args.output, **save)
 
