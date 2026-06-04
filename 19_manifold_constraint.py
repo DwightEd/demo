@@ -135,14 +135,18 @@ def main():
             heal = [ps[i] for i in tr if valid[i] and y[i] == 0]
             if len(heal) < 5:
                 continue
-            H = np.vstack(heal)
+            H = np.vstack(heal).astype(np.float32)
             mu = H.mean(0); sd = H.std(0) + 1e-6
-            Hs = (H - mu) / sd
-            cm = Hs.mean(0)
-            # right singular vectors = principal directions of healthy steps
-            _, _, Vt = np.linalg.svd(Hs - cm, full_matrices=False)
-            kmax = min(max(ks), Vt.shape[0])
-            B = Vt[:kmax]                                   # (kmax, d)
+            Hc = (H - mu) / sd
+            cm = Hc.mean(0); Hc -= cm
+            n_h = Hc.shape[0]
+            kmax = min(max(ks), min(Hc.shape))
+            # principal directions = top eigenvectors of the d x d covariance. Since
+            # n_steps >> d we use the covariance (one GEMM + eigh(d)) instead of a full
+            # SVD of H -- the SVD would also compute the n x d left vectors we never use.
+            C = (Hc.T @ Hc) / max(1, n_h - 1)
+            evals, evecs = np.linalg.eigh(C)               # ascending eigenvalues
+            B = np.ascontiguousarray(evecs[:, ::-1][:, :kmax].T)   # (kmax, d), desc
             for i in te:
                 if not valid[i]:
                     continue
