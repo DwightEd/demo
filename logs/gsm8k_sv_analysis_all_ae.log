@@ -1,0 +1,48 @@
+Loaded 99 chains, L_sub=33, band=all -> cols [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
+  metric: activation_entropy   modes: ['last', 'mean', 'linear', 'step_exp']
+  labels: 50 error / 49 correct
+
+=== Length baseline (the thing to beat) ===
+  AUROC(n_steps)               = 0.5412  (dir +)
+  matched: 78 chains, AUROC(n_steps|matched) = 0.5030  (~0.5)
+
+=== (a) Discrimination: chain-mean activation participation (RAW vs MATCHED vs partial-rho) ===
+mode         rawAUROC dir  matchAUROC  partial_rho|len
+last           0.6273   +      0.6101           0.1986  <==
+mean           0.5698   +      0.6134           0.0965  <==
+linear         0.5796   +      0.6226           0.0764  <==
+step_exp       0.5788   +      0.6272           0.0900  <==
+
+=== (b) Mechanism: rho(participation, output_entropy) pooled over steps ===
+  (+ => more active dims go with more predictive uncertainty)
+  rho(last    , out_entropy) = -0.2749   (n=505 steps)
+  rho(mean    , out_entropy) = -0.0624   (n=505 steps)
+  rho(linear  , out_entropy) = -0.0293   (n=505 steps)
+  rho(step_exp, out_entropy) = -0.0521   (n=505 steps)
+
+=== (c) Step-aggregation sweep (matchAUROC; mean=global level, max/cusum=localized spike, slope=divergence) ===
+mode            mean       max       std     slope     cusum
+last          0.6101    0.5628    0.5062    0.5076    0.5279
+mean          0.6134    0.5378    0.5450    0.5365    0.5450
+linear        0.6226    0.5608    0.5062    0.5062    0.5273
+step_exp      0.6272    0.5516    0.5319    0.5069    0.5141
+
+=== (e) Identity check: rho(chain-mean activation_entropy [step_exp], chain-mean effective-rank M_D) ===
+  rho = -0.1544  (n=99)   [|rho|->1 means participation ~ effective-rank D, NOT a new signal]
+
+=== (f) Error vs difficulty (step_exp): is the lift already in the PRE-error prefix? ===
+  error chains with >=1 pre-error step: 43/43
+  RAW     : full=0.5885   prefix=0.7423
+  MATCHED : 68 chains (len AUROC|matched=0.5017 ~0.5)  full=0.6168  prefix=0.7569  [prefix 95% CI 0.6269-0.8684]
+  partial_rho(prefix, label | n_steps) = 0.3866
+  -> length-matched prefix still >= full: the lift is present BEFORE the error and is not a chain-length artifact.
+     CAVEAT: ProcessBench correct/error are DIFFERENT problems, so difficulty is still confounded -> within-problem test (11) decides.
+
+Saved -> data/gsm8k_sv_analysis_all_ae.npz
+
+=== VERDICT ===
+  length-matched baseline AUROC(n_steps|matched) = 0.5030
+  best weighting: step_exp matchAUROC = 0.6272
+  step_exp (paper-optimal) matchAUROC = 0.6272
+  -> step_exp activation participation (activation_entropy) carries a length-independent signal
+     for error detection (matchAUROC 0.6272 > baseline 0.5030). Promote it.

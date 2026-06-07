@@ -1,0 +1,47 @@
+Loaded 2375 samples over 198 problems (metric=activation_entropy, band=deep cols=[19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32])
+  overall: 1886 correct / 489 incorrect samples
+  contrastive problems (>= 1 of each class): 117
+
+=== (A) WITHIN-PROBLEM AUROC (difficulty-controlled gate; pooled same-problem pairs; >0.5 => failing samples have higher participation) ===
+mode        wAUROC_full  wAUROC_early   #pairs  macroFull
+last             0.4774        0.4899     2564     0.4758
+mean             0.4782        0.5347     2564     0.4832
+linear           0.5246        0.5371     2564     0.5349
+step_exp         0.5078        0.5378     2564     0.5166
+  power: 117 contrastive problems (independent units), 393 incorrect samples in them, 2564 within-problem pairs
+
+=== (B) Paired within-problem diff (incorrect - correct), mode=step_exp ===
+  full : median delta=+1.2011  %positive= 51.3%  Wilcoxon z=+0.60 p=5.51e-01  (n=117)
+  early: median delta=+1.2631  %positive= 52.1%  Wilcoxon z=+0.61 p=5.45e-01  (n=117)
+
+=== (C) Early-prefix vs full (mode=step_exp) ===
+  within-problem AUROC: full=0.5078  early(first 3)=0.5378
+  -> early window is at least as predictive as the full chain (supports early-warning, length- & difficulty-controlled).
+
+=== (D) Per-position within-problem AUROC (mode=step_exp; where it splits) ===
+  step  0: wAUROC=0.5216  (n=117)  ##
+  step  1: wAUROC=0.5378  (n=117)  ###
+  step  2: wAUROC=0.5240  (n=117)  ##
+  step  3: wAUROC=0.5618  (n=117)  ######
+  step  4: wAUROC=0.4982  (n=117)  
+  step  5: wAUROC=0.5365  (n=116)  ###
+  step  6: wAUROC=0.5101  (n=112)  #
+  step  7: wAUROC=0.4737  (n=104)  
+  step  8: wAUROC=0.4646  (n= 99)  
+  step  9: wAUROC=0.4714  (n= 88)  
+  step 10: wAUROC=0.4586  (n= 80)  
+  step 11: wAUROC=0.4569  (n= 71)  
+
+=== (E) Pooled AUROC (context only; difficulty NOT controlled) ===
+  AUROC(chain-mean activation_entropy, step_exp) = 0.5228  [95% CI 0.4941-0.5506]
+  AUROC(n_steps)                        = 0.6532  (length proxy)
+
+=== (F) Healthy-STANDARDIZED participation (anchor; leave-one-problem-out), within-pair AUROC ===
+  raw          within-pair AUROC = 0.5078
+  standardized within-pair AUROC = 0.3393
+  -> standardization HURTS (delta -0.1685); this is the anchor-faithful 'abnormal dims vs healthy'.
+
+Saved -> data/within_deep_ae.npz
+
+=== VERDICT (difficulty-controlled) ===
+  within-pair AUROC=0.5078 ~ chance -> the cross-problem signal was DIFFICULTY, not error. (a).
