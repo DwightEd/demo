@@ -29,12 +29,30 @@ Pipeline
         the ProcessBench results)
 
 Output: data/<tag>_multisample_sv.npz with, per kept sample:
-    problem_id, sample_idx, is_correct, n_steps, pred/gold answer,
+    problem_id, sample_idx, n_steps, pred/gold answer,
     sv_pr_<mode> / sv_ae_<mode> : (T, L) matrices, sv_out_entropy : (T,)
     layers_used, sv_modes, sv_stored=True
+  Labels (BOTH stored so downstream can pick either policy):
+    is_correct        : lenient -- last-number fallback counts (v1 behaviour)
+    is_correct_strict : strict  -- requires '####' marker AND numeric match
+    format_ok         : 1 iff response contains a '####' line
+    pred_source       : 'marker' | 'last_number' | 'none'
+  Text fields (NEW, needed for any text-side / event-level analysis):
+    responses         : raw model generation per sample
+    steps_text        : list of step strings used for token-range matching
+    step_split        : 'line' (new default) | 'sentence' (v1 legacy)
 
-Judging: GSM8K answers are integers/decimals -> exact numeric match, no judge.
-For MATH-style symbolic answers, plug a math_verify check into `answers_match`.
+Judging:
+  GSM8K answers are integers/decimals -> exact numeric match, no judge.
+  The lenient path (current `is_correct`) treats the last number in the
+  response as the answer when the model forgets the '####' line; this can
+  silently misscore long chains that hit token budget mid-derivation. The
+  strict path (`is_correct_strict`) only counts samples that emitted the
+  marker, with `last-number` cases pushed into a format-fail bucket that
+  the audit summary at the end of run prints separately. For analysis
+  that wants to isolate the geometric failure signal from generation /
+  format failure, use `is_correct_strict`.
+  For MATH-style symbolic answers, plug a math_verify check into `answers_match`.
 """
 
 from __future__ import annotations
@@ -102,6 +120,32 @@ def predicted_answer(text: str):
     return _to_number(nums[-1]) if nums else None
 
 
+def predicted_answer_with_source(text: str):
+    """Same as predicted_answer but also returns which parser path succeeded.
+
+    Returns (value, source) where source in {"marker", "last_number", "none"}.
+    - "marker"      : the number came from the '#### N' line the prompt asked for;
+                      this is the FORMAT-COMPLIANT path and the answer is trustworthy.
+    - "last_number" : the '####' line is missing or unparsable; we fell back to the
+                      last number in the response. **This is a format failure** and
+                      the prediction may be a mid-chain intermediate result, not the
+                      final answer. Should be flagged for audit, not silently
+                      treated as the model's answer.
+    - "none"        : no number anywhere -> can't score.
+    """
+    hits = list(re.finditer(r"####\s*([^\n]+)", text))
+    if hits:
+        v = _to_number(hits[-1].group(1))
+        if v is not None:
+            return v, "marker"
+    nums = re.findall(r"[-+]?\$?\d[\d,]*\.?\d*", text)
+    if nums:
+        v = _to_number(nums[-1])
+        if v is not None:
+            return v, "last_number"
+    return None, "none"
+
+
 def answers_match(pred, gold, tol: float = 1e-4) -> bool:
     if pred is None or gold is None:
         return False
@@ -112,10 +156,29 @@ def answers_match(pred, gold, tol: float = 1e-4) -> bool:
 # Step segmentation for self-generated solutions (Streaming-HD: sentence = step)
 # ---------------------------------------------------------------------------
 
-def split_into_steps(text: str):
+def split_into_steps(text: str, granularity: str = "line"):
     """Split a generated solution into steps. Each step must be a verbatim
-    substring of `text` so find_step_token_ranges can locate it."""
+    substring of `text` so find_step_token_ranges can locate it.
+
+    granularity:
+        "line"     : one step per newline. Matches the prompt's instruction
+                     ("one short step per line") and the Streaming-HD step
+                     convention. **This is the new default** -- preferred because
+                     sentence-based splitting over-segments within-step inferences
+                     (e.g. "5*3=15. So we have 15." becomes two fake steps for
+                     what is one reasoning action). For analyses that aggregate
+                     per chain, this affects step-level statistics but the
+                     within-problem chain-level numbers (probe/SPE/ensemble) are
+                     mostly insensitive.
+        "sentence" : v1 behaviour (line + sentence split). Kept for backward
+                     compatibility -- pass --step_split sentence to reproduce
+                     old npz step boundaries exactly.
+    """
     text = text.strip()
+    if granularity == "line":
+        return [ln.strip() for ln in re.split(r"\n+", text)
+                if len(ln.strip()) >= 2]
+    # sentence (legacy)
     steps = []
     for line in re.split(r"\n+", text):
         line = line.strip()
@@ -133,12 +196,97 @@ def split_into_steps(text: str):
 # Generation
 # ---------------------------------------------------------------------------
 
-PROMPT_TEMPLATE = (
+CUSTOM_ZEROSHOT_TEMPLATE = (
     "Solve the following grade-school math problem. Reason step by step, with "
     "one short step per line. Then end with a final line of exactly the form "
     "'#### <answer>' where <answer> is just the number.\n\n"
     "Problem: {q}"
 )
+
+# Wei et al. 2022 (Chain-of-Thought Prompting) GSM8K few-shot exemplars,
+# rewritten so the final answer line is '#### N' (the GSM8K canonical format the
+# rest of the pipeline parses). Question text verbatim from the original paper;
+# CoT text condensed but logically identical. lm-evaluation-harness uses the
+# same set (subset of 5 for the gsm8k task, all 8 for gsm8k-cot). With this
+# fixed prompt set, repeat runs are reproducible and cross-paper comparable.
+GSM8K_COT_EXEMPLARS = [
+    (
+        "There are 15 trees in the grove. Grove workers will plant trees in the grove "
+        "today. After they are done, there will be 21 trees. How many trees did the "
+        "grove workers plant today?",
+        "There are 15 trees originally. There were 21 trees after planting. So the "
+        "workers planted 21 - 15 = 6 trees.\n#### 6",
+    ),
+    (
+        "If there are 3 cars in the parking lot and 2 more cars arrive, how many "
+        "cars are in the parking lot?",
+        "There are originally 3 cars. 2 more cars arrive. 3 + 2 = 5.\n#### 5",
+    ),
+    (
+        "Leah had 32 chocolates and her sister had 42. If they ate 35, how many "
+        "pieces do they have left in total?",
+        "Originally, Leah had 32 chocolates and her sister had 42. Together they had "
+        "32 + 42 = 74. After eating 35, they have 74 - 35 = 39 left.\n#### 39",
+    ),
+    (
+        "Jason had 20 lollipops. He gave Denny some lollipops. Now Jason has 12 "
+        "lollipops. How many lollipops did Jason give to Denny?",
+        "Jason started with 20 lollipops. After giving some to Denny he had 12. He "
+        "gave Denny 20 - 12 = 8 lollipops.\n#### 8",
+    ),
+    (
+        "Shawn has five toys. For Christmas, he got two toys each from his mom and "
+        "dad. How many toys does he have now?",
+        "Shawn started with 5 toys. He received 2 from mom and 2 from dad, that is "
+        "2 + 2 = 4 more toys. Now he has 5 + 4 = 9 toys.\n#### 9",
+    ),
+    (
+        "There were nine computers in the server room. Five more computers were "
+        "installed each day, from monday to thursday. How many computers are now in "
+        "the server room?",
+        "There were originally 9 computers. Five computers were added each day for "
+        "4 days, that is 5 * 4 = 20. Total computers now is 9 + 20 = 29.\n#### 29",
+    ),
+    (
+        "Michael had 58 golf balls. On tuesday, he lost 23 golf balls. On wednesday, "
+        "he lost 2 more. How many golf balls did he have at the end of wednesday?",
+        "Michael started with 58 golf balls. After losing 23 on tuesday he had "
+        "58 - 23 = 35. After losing 2 more on wednesday he had 35 - 2 = 33.\n#### 33",
+    ),
+    (
+        "Olivia has $23. She bought five bagels for $3 each. How much money does "
+        "she have left?",
+        "Olivia started with 23 dollars. Five bagels at 3 dollars each cost "
+        "5 * 3 = 15 dollars. She has 23 - 15 = 8 dollars left.\n#### 8",
+    ),
+]
+
+
+def build_chat_messages(style: str, question: str):
+    """Return chat messages for apply_chat_template, depending on prompt style.
+
+    custom_zeroshot : v1 single-user message with the bespoke 'one short step per
+                      line + ####' instruction. Format failures are common because
+                      the model has no examples to anchor the layout.
+    lm_eval_5shot   : 5-shot CoT (Wei et al. 2022 / lm-evaluation-harness `gsm8k`
+                      style) as a chat dialogue -- 5 (user question, assistant
+                      CoT-then-'#### N') turns, then the target question as a
+                      final user turn. Format-fail rate ~ 0-3 %.
+    lm_eval_8shot   : same as 5shot but with all 8 Wei et al. exemplars
+                      (matches lm-evaluation-harness `gsm8k-cot`).
+    """
+    if style == "custom_zeroshot":
+        return [{"role": "user",
+                 "content": CUSTOM_ZEROSHOT_TEMPLATE.format(q=question)}]
+    if style in ("lm_eval_5shot", "lm_eval_8shot"):
+        k = 5 if style == "lm_eval_5shot" else 8
+        msgs = []
+        for ex_q, ex_a in GSM8K_COT_EXEMPLARS[:k]:
+            msgs.append({"role": "user",   "content": f"Question: {ex_q}"})
+            msgs.append({"role": "assistant", "content": ex_a})
+        msgs.append({"role": "user", "content": f"Question: {question}"})
+        return msgs
+    raise ValueError(f"unknown prompt_style: {style!r}")
 
 
 def load_problems(args):
@@ -184,23 +332,31 @@ def load_problems(args):
     return list(probs.items())
 
 
-def build_gen_inputs(tokenizer, question, device):
-    messages = [{"role": "user", "content": PROMPT_TEMPLATE.format(q=question)}]
-    # Render the chat string first (tokenize=False), then tokenize explicitly:
-    # apply_chat_template's tensor/BatchEncoding return type varies by version,
-    # but tokenizer(...) ALWAYS returns a BatchEncoding whose ["input_ids"] is a
-    # (1, L) tensor. add_special_tokens=False: the template already adds them.
+def build_gen_inputs(tokenizer, question, device, prompt_style="custom_zeroshot"):
+    """Tokenize the chat-formatted prompt according to `prompt_style`.
+
+    Render the chat string first (tokenize=False) so apply_chat_template's
+    version-dependent return type does not matter, then tokenize explicitly
+    with the standard tokenizer call (which always returns a BatchEncoding
+    whose ["input_ids"] is a (1, L) tensor). The template already adds
+    special tokens, so add_special_tokens=False here.
+    Return both input_ids and attention_mask (pad==eos otherwise warns and
+    can give unreliable generation); move to device.
+    """
+    messages = build_chat_messages(prompt_style, question)
     text = tokenizer.apply_chat_template(
         messages, add_generation_prompt=True, tokenize=False)
     enc = tokenizer(text, return_tensors="pt", add_special_tokens=False)
-    # return both input_ids and attention_mask (pad==eos otherwise warns + can
-    # give unreliable generation); move to device.
     return {k: v.to(device) for k, v in enc.items()}
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="meta-llama/Llama-3.1-8B-Instruct")
+    ap.add_argument("--model", default="/gz-data/models/Meta-Llama-3.1-8B-Instruct",
+                    help="Local model path on the GPU server; defaults to the canonical "
+                         "Llama-3.1-8B-Instruct mirror on /gz-data. Override for remote "
+                         "models (e.g. 'meta-llama/Llama-3.1-8B-Instruct' or Qwen / "
+                         "DeepSeek-R1-Distill for cross-model robustness.")
     ap.add_argument("--dataset_format", default="processbench",
                     choices=["gsm8k", "processbench"],
                     help="gsm8k=openai/gsm8k (needs net); processbench=local "
@@ -221,6 +377,19 @@ def main():
     ap.add_argument("--layers", default="all")
     ap.add_argument("--max_seq_len", type=int, default=4096)
     ap.add_argument("--min_steps", type=int, default=3)
+    ap.add_argument("--step_split", default="line", choices=["line", "sentence"],
+                    help="line=one step per newline (default; matches prompt 'one "
+                         "short step per line'). sentence=v1 legacy split (newline "
+                         "AND sentence-end). Switch to sentence to reproduce v1 npz.")
+    ap.add_argument("--prompt_style", default="custom_zeroshot",
+                    choices=["custom_zeroshot", "lm_eval_5shot", "lm_eval_8shot"],
+                    help="custom_zeroshot=v1 bespoke prompt ('one short step per line "
+                         "+ ####', no examples). lm_eval_5shot=5-shot CoT chat (Wei "
+                         "et al. 2022 / lm-evaluation-harness 'gsm8k' style; format-"
+                         "fail rate drops to ~0-3%%). lm_eval_8shot=8-shot CoT (lm-"
+                         "evaluation-harness 'gsm8k-cot'). Use the latter two as a "
+                         "robustness check on whether the v1 within-AUROC ~0.71 is an "
+                         "artefact of the bespoke prompt.")
     # reasoning subspace (identical defaults to 01 so participation is comparable)
     ap.add_argument("--no_reasoning_subspace", action="store_true")
     ap.add_argument("--reasoning_mode", default="energy",
@@ -312,7 +481,12 @@ def main():
           f"x K={args.k_samples} samples (T={args.temperature}, top_p={args.top_p})")
 
     rows = []
-    n_gen = n_correct = n_dropped = 0
+    n_gen = n_correct = 0
+    # break down drop reasons so the audit can attribute lost samples
+    n_dropped_text = n_dropped_extract = n_dropped_steps = 0
+    # format / correctness audit counters (over ALL generated samples, before drop)
+    n_marker = n_last_number = n_no_number = 0
+    n_correct_strict_all = 0
     gen_kwargs = dict(
         do_sample=True, temperature=args.temperature, top_p=args.top_p,
         max_new_tokens=args.max_new_tokens, num_return_sequences=args.k_samples,
@@ -323,7 +497,8 @@ def main():
         if gold is None:
             continue
 
-        gen_in = build_gen_inputs(tokenizer, question, device)
+        gen_in = build_gen_inputs(tokenizer, question, device,
+                                  prompt_style=args.prompt_style)
         with torch.no_grad():
             out = model.generate(**gen_in, **gen_kwargs)
         gen_only = out[:, gen_in["input_ids"].shape[1]:]
@@ -336,13 +511,26 @@ def main():
         for si, response in enumerate(texts):
             n_gen += 1
             response = response.strip()
-            pred = predicted_answer(response)
-            correct = answers_match(pred, gold)
+            # parse + record which path produced the prediction. "marker" = the
+            # '#### N' line the prompt requested (trustworthy); "last_number" =
+            # fallback to the last number in the response (format failure --
+            # could be a mid-chain intermediate, NOT the final answer).
+            pred, pred_src = predicted_answer_with_source(response)
+            has_marker = (pred_src == "marker")
+            correct = answers_match(pred, gold)              # lenient (= v1 behaviour)
+            correct_strict = bool(correct and has_marker)    # strict: marker AND match
             n_correct += int(correct)
+            n_correct_strict_all += int(correct_strict)
+            if pred_src == "marker":
+                n_marker += 1
+            elif pred_src == "last_number":
+                n_last_number += 1
+            else:
+                n_no_number += 1
 
-            steps = split_into_steps(response)
+            steps = split_into_steps(response, granularity=args.step_split)
             if len(steps) < args.min_steps:
-                n_dropped += 1
+                n_dropped_text += 1
                 continue
             try:
                 M_D, _, _, kept_steps, layers_used, _, _, SV = _ex.extract_spectral_field(
@@ -353,21 +541,26 @@ def main():
                     store_clouds=args.store_clouds, cloud_layer_indices=cloud_layers)
             except Exception as e:
                 print(f"  warn: extraction failed (p{pi} s{si}): {e}")
-                n_dropped += 1
+                n_dropped_extract += 1
                 continue
             if M_D is None or M_D.shape[0] < args.min_steps or SV is None:
-                n_dropped += 1
+                n_dropped_steps += 1
                 continue
 
             rows.append({
                 "id": f"p{pi}_s{si}",
                 "problem_id": int(pi),
                 "sample_idx": int(si),
-                "is_correct": int(correct),
+                "is_correct": int(correct),                    # lenient (v1 compat)
+                "is_correct_strict": int(correct_strict),      # marker + match
+                "format_ok": int(has_marker),
+                "pred_source": pred_src,                       # marker/last_number/none
                 "n_steps": int(M_D.shape[0]),
                 "pred": pred if pred is not None else float("nan"),
                 "gold": gold,
                 "layers_used": np.asarray(layers_used, dtype=np.int32),
+                "response": response,                          # NEW: raw generation
+                "steps_text": list(steps),                     # NEW: parsed steps
                 "SV": SV,
             })
 
@@ -381,12 +574,24 @@ def main():
         problem_ids=np.array([r["problem_id"] for r in rows], dtype=np.int32),
         sample_idx=np.array([r["sample_idx"] for r in rows], dtype=np.int32),
         is_correct=np.array([r["is_correct"] for r in rows], dtype=np.int32),
+        # NEW: strict label (also requires '####' format) + format-fail flag +
+        # parser path. Lets downstream scripts rerun with either label policy.
+        is_correct_strict=np.array([r["is_correct_strict"] for r in rows], dtype=np.int32),
+        format_ok=np.array([r["format_ok"] for r in rows], dtype=np.int32),
+        pred_source=np.array([r["pred_source"] for r in rows], dtype=object),
         n_steps=np.array([r["n_steps"] for r in rows], dtype=np.int32),
         pred_answers=np.array([r["pred"] for r in rows], dtype=np.float64),
         gold_answers=np.array([r["gold"] for r in rows], dtype=np.float64),
         layers_used=rows[0]["layers_used"],
         sv_stored=np.array(True),
         sv_modes=np.array(modes, dtype=object),
+        # NEW: raw generated text + parsed step strings. Required for any
+        # text-side analysis (event-level semantics, audit, score-vs-text
+        # backtracking). Costs ~3-5 MB / 2000 samples, negligible vs SV blobs.
+        responses=np.array([r["response"] for r in rows], dtype=object),
+        steps_text=np.array([r["steps_text"] for r in rows], dtype=object),
+        step_split=np.array(args.step_split),
+        prompt_style=np.array(args.prompt_style),
         model_name=np.array(args.model),
         dataset=np.array(f"{args.dataset_format}:{args.dataset}/{args.subset}"),
         whitened=np.array(whiten is not None),
@@ -423,20 +628,49 @@ def main():
     np.savez(args.output, **save)
 
     n_prob_kept = len(set(r["problem_id"] for r in rows))
-    # problems usable for the within-problem test need both classes present
-    by_prob = {}
+    # problems usable for the within-problem test under each labeling policy
+    by_prob_len = {}; by_prob_str = {}
     for r in rows:
-        by_prob.setdefault(r["problem_id"], []).append(r["is_correct"])
-    n_contrastive = sum(1 for v in by_prob.values()
-                        if any(v) and not all(v))
-    print(f"\nGenerated {n_gen} samples; final-answer accuracy = "
-          f"{n_correct}/{n_gen} = {n_correct / max(1, n_gen):.3f}")
-    print(f"Kept {len(rows)} samples ({n_dropped} dropped: <{args.min_steps} steps "
-          f"or extraction fail) across {n_prob_kept} problems.")
-    print(f"Problems with BOTH a correct and an incorrect sample "
-          f"(usable for within-problem test): {n_contrastive}")
+        by_prob_len.setdefault(r["problem_id"], []).append(r["is_correct"])
+        by_prob_str.setdefault(r["problem_id"], []).append(r["is_correct_strict"])
+    n_contrastive_lenient = sum(1 for v in by_prob_len.values()
+                                if any(v) and not all(v))
+    n_contrastive_strict = sum(1 for v in by_prob_str.values()
+                               if any(v) and not all(v))
+    # format-fail mass = lenient - strict on the SAME sample set: how many
+    # samples were marked correct only because the last-number fallback hit gold
+    n_lenient_kept = sum(r["is_correct"] for r in rows)
+    n_strict_kept = sum(r["is_correct_strict"] for r in rows)
+    n_dropped = n_dropped_text + n_dropped_extract + n_dropped_steps
+
+    print(f"\n=== generation / labeling audit ===")
+    print(f"Prompt style: {args.prompt_style}; step split: {args.step_split}")
+    print(f"Generated {n_gen} samples.")
+    print(f"  Format ok ('####' present):  {n_marker}/{n_gen} = "
+          f"{n_marker / max(1, n_gen):.3f}")
+    print(f"  Format fail (last-number):   {n_last_number}/{n_gen} = "
+          f"{n_last_number / max(1, n_gen):.3f}  <- silently scored against gold")
+    print(f"  No number at all:            {n_no_number}/{n_gen}")
+    print(f"  Lenient correctness (= v1):  {n_correct}/{n_gen} = "
+          f"{n_correct / max(1, n_gen):.3f}")
+    print(f"  Strict  correctness (=marker+match): {n_correct_strict_all}/{n_gen} = "
+          f"{n_correct_strict_all / max(1, n_gen):.3f}")
+    print(f"  Gap (lenient - strict): "
+          f"{(n_correct - n_correct_strict_all) / max(1, n_gen):.3f}  "
+          f"<- mass that was 'correct' only via last-number fallback")
+    print(f"\n=== drop reasons ===")
+    print(f"  text split <{args.min_steps} steps : {n_dropped_text}")
+    print(f"  extraction exception              : {n_dropped_extract}")
+    print(f"  extracted <{args.min_steps} steps after extraction : {n_dropped_steps}")
+    print(f"  total dropped                     : {n_dropped}")
+    print(f"\nKept {len(rows)} samples across {n_prob_kept} problems.")
+    print(f"  Kept lenient correct: {n_lenient_kept}; strict correct: {n_strict_kept}")
+    print(f"  Contrastive problems (BOTH classes), lenient labels: "
+          f"{n_contrastive_lenient}")
+    print(f"  Contrastive problems (BOTH classes), strict labels:  "
+          f"{n_contrastive_strict}  <- USE THIS for the audit-grade within-problem test")
     print(f"Saved -> {args.output}")
-    if n_contrastive < 20:
+    if min(n_contrastive_lenient, n_contrastive_strict) < 20:
         print("  WARNING: few contrastive problems. Raise --k_samples or "
               "--n_problems, or --temperature for more diversity.")
 
