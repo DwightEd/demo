@@ -132,7 +132,20 @@ fi
 
 if [ "$SKIP_PULL" != "1" ]; then
     log_step "步骤 0: git pull origin main"
-    run_or_skip "git_pull_$(date +%Y%m%d)" "git pull origin main"
+    # 检测 dirty tree -> 不强行 pull (pull.rebase=true 模式下会失败)
+    # 提示用户处理本地改动, 但不阻止管道继续 (本地代码大概率已经是最新的)
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "[$(ts)] WARN: working tree 有未提交改动, 跳过 pull:"
+        git status --short
+        echo ""
+        echo "[$(ts)] 处理本地改动后可手动 pull, 或直接继续 (本地代码可能已是最新):"
+        echo "[$(ts)]   git stash               # 暂存"
+        echo "[$(ts)]   git checkout .          # 丢弃 (确认不要再用)"
+        echo "[$(ts)]   git add . && git commit # 保留"
+        echo "[$(ts)] 然后用 SKIP_PULL=1 ./run_v2_pipeline.sh 跳过本步"
+    else
+        run_or_skip "git_pull_$(date +%Y%m%d)" "git pull origin main"
+    fi
 else
     echo "[$(ts)] SKIP_PULL=1, 跳过 git pull"
 fi
