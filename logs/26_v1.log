@@ -1,0 +1,30 @@
+Loaded 2375 chains over 198 problems.  Extracting features...
+  23 features computed: ['ae_all_early', 'ae_all_full', 'ae_all_late', 'ae_deep_early', 'ae_deep_full', 'ae_deep_late', 'ae_mid_early', 'ae_mid_full', 'ae_mid_late', 'mahal_all', 'mahal_deep', 'mahal_mid', 'mean_out_entropy', 'n_steps', 'pr_all_early', 'pr_all_full', 'pr_all_late', 'pr_deep_early', 'pr_deep_full', 'pr_deep_late', 'pr_mid_early', 'pr_mid_full', 'pr_mid_late']
+  strict labels NOT in npz -- running lenient (v1) only.  Regenerate with new 10 to enable strict.
+
+=== Policy 'lenient': 489 error / 1886 correct; 117 contrastive problems ===
+                    ae_all_early ...  d= +0.257  AUROC_cp=0.574  AUROC_wp=0.534  verdict=error_higher
+                     ae_all_full ...  d= +0.320  AUROC_cp=0.586  AUROC_wp=0.543  verdict=error_higher
+                     ae_all_late ...  d= +0.165  AUROC_cp=0.540  AUROC_wp=0.513  verdict=error_higher
+                   ae_deep_early ...  d= +0.111  AUROC_cp=0.538  AUROC_wp=0.509  verdict=error_higher
+                    ae_deep_full ...  d= +0.072  AUROC_cp=0.523  AUROC_wp=0.508  verdict=n.s.
+                    ae_deep_late ...  d= -0.089  AUROC_cp=0.476  AUROC_wp=0.472  verdict=n.s.
+                    ae_mid_early ...  d= +0.420  AUROC_cp=0.621  AUROC_wp=0.548  verdict=error_higher
+                     ae_mid_full ...  d= +0.567  AUROC_cp=0.654  AUROC_wp=0.578  verdict=error_higher
+                     ae_mid_late ...  d= +0.485  AUROC_cp=0.634  AUROC_wp=0.568  verdict=error_higher
+                       mahal_all ...  d= +0.616  AUROC_cp=0.652  AUROC_wp=0.646  verdict=error_higher
+                      mahal_deep ...  d= +0.616  AUROC_cp=0.650  AUROC_wp=0.645  verdict=error_higher
+                       mahal_mid ...  d= +0.536  AUROC_cp=0.646  AUROC_wp=0.628  verdict=error_higher
+                mean_out_entropy ...  d= +0.322  AUROC_cp=0.581  AUROC_wp=0.573  verdict=error_higher
+                         n_steps ...  d= +0.599  AUROC_cp=0.653  AUROC_wp=0.585  verdict=error_higher
+                    pr_all_early ...  d= +0.198  AUROC_cp=0.558  AUROC_wp=0.525  verdict=error_higher
+                     pr_all_full ...  d= +0.225  AUROC_cp=0.564  AUROC_wp=0.523  verdict=error_higher
+                     pr_all_late ...  d= +0.067  AUROC_cp=0.515  AUROC_wp=0.496  verdict=n.s.
+                   pr_deep_early ...  d= -0.000  AUROC_cp=0.492  AUROC_wp=0.498  verdict=n.s.
+                    pr_deep_full ...  d= -0.104  AUROC_cp=0.468  AUROC_wp=0.465  verdict=correct_higher
+                    pr_deep_late ...  d= -0.256  AUROC_cp=0.427  AUROC_wp=0.429  verdict=correct_higher
+                    pr_mid_early ...  d= +0.443  AUROC_cp=0.637  AUROC_wp=0.553  verdict=error_higher
+                     pr_mid_full ...  d= +0.617  AUROC_cp=0.677  AUROC_wp=0.597  verdict=error_higher
+                     pr_mid_late ...  d= +0.515  AUROC_cp=0.662  AUROC_wp=0.594  verdict=error_higher
+
+Saved -> data/v1_comprehensive_stats.json  (51 KB)
