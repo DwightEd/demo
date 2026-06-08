@@ -155,6 +155,7 @@ def extract_spectral_field(
     store_vectors: bool = False,
     store_clouds: bool = False,
     cloud_layer_indices: tuple | None = None,
+    token_uncertainty: bool = False,
 ):
     """Run one forward pass and reduce each (step, layer) token cloud to (D, V, C).
 
@@ -325,6 +326,27 @@ def extract_spectral_field(
             ent = float(-(logp.exp() * logp).sum().item())
             out_entropy[row] = ent
 
+    # Per-TOKEN uncertainty over the response tokens (for uncertainty-trace-profile, 34):
+    #   entropy   = H(softmax(logits_{t-1}))            distributional aleatoric
+    #   committal = p(1-p), p = prob of the actual token t   committal aleatoric
+    # Computed from the SAME forward pass (no extra memory / no output_logits in generate),
+    # vectorised over the response range -> one (R, V) tensor per chain, freed immediately.
+    tok_ent = tok_com = None
+    if step_vectors and token_uncertainty and logits is not None and len(safe) > 0:
+        import torch
+        a0 = max(1, int(safe[0][1])); b1 = int(safe[-1][2])
+        if b1 >= a0:
+            pos = torch.arange(a0, b1 + 1, device=logits.device)
+            sub = logits.index_select(0, pos - 1).float()          # (R, V) at predicting positions
+            lp = torch.log_softmax(sub, dim=-1); p = lp.exp()
+            ent = -(p * lp).sum(-1)                                 # (R,)
+            tgt = encoding["input_ids"][0].index_select(0, pos)     # actual next tokens
+            ptok = p.gather(-1, tgt.view(-1, 1)).squeeze(-1)
+            com = ptok * (1 - ptok)
+            tok_ent = ent.detach().cpu().numpy().astype(np.float32)
+            tok_com = com.detach().cpu().numpy().astype(np.float32)
+            del sub, lp, p
+
     if store_geometry and geom_mu is not None:
         GEOM = {"mu": geom_mu, "eigvals": geom_eigvals, "eigvecs": geom_eigvecs}
 
@@ -349,6 +371,9 @@ def extract_spectral_field(
             SV["vec"] = sv_vec
         if CLOUDS is not None:
             SV["clouds"] = CLOUDS
+        if tok_ent is not None:
+            SV["tok_entropy"] = tok_ent
+            SV["tok_committal"] = tok_com
     return M_D, M_V, M_C, kept_steps, layer_indices, GEOM, CIM, SV
 
 

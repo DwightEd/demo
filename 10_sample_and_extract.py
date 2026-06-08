@@ -152,37 +152,6 @@ def answers_match(pred, gold, tol: float = 1e-4) -> bool:
     return abs(pred - gold) <= tol * max(1.0, abs(gold))
 
 
-@torch.no_grad()
-def token_uncertainty_from_scores(scores, sequences, prompt_len, eos_id):
-    """Per-generated-token uncertainty from generation logits (trace channel).
-
-    scores    : tuple(len=G) of (K, V) next-token logits at each generation step.
-    sequences : (K, prompt_len + G) generated token ids.
-    Returns a list over the K sequences of (entropy[], committal[]) arrays, each trimmed
-    at the first EOS, where:
-      entropy   = H(softmax(logits))                  (distributional aleatoric)
-      committal = p*(1-p), p = prob of the token actually generated  (committal aleatoric)
-    Computed step-by-step to avoid materialising the (K,G,V) tensor.
-    """
-    K = sequences.shape[0]; G = len(scores)
-    ent = torch.zeros(K, G); com = torch.zeros(K, G)
-    gen = sequences[:, prompt_len:prompt_len + G]                     # (K, G)
-    for t in range(G):
-        lg = scores[t].float()                                        # (K, V)
-        lp = torch.log_softmax(lg, dim=-1); pp = lp.exp()
-        ent[:, t] = -(pp * lp).sum(-1).cpu()
-        ptok = pp.gather(-1, gen[:, t:t+1]).squeeze(-1)
-        com[:, t] = (ptok * (1 - ptok)).cpu()
-    out = []
-    for k in range(K):
-        toks = gen[k]
-        eos = (toks == eos_id).nonzero()
-        Lk = int(eos[0]) if len(eos) else G
-        out.append((ent[k, :Lk].numpy().astype(np.float32),
-                    com[k, :Lk].numpy().astype(np.float32)))
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Step segmentation for self-generated solutions (Streaming-HD: sentence = step)
 # ---------------------------------------------------------------------------
@@ -537,23 +506,7 @@ def main():
                                   prompt_style=args.prompt_style)
         plen = gen_in["input_ids"].shape[1]
         with torch.no_grad():
-            if args.store_token_uncertainty:
-                # output_logits = RAW next-token logits (faithful: uncertainty must be the
-                # model's own distribution, not the temperature/top_p-warped sampling one).
-                # Fall back to output_scores on older transformers.
-                try:
-                    g = model.generate(**gen_in, **gen_kwargs,
-                                       return_dict_in_generate=True, output_logits=True)
-                    step_logits = g.logits
-                except TypeError:
-                    g = model.generate(**gen_in, **gen_kwargs,
-                                       return_dict_in_generate=True, output_scores=True)
-                    step_logits = g.scores
-                out = g.sequences
-                tok_unc = token_uncertainty_from_scores(
-                    step_logits, out, plen, tokenizer.eos_token_id)
-            else:
-                out = model.generate(**gen_in, **gen_kwargs); tok_unc = None
+            out = model.generate(**gen_in, **gen_kwargs)
         gen_only = out[:, plen:]
         texts = tokenizer.batch_decode(
             gen_only, skip_special_tokens=True, clean_up_tokenization_spaces=False)
@@ -591,7 +544,8 @@ def main():
                     layer_indices=layer_indices, max_seq_len=args.max_seq_len,
                     V_R=V_R, step_vectors=True, sv_modes=sv_modes, whiten=whiten,
                     store_vectors=args.store_vectors,
-                    store_clouds=args.store_clouds, cloud_layer_indices=cloud_layers)
+                    store_clouds=args.store_clouds, cloud_layer_indices=cloud_layers,
+                    token_uncertainty=args.store_token_uncertainty)
             except Exception as e:
                 print(f"  warn: extraction failed (p{pi} s{si}): {e}")
                 n_dropped_extract += 1
@@ -614,8 +568,8 @@ def main():
                 "layers_used": np.asarray(layers_used, dtype=np.int32),
                 "response": response,                          # NEW: raw generation
                 "steps_text": list(steps),                     # NEW: parsed steps
-                "tok_entropy": (tok_unc[si][0] if tok_unc is not None else None),
-                "tok_committal": (tok_unc[si][1] if tok_unc is not None else None),
+                "tok_entropy": (SV.get("tok_entropy") if SV else None),
+                "tok_committal": (SV.get("tok_committal") if SV else None),
                 "SV": SV,
             })
 
