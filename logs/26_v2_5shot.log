@@ -1,0 +1,55 @@
+Loaded 2646 chains over 291 problems.  Extracting features...
+  23 features computed: ['ae_all_early', 'ae_all_full', 'ae_all_late', 'ae_deep_early', 'ae_deep_full', 'ae_deep_late', 'ae_mid_early', 'ae_mid_full', 'ae_mid_late', 'mahal_all', 'mahal_deep', 'mahal_mid', 'mean_out_entropy', 'n_steps', 'pr_all_early', 'pr_all_full', 'pr_all_late', 'pr_deep_early', 'pr_deep_full', 'pr_deep_late', 'pr_mid_early', 'pr_mid_full', 'pr_mid_late']
+  strict labels found -- running both policies.
+
+=== Policy 'lenient': 528 error / 2118 correct; 122 contrastive problems ===
+                    ae_all_early ...  d= +0.050  AUROC_cp=0.519  AUROC_wp=0.515  verdict=n.s.
+                     ae_all_full ...  d= +0.150  AUROC_cp=0.532  AUROC_wp=0.519  verdict=error_higher
+                     ae_all_late ...  d= +0.216  AUROC_cp=0.553  AUROC_wp=0.526  verdict=error_higher
+                   ae_deep_early ...  d= +0.251  AUROC_cp=0.568  AUROC_wp=0.544  verdict=error_higher
+                    ae_deep_full ...  d= +0.460  AUROC_cp=0.615  AUROC_wp=0.599  verdict=error_higher
+                    ae_deep_late ...  d= +0.409  AUROC_cp=0.602  AUROC_wp=0.583  verdict=error_higher
+                    ae_mid_early ...  d= -0.168  AUROC_cp=0.450  AUROC_wp=0.491  verdict=correct_higher
+                     ae_mid_full ...  d= -0.335  AUROC_cp=0.407  AUROC_wp=0.468  verdict=correct_higher
+                     ae_mid_late ...  d= -0.238  AUROC_cp=0.434  AUROC_wp=0.487  verdict=correct_higher
+                       mahal_all ...  d= +0.461  AUROC_cp=0.641  AUROC_wp=0.647  verdict=error_higher
+                      mahal_deep ...  d= +0.435  AUROC_cp=0.635  AUROC_wp=0.639  verdict=error_higher
+                       mahal_mid ...  d= +0.553  AUROC_cp=0.658  AUROC_wp=0.657  verdict=error_higher
+                mean_out_entropy ...  d= +0.112  AUROC_cp=0.545  AUROC_wp=0.565  verdict=error_higher
+                         n_steps ...  d= +0.463  AUROC_cp=0.612  AUROC_wp=0.505  verdict=error_higher
+                    pr_all_early ...  d= +0.010  AUROC_cp=0.506  AUROC_wp=0.511  verdict=n.s.
+                     pr_all_full ...  d= +0.063  AUROC_cp=0.510  AUROC_wp=0.500  verdict=n.s.
+                     pr_all_late ...  d= +0.141  AUROC_cp=0.535  AUROC_wp=0.520  verdict=error_higher
+                   pr_deep_early ...  d= +0.151  AUROC_cp=0.539  AUROC_wp=0.527  verdict=error_higher
+                    pr_deep_full ...  d= +0.320  AUROC_cp=0.582  AUROC_wp=0.580  verdict=error_higher
+                    pr_deep_late ...  d= +0.307  AUROC_cp=0.581  AUROC_wp=0.571  verdict=error_higher
+                    pr_mid_early ...  d= -0.184  AUROC_cp=0.446  AUROC_wp=0.495  verdict=correct_higher
+                     pr_mid_full ...  d= -0.342  AUROC_cp=0.399  AUROC_wp=0.470  verdict=correct_higher
+                     pr_mid_late ...  d= -0.210  AUROC_cp=0.440  AUROC_wp=0.506  verdict=correct_higher
+
+=== Policy 'strict': 890 error / 1756 correct; 204 contrastive problems ===
+                    ae_all_early ...  d= -0.070  AUROC_cp=0.481  AUROC_wp=0.489  verdict=n.s.
+                     ae_all_full ...  d= -0.011  AUROC_cp=0.492  AUROC_wp=0.470  verdict=n.s.
+                     ae_all_late ...  d= +0.024  AUROC_cp=0.501  AUROC_wp=0.448  verdict=n.s.
+                   ae_deep_early ...  d= +0.191  AUROC_cp=0.553  AUROC_wp=0.535  verdict=error_higher
+                    ae_deep_full ...  d= +0.321  AUROC_cp=0.581  AUROC_wp=0.528  verdict=error_higher
+                    ae_deep_late ...  d= +0.226  AUROC_cp=0.557  AUROC_wp=0.485  verdict=error_higher
+                    ae_mid_early ...  d= -0.193  AUROC_cp=0.442  AUROC_wp=0.472  verdict=correct_higher
+                     ae_mid_full ...  d= -0.364  AUROC_cp=0.398  AUROC_wp=0.410  verdict=correct_higher
+                     ae_mid_late ...  d= -0.399  AUROC_cp=0.395  AUROC_wp=0.399  verdict=correct_higher
+                       mahal_all ...  d= +0.869  AUROC_cp=0.751  AUROC_wp=0.815  verdict=error_higher
+                      mahal_deep ...  d= +0.828  AUROC_cp=0.744  AUROC_wp=0.811  verdict=error_higher
+                       mahal_mid ...  d= +1.024  AUROC_cp=0.775  AUROC_wp=0.830  verdict=error_higher
+                mean_out_entropy ...  d= -0.020  AUROC_cp=0.510  AUROC_wp=0.515  verdict=n.s.
+                         n_steps ...  d= +0.434  AUROC_cp=0.606  AUROC_wp=0.486  verdict=error_higher
+                    pr_all_early ...  d= -0.117  AUROC_cp=0.468  AUROC_wp=0.472  verdict=correct_higher
+                     pr_all_full ...  d= -0.134  AUROC_cp=0.457  AUROC_wp=0.427  verdict=correct_higher
+                     pr_all_late ...  d= -0.117  AUROC_cp=0.465  AUROC_wp=0.413  verdict=correct_higher
+                   pr_deep_early ...  d= +0.114  AUROC_cp=0.531  AUROC_wp=0.514  verdict=error_higher
+                    pr_deep_full ...  d= +0.140  AUROC_cp=0.534  AUROC_wp=0.483  verdict=error_higher
+                    pr_deep_late ...  d= +0.028  AUROC_cp=0.509  AUROC_wp=0.435  verdict=error_higher
+                    pr_mid_early ...  d= -0.253  AUROC_cp=0.424  AUROC_wp=0.458  verdict=correct_higher
+                     pr_mid_full ...  d= -0.432  AUROC_cp=0.375  AUROC_wp=0.396  verdict=correct_higher
+                     pr_mid_late ...  d= -0.422  AUROC_cp=0.388  AUROC_wp=0.395  verdict=correct_higher
+
+Saved -> data/v2_5shot.comprehensive_stats.json  (101 KB)
