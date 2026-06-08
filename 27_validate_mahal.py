@@ -109,44 +109,49 @@ def main():
     data = np.load(args.input, allow_pickle=True)
     VEC = data[f"sv_vec_{args.mode}"]
     problem_ids = data["problem_ids"].astype(int)
-    if "is_correct_strict" not in data.files:
-        raise SystemExit("npz lacks is_correct_strict -- need v2 data.")
-    y = (data["is_correct_strict"].astype(int) == 0).astype(int)   # 1 = incorrect (strict)
+    if "is_correct" not in data.files:
+        raise SystemExit("npz lacks is_correct -- need v2 data.")
+    ic = data["is_correct"].astype(int)                              # lenient = answer-based
+    ics = (data["is_correct_strict"].astype(int) if "is_correct_strict" in data.files else ic)
     fmt = data["format_ok"].astype(bool) if "format_ok" in data.files else np.ones(len(VEC), bool)
     N = len(VEC); L = np.asarray(VEC[0]).shape[1]; d = np.asarray(VEC[0]).shape[2]
 
-    n_err = int(y.sum()); n_fmt_err = int((y & fmt).sum())
-    print(f"N={N}  strict-incorrect={n_err}  of which format_ok(genuine reasoning err)={n_fmt_err} "
-          f"({n_fmt_err/max(1,n_err)*100:.0f}%)  format-fail-in-error={n_err-n_fmt_err}")
+    # Two definitions of an ERROR chain (1 = incorrect):
+    #   answer  : wrong final ANSWER, regardless of '####' format (format-fail-but-correct
+    #             stays CORRECT)  -> the meaningful definition for reasoning errors.
+    #   strict  : wrong answer OR missing '####' marker (format failure counted as error)
+    #             -> conflates format failure with reasoning error; this is what gave 0.83.
+    label_defs = [("answer(只看答案)", (ic == 0).astype(int)),
+                  ("strict(需格式)", (ics == 0).astype(int))]
 
-    print(f"\n{'band':5s} {'A in-sample/global':>18s} {'B heldout/correct':>18s} {'C +format_ok only':>18s}")
+    # precompute late vectors per band once (reused across labels)
+    bands = [b.strip() for b in args.bands.split(",")]
+    Xb = {b: late_vectors(VEC, band_cols(L, b), args.late_lo, d) for b in bands}
     allmask = np.ones(N, bool)
-    for band in args.bands.split(","):
-        band = band.strip(); cols = band_cols(L, band)
-        X = late_vectors(VEC, cols, args.late_lo, d)
 
-        # A) reproduce: in-sample, global mean, all chains
-        sA = insample_mahal(X, allmask)
-        igA = contrastive_groups(problem_ids, y, allmask & np.isfinite(X).all(1))
-        aA = within_pair_auroc(igA, sA, y)[0]; aA = max(aA, 1-aA)
+    for lname, y in label_defs:
+        n_err = int(y.sum()); n_fmt_err = int((y & fmt).sum())
+        print(f"\n##### 错误链定义 = {lname} #####")
+        print(f"  N={N}  incorrect={n_err}  其中 format_ok={n_fmt_err}"
+              f"({n_fmt_err/max(1,n_err)*100:.0f}%)  format-fail={n_err-n_fmt_err}")
+        print(f"  {'band':5s} {'A in-sample/global':>18s} {'B heldout/healthy':>18s} {'C heldout/healthy/fmt':>22s}")
+        for band in bands:
+            X = Xb[band]
+            sA = insample_mahal(X, allmask)
+            igA = contrastive_groups(problem_ids, y, allmask & np.isfinite(X).all(1))
+            aA = max(within_pair_auroc(igA, sA, y)[0], 1 - within_pair_auroc(igA, sA, y)[0])
+            sB = heldout_mahal(X, y, problem_ids, allmask, True, args.kfold, args.n_seeds, args.seed)
+            igB = contrastive_groups(problem_ids, y, np.isfinite(sB))
+            aB = max(within_pair_auroc(igB, sB, y)[0], 1 - within_pair_auroc(igB, sB, y)[0])
+            sC = heldout_mahal(X, y, problem_ids, fmt, True, args.kfold, args.n_seeds, args.seed)
+            igC = contrastive_groups(problem_ids, y, fmt & np.isfinite(sC))
+            aC = max(within_pair_auroc(igC, sC, y)[0], 1 - within_pair_auroc(igC, sC, y)[0])
+            print(f"  {band:5s} {aA:18.3f} {aB:18.3f} {aC:22.3f}")
 
-        # B) held-out, correct-only healthy, all chains
-        sB = heldout_mahal(X, y, problem_ids, allmask, True, args.kfold, args.n_seeds, args.seed)
-        igB = contrastive_groups(problem_ids, y, np.isfinite(sB))
-        aB = within_pair_auroc(igB, sB, y)[0]; aB = max(aB, 1-aB)
-
-        # C) held-out, correct-only healthy, format_ok chains only (genuine reasoning errors)
-        sC = heldout_mahal(X, y, problem_ids, fmt, True, args.kfold, args.n_seeds, args.seed)
-        igC = contrastive_groups(problem_ids, y, fmt & np.isfinite(sC))
-        aC = within_pair_auroc(igC, sC, y)[0]; aC = max(aC, 1-aC)
-
-        print(f"{band:5s} {aA:18.3f} {aB:18.3f} {aC:18.3f}")
-
-    print("\nRead:")
-    print("  A ~ 0.83 reproduces the reported in-sample number.")
-    print("  B << A  => the 0.83 leaned on in-sample/global-mean; held-out healthy is the honest number.")
-    print("  C << B  => the signal was largely FORMAT-failure detection, not reasoning-error detection.")
-    print("  B ~ A and C ~ B => the signal is real, held-out, and genuine reasoning error. (the good case)")
+    print("\n解读:")
+    print("  对比 answer 与 strict 两块:strict 的高数主要来自把格式失败算成错误。")
+    print("  A=in-sample全体均值; B=留出+只用正确链估均值(真·到健康流形,无循环);")
+    print("  C=B 且仅格式合规链(纯推理错误)。answer 定义下的 B/C 才是诚实的推理错误检测力。")
 
 
 if __name__ == "__main__":
