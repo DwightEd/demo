@@ -149,7 +149,13 @@ def main():
     ent_m = np.array(ent_m); com_m = np.array(com_m)
     d = V.shape[1]
 
-    # healthy reference: per-problem correct mean (difficulty control) + global correct std
+    # healthy reference: per-problem correct mean (difficulty control) + global correct std.
+    # Z     = in-sample per-problem correct mean (LEAKY: a correct chain is inside its own
+    #         reference -> its deviation is mechanically shrunk -> inflated AUROC). Kept only
+    #         to expose the artifact size.
+    # Zloo  = leave-one-out: a correct chain's reference EXCLUDES itself (other correct chains
+    #         of the same problem). Error chains keep the full correct mean. This removes the
+    #         in-sample shrink -> the honest within-problem number. All real detectors use Zloo.
     glob_cor = V[yy == 0]
     mu_glob = glob_cor.mean(0); sg = glob_cor.std(0) + 1e-6
     muc = {}
@@ -157,6 +163,19 @@ def main():
         cm = (pp == p) & (yy == 0)
         muc[p] = V[cm].mean(0) if cm.any() else mu_glob
     Z = np.vstack([(V[i] - muc[pp[i]]) / sg for i in range(len(V))])
+    Zloo = np.empty_like(Z)
+    for p in np.unique(pp):
+        idx = np.where(pp == p)[0]
+        C = idx[yy[idx] == 0]; nC = len(C)
+        sumC = V[C].sum(0) if nC else None
+        for i in idx:
+            if yy[i] == 0 and nC >= 2:
+                ref = (sumC - V[i]) / (nC - 1)
+            elif nC >= 1:
+                ref = sumC / nC
+            else:
+                ref = mu_glob
+            Zloo[i] = (V[i] - ref) / sg
 
     prob = {}
     for j, p in enumerate(pp): prob.setdefault(int(p), []).append(j)
@@ -167,22 +186,26 @@ def main():
                     "contrastive_problems": len(groups),
                     "subset": "format_ok" if args.format_ok else "all", "label": "answer-based"}}
 
-    # --- magnitude features (label-free) ---
-    l2 = np.sqrt((Z**2).sum(1)); linf = np.abs(Z).max(1)
-    n2 = (np.abs(Z) > 2).sum(1).astype(float); n3 = (np.abs(Z) > 3).sum(1).astype(float)
-    out["magnitude_within_auroc"] = {
-        "l2_norm": round(within_pair_auroc(groups, l2, yy), 4),
-        "max_abs": round(within_pair_auroc(groups, linf, yy), 4),
-        "n_gt2":   round(within_pair_auroc(groups, n2, yy), 4),
-        "n_gt3":   round(within_pair_auroc(groups, n3, yy), 4),
-    }
+    def mag_block(M):
+        l2 = np.sqrt((M**2).sum(1)); linf = np.abs(M).max(1)
+        n2 = (np.abs(M) > 2).sum(1).astype(float); n3 = (np.abs(M) > 3).sum(1).astype(float)
+        return l2, linf, n2, n3, {
+            "l2_norm": round(within_pair_auroc(groups, l2, yy), 4),
+            "max_abs": round(within_pair_auroc(groups, linf, yy), 4),
+            "n_gt2":   round(within_pair_auroc(groups, n2, yy), 4),
+            "n_gt3":   round(within_pair_auroc(groups, n3, yy), 4),
+        }
 
-    # --- supervised held-out projection ---
-    sp = supervised_proj_oof(Z, yy, pp, args.kfold, args.n_seeds)
+    # in-sample (LEAKY, for contrast) vs leave-one-out (HONEST)
+    _, _, _, _, out["magnitude_within_auroc_INSAMPLE_leaky"] = mag_block(Z)
+    l2, linf, n2, n3, out["magnitude_within_auroc"] = mag_block(Zloo)
+
+    # --- supervised held-out projection (on LOO deviations) ---
+    sp = supervised_proj_oof(Zloo, yy, pp, args.kfold, args.n_seeds)
     out["supervised_proj_within_auroc"] = round(within_pair_auroc(groups, sp, yy), 4)
 
     # --- sparse L1 probe (which / how many dims) ---
-    l1 = oof_proba(Z, yy, pp, args.kfold, args.n_seeds,
+    l1 = oof_proba(Zloo, yy, pp, args.kfold, args.n_seeds,
                    lambda: make_pipeline(StandardScaler(),
                        LogisticRegression(penalty="l1", solver="liblinear", C=0.05,
                                           max_iter=2000, class_weight="balanced")))
@@ -190,15 +213,15 @@ def main():
     full = make_pipeline(StandardScaler(),
                          LogisticRegression(penalty="l1", solver="liblinear", C=0.05,
                                             max_iter=2000, class_weight="balanced"))
-    full.fit(Z, yy)
+    full.fit(Zloo, yy)
     coef = full[-1].coef_.ravel()
     nz = np.where(np.abs(coef) > 1e-8)[0]
     order = nz[np.argsort(-np.abs(coef[nz]))][:15]
     out["l1_active_dims"] = int(len(nz))
     out["l1_top_dims"] = [{"dim": int(j), "coef": round(float(coef[j]), 3)} for j in order]
 
-    # --- which dims abnormal: per-dim mean|z| error vs correct ---
-    az_e = np.abs(Z[yy == 1]).mean(0); az_c = np.abs(Z[yy == 0]).mean(0)
+    # --- which dims abnormal: per-dim mean|z| error vs correct (LOO) ---
+    az_e = np.abs(Zloo[yy == 1]).mean(0); az_c = np.abs(Zloo[yy == 0]).mean(0)
     diff = az_e - az_c; top = np.argsort(-diff)[:15]
     out["top_abnormal_dims"] = [{"dim": int(j), "err_absz": round(float(az_e[j]), 3),
                                  "cor_absz": round(float(az_c[j]), 3),
