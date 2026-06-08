@@ -232,12 +232,13 @@ def extract_spectral_field(
     # (layer-independent) to test the "more active dims <-> more uncertain" link.
     SV = None
     sv_pr = sv_ae = None
-    out_entropy = None
+    out_entropy = out_committal = None
     sv_vec = None
     if step_vectors:
         sv_pr = {m: np.full((T_eff, L_sub), np.nan, dtype=np.float32) for m in sv_modes}
         sv_ae = {m: np.full((T_eff, L_sub), np.nan, dtype=np.float32) for m in sv_modes}
         out_entropy = np.full(T_eff, np.nan, dtype=np.float32)
+        out_committal = np.full(T_eff, np.nan, dtype=np.float32)
         # optional: keep the raw (un-normalized) step vectors so participation can
         # be re-normalized (raw / healthy-standardized / whitened) in analysis
         # WITHOUT re-running the model. Lazily sized once d is known.
@@ -320,11 +321,16 @@ def extract_spectral_field(
     # activation participation correlates with predictive uncertainty.
     if step_vectors and logits is not None:
         import torch
+        seq_ids = encoding["input_ids"][0]
         for row, (_, a, b) in enumerate(safe):
-            lg = logits[b].float()                      # (vocab,)
+            lg = logits[b].float()                      # (vocab,) predicting token b+1
             logp = torch.log_softmax(lg, dim=-1)
-            ent = float(-(logp.exp() * logp).sum().item())
-            out_entropy[row] = ent
+            p = logp.exp()
+            out_entropy[row] = float(-(p * logp).sum().item())
+            # committal p(1-p) of the REALIZED next token (the step boundary token)
+            if b + 1 < seq_ids.shape[0]:
+                ptok = float(p[int(seq_ids[b + 1])].item())
+                out_committal[row] = ptok * (1.0 - ptok)
 
     # Per-TOKEN uncertainty over the response tokens (for uncertainty-trace-profile, 34):
     #   entropy   = H(softmax(logits_{t-1}))            distributional aleatoric
@@ -366,7 +372,7 @@ def extract_spectral_field(
     SV = None
     if step_vectors:
         SV = {"pr": sv_pr, "ae": sv_ae, "out_entropy": out_entropy,
-              "modes": list(sv_modes)}
+              "out_committal": out_committal, "modes": list(sv_modes)}
         if store_vectors:
             SV["vec"] = sv_vec
         if CLOUDS is not None:

@@ -139,7 +139,7 @@ def main():
         raise SystemExit("npz was whitened but no whiten_baseline path found; pass --whiten_baseline.")
 
     li = list(layers_used) if layers_used is not None else None
-    vecs = [None]*N
+    vecs = [None]*N; Ds = [None]*N; ocom = [None]*N
     pr_max = te_max = 0.0; n_fail = n_prval = n_teval = 0
     for i in tqdm(range(N), desc="re-extract"):
         question = problems[pid[i]][0]
@@ -156,6 +156,9 @@ def main():
         if SV is None or SV.get("vec") is None:
             n_fail += 1; continue
         vecs[i] = SV["vec"]["step_exp"].astype(np.float16)
+        Ds[i] = np.asarray(M_D, dtype=np.float32)                       # (T,L) spectral eff-rank
+        if SV.get("out_committal") is not None:
+            ocom[i] = np.asarray(SV["out_committal"], dtype=np.float32)  # per-step UC
         # validate recomputed PR == stored PR
         pr_new = np.asarray(SV["pr"]["step_exp"], float)
         pr_old = np.asarray(stored_pr[i], float)
@@ -180,6 +183,9 @@ def main():
     save = {k: d[k] for k in d.files}
     save["sv_vec_step_exp"] = np.array(vecs, dtype=object)
     save["sv_vectors_stored"] = np.array(True)
+    save["sv_D"] = np.array(Ds, dtype=object)                          # spectral eff-rank (T,L)
+    if any(o is not None for o in ocom):
+        save["sv_out_committal"] = np.array(ocom, dtype=object)        # per-step committal UC
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     np.savez(args.output, **save)
     print(f"\nwrote {args.output}  (+ sv_vec_step_exp for {N - n_fail} rows)")
