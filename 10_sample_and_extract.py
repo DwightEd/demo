@@ -152,6 +152,37 @@ def answers_match(pred, gold, tol: float = 1e-4) -> bool:
     return abs(pred - gold) <= tol * max(1.0, abs(gold))
 
 
+@torch.no_grad()
+def token_uncertainty_from_scores(scores, sequences, prompt_len, eos_id):
+    """Per-generated-token uncertainty from generation logits (trace channel).
+
+    scores    : tuple(len=G) of (K, V) next-token logits at each generation step.
+    sequences : (K, prompt_len + G) generated token ids.
+    Returns a list over the K sequences of (entropy[], committal[]) arrays, each trimmed
+    at the first EOS, where:
+      entropy   = H(softmax(logits))                  (distributional aleatoric)
+      committal = p*(1-p), p = prob of the token actually generated  (committal aleatoric)
+    Computed step-by-step to avoid materialising the (K,G,V) tensor.
+    """
+    K = sequences.shape[0]; G = len(scores)
+    ent = torch.zeros(K, G); com = torch.zeros(K, G)
+    gen = sequences[:, prompt_len:prompt_len + G]                     # (K, G)
+    for t in range(G):
+        lg = scores[t].float()                                        # (K, V)
+        lp = torch.log_softmax(lg, dim=-1); pp = lp.exp()
+        ent[:, t] = -(pp * lp).sum(-1).cpu()
+        ptok = pp.gather(-1, gen[:, t:t+1]).squeeze(-1)
+        com[:, t] = (ptok * (1 - ptok)).cpu()
+    out = []
+    for k in range(K):
+        toks = gen[k]
+        eos = (toks == eos_id).nonzero()
+        Lk = int(eos[0]) if len(eos) else G
+        out.append((ent[k, :Lk].numpy().astype(np.float32),
+                    com[k, :Lk].numpy().astype(np.float32)))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Step segmentation for self-generated solutions (Streaming-HD: sentence = step)
 # ---------------------------------------------------------------------------
@@ -416,6 +447,11 @@ def main():
     ap.add_argument("--cloud_layers", default="16",
                     help="comma list of layer indices to store token clouds for "
                          "(only with --store_clouds). Default a single mid layer.")
+    ap.add_argument("--store_token_uncertainty", action="store_true",
+                    help="capture per-generated-token uncertainty (entropy + committal "
+                         "p(1-p)) from generation logits, for the uncertainty-trace-profile "
+                         "analysis (33/34). Stores sv_tok_entropy / sv_tok_committal "
+                         "(fp32, one variable-length array per kept chain).")
     ap.add_argument("--output", default="data/gsm8k_multisample_sv.npz")
     args = ap.parse_args()
 
@@ -499,9 +535,26 @@ def main():
 
         gen_in = build_gen_inputs(tokenizer, question, device,
                                   prompt_style=args.prompt_style)
+        plen = gen_in["input_ids"].shape[1]
         with torch.no_grad():
-            out = model.generate(**gen_in, **gen_kwargs)
-        gen_only = out[:, gen_in["input_ids"].shape[1]:]
+            if args.store_token_uncertainty:
+                # output_logits = RAW next-token logits (faithful: uncertainty must be the
+                # model's own distribution, not the temperature/top_p-warped sampling one).
+                # Fall back to output_scores on older transformers.
+                try:
+                    g = model.generate(**gen_in, **gen_kwargs,
+                                       return_dict_in_generate=True, output_logits=True)
+                    step_logits = g.logits
+                except TypeError:
+                    g = model.generate(**gen_in, **gen_kwargs,
+                                       return_dict_in_generate=True, output_scores=True)
+                    step_logits = g.scores
+                out = g.sequences
+                tok_unc = token_uncertainty_from_scores(
+                    step_logits, out, plen, tokenizer.eos_token_id)
+            else:
+                out = model.generate(**gen_in, **gen_kwargs); tok_unc = None
+        gen_only = out[:, plen:]
         texts = tokenizer.batch_decode(
             gen_only, skip_special_tokens=True, clean_up_tokenization_spaces=False)
 
@@ -561,6 +614,8 @@ def main():
                 "layers_used": np.asarray(layers_used, dtype=np.int32),
                 "response": response,                          # NEW: raw generation
                 "steps_text": list(steps),                     # NEW: parsed steps
+                "tok_entropy": (tok_unc[si][0] if tok_unc is not None else None),
+                "tok_committal": (tok_unc[si][1] if tok_unc is not None else None),
                 "SV": SV,
             })
 
@@ -624,6 +679,14 @@ def main():
              for r in rows], dtype=object)
     else:
         save["clouds_stored"] = np.array(False)
+
+    # per-token uncertainty traces (entropy + committal), for 33/34 profile analysis
+    if args.store_token_uncertainty and rows[0].get("tok_entropy") is not None:
+        save["tok_uncertainty_stored"] = np.array(True)
+        save["sv_tok_entropy"] = np.array([r["tok_entropy"] for r in rows], dtype=object)
+        save["sv_tok_committal"] = np.array([r["tok_committal"] for r in rows], dtype=object)
+    else:
+        save["tok_uncertainty_stored"] = np.array(False)
 
     np.savez(args.output, **save)
 
