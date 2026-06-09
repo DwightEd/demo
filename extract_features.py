@@ -103,17 +103,27 @@ def iter_processbench(path, subset, limit=None):
     n = 0
     if fp is not None:
         with open(fp, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                rec = _pb_record(json.loads(line), subset, n)
-                if rec is None:
-                    continue
-                yield rec
-                n += 1
-                if limit and n >= limit:
-                    return
+            text = f.read()
+        # accept a whole-file JSON array / {"data": [...]}, or line-delimited jsonl
+        rows = None
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, list):
+                rows = obj
+            elif isinstance(obj, dict):
+                rows = obj.get("data") or obj.get("rows")
+        except json.JSONDecodeError:
+            rows = None
+        if rows is None:
+            rows = (json.loads(ln) for ln in text.splitlines() if ln.strip())
+        for d in rows:
+            rec = _pb_record(d, subset, n)
+            if rec is None:
+                continue
+            yield rec
+            n += 1
+            if limit and n >= limit:
+                return
     else:
         from datasets import load_dataset
         print(f"  no jsonl at {path}; loading HF dataset {path} split={subset}")
