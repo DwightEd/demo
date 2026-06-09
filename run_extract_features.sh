@@ -24,12 +24,14 @@ mkdir -p "$OUTDIR"
 UE_ARG=""
 [ -n "$UE_LAYERS_FROM" ] && UE_ARG="--ue_layers_from $UE_LAYERS_FROM"
 
-echo "==================================================================="
-echo "[0/2] smoke test (tiny CPU model, no GPU) -- verifies wiring"
-echo "==================================================================="
-$PY extract_features.py --source processbench --pb_subset "$SAMPLED_SUBSET" \
-    --smoke --layers all --limit 5 --ue_stride 4 \
-    --output "$OUTDIR/_smoke.npz"
+if [ "${SMOKE:-0}" = "1" ]; then
+  echo "==================================================================="
+  echo "[0] smoke test (tiny CPU model, no GPU) -- verifies wiring"
+  echo "==================================================================="
+  $PY extract_features.py --source processbench --pb_subset "$SAMPLED_SUBSET" \
+      --smoke --layers all --limit 5 --ue_stride 4 \
+      --output "$OUTDIR/_smoke.npz"
+fi
 
 echo "==================================================================="
 echo "[1/2] ProcessBench $SAMPLED_SUBSET  (gold step labels, teacher-forced)"
