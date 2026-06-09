@@ -37,6 +37,18 @@ def _r(x, nd=3):
     return round(float(x), nd) if x is not None and np.isfinite(x) else None
 
 
+def exact_top_k(Xc, k):
+    """EXACT top-k principal axes via LAPACK partial eigendecomposition of the
+    d x d covariance (scipy eigh subset_by_index) -- only the top k eigenpairs,
+    not all d. Returns (k, d). Use when you want the exact subspace; needs scipy.
+    """
+    from scipy.linalg import eigh
+    d = Xc.shape[1]
+    C = Xc.T @ Xc                                       # (d, d) gemm, BLAS-fast
+    _, V = eigh(C, subset_by_index=[d - k, d - 1])      # ascending, top-k only
+    return np.ascontiguousarray(V[:, ::-1].T)           # (k, d), descending
+
+
 def randomized_top_k(Xc, k, oversample=10, n_power=2, seed=0):
     """Top-k right singular vectors of Xc (M,d) via randomized SVD (Halko et al.).
 
@@ -102,6 +114,9 @@ def main():
     ap.add_argument("--healthy_label", default="answer", choices=["answer", "strict"],
                     help="which chains define 'correct' for the healthy subspace.")
     ap.add_argument("--json", action="store_true", help="also print results as JSON.")
+    ap.add_argument("--exact", action="store_true",
+                    help="exact top-k eigendecomposition (scipy) instead of the "
+                         "default randomized SVD; for cross-checking the subspace.")
     args = ap.parse_args()
 
     z = np.load(args.npz, allow_pickle=True)
@@ -161,7 +176,8 @@ def main():
             fold_sub[f] = None
             continue
         mu = X.mean(0)
-        Vt = randomized_top_k(X - mu, max_k)         # (max_k, d) top components
+        Vt = (exact_top_k(X - mu, max_k) if args.exact
+              else randomized_top_k(X - mu, max_k))   # (max_k, d) top components
         fold_sub[f] = (mu, Vt)
 
     # Per chain/step: total energy + cumulative explained energy of top-1..max_k,
