@@ -170,7 +170,7 @@ def main():
         if not X:
             fold_sub[f] = None
             continue
-        X = np.concatenate(X, 0).astype(np.float64)
+        X = np.concatenate(X, 0).astype(np.float32)
         X = X[np.isfinite(X).all(1)]
         if X.shape[0] <= max_k:
             fold_sub[f] = None
@@ -190,7 +190,7 @@ def main():
         if sub is None:
             continue
         mu, Vt = sub
-        m = mats[i].astype(np.float64)
+        m = mats[i].astype(np.float32)
         steps = []
         for t in range(m.shape[0]):
             zc = m[t] - mu
