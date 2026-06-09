@@ -83,6 +83,11 @@ def late_window(series, frac=0.25):
 def build_features(z):
     """Return dict name -> (N,) chain-level array."""
     feats = {}
+    # length baseline (the signal that geometry must beat)
+    if "n_steps" in z.files:
+        feats["n_steps"] = z["n_steps"].astype(float)
+    if "n_resp_tokens" in z.files:
+        feats["n_resp_tokens"] = z["n_resp_tokens"].astype(float)
     # paper trace-profile columns (already chain-level)
     cols = [str(c) for c in z["profile_cols"]]
     P = z["profile_paper"]
@@ -114,12 +119,24 @@ def main():
     ap.add_argument("--top", type=int, default=40)
     ap.add_argument("--sort", default="within_strict",
                     choices=["within_strict", "cross_strict", "within_lenient"])
+    ap.add_argument("--format_ok_only", action="store_true",
+                    help="restrict to format_ok==1 chains (drops '#### missing' "
+                         "format failures, so strict==answer-only -> isolates the "
+                         "reasoning signal from the format confound).")
     args = ap.parse_args()
 
     z = np.load(args.npz, allow_pickle=True)
     pid = z["problem_ids"].astype(int)
     y_strict = (z["is_correct_strict"].astype(int) == 0).astype(int)   # error=1
     y_lenient = (z["is_correct"].astype(int) == 0).astype(int)
+    feats = build_features(z)
+
+    keep = np.ones(len(pid), bool)
+    if args.format_ok_only and "format_ok" in z.files:
+        keep = z["format_ok"].astype(int) == 1
+        print(f"[format_ok=1 subset: {int(keep.sum())}/{len(keep)} chains]")
+    pid, y_strict, y_lenient = pid[keep], y_strict[keep], y_lenient[keep]
+    feats = {k: v[keep] for k, v in feats.items()}
     N = len(pid)
     n_contrastive = sum(
         1 for p in np.unique(pid)
@@ -133,7 +150,6 @@ def main():
         print(f"U_E stored: {bool(z['ue_on'])} | "
               f"layers: {[int(x) for x in z['layers_used']]}")
 
-    feats = build_features(z)
     rows = []
     for name, s in feats.items():
         wS, npair = auroc_within(s, y_strict, pid)
