@@ -172,7 +172,8 @@ def iter_sampled(npz_path, problems, limit=None):
     """
     z = np.load(npz_path, allow_pickle=True)
     responses = z["responses"]
-    steps_all = z["steps_text"]
+    steps_all = z["steps_text"] if "steps_text" in z.files else None
+    split = str(z["step_split"]) if "step_split" in z.files else "line"
     pids = z["problem_ids"]
     sidx = z["sample_idx"] if "sample_idx" in z.files else np.zeros(len(pids), int)
     isc = z["is_correct"]
@@ -190,7 +191,9 @@ def iter_sampled(npz_path, problems, limit=None):
         pid = int(pids[i])
         if pid >= len(problems):
             continue
-        steps = list(steps_all[i])
+        resp = str(responses[i])
+        steps = (list(steps_all[i]) if steps_all is not None
+                 else _s10.split_into_steps(resp, granularity=split))
         if len(steps) < 3:
             continue
         yield {
@@ -199,7 +202,7 @@ def iter_sampled(npz_path, problems, limit=None):
             "problem_id": pid,
             "sample_idx": int(sidx[i]),
             "question": problems[pid][0],
-            "response": str(responses[i]),
+            "response": resp,
             "steps_text": steps,
             "is_correct": int(isc[i]),
             "is_correct_strict": int(iscs[i]),
