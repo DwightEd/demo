@@ -128,28 +128,69 @@ def main():
           f"{'meanSPE_err':>11s} {'meanSPE_cor':>11s} {'loc_auroc':>9s}")
     print("-" * 72)
 
+    ks = [int(x) for x in args.ks.split(",")]
+    max_k = max(ks)
+
+    # Build each fold's healthy subspace ONCE (top max_k components, via the
+    # covariance eigendecomposition -- far cheaper than a full SVD per k).
+    fold_sub = {}
+    for f in range(args.folds):
+        tr = keep & correct & (foldof != f)
+        X = [mats[i] for i in np.where(tr)[0] if mats[i].size]
+        if not X:
+            fold_sub[f] = None
+            continue
+        X = np.concatenate(X, 0).astype(np.float64)
+        X = X[np.isfinite(X).all(1)]
+        if X.shape[0] <= max_k:
+            fold_sub[f] = None
+            continue
+        mu = X.mean(0)
+        Xc = X - mu
+        w, V = np.linalg.eigh(Xc.T @ Xc)             # ascending eigenvalues
+        Vt = np.ascontiguousarray(V[:, ::-1][:, :max_k].T)   # (max_k, d)
+        fold_sub[f] = (mu, Vt)
+        print(f"  fold {f}: healthy subspace from {X.shape[0]} correct step vecs")
+
+    # Per chain/step: total energy + cumulative explained energy of top-1..max_k,
+    # so SPE at any k is one slice (no recomputation).
+    chain_steps = [None] * N
+    for i in range(N):
+        if not keep[i] or mats[i].size == 0:
+            continue
+        sub = fold_sub.get(foldof[i])
+        if sub is None:
+            continue
+        mu, Vt = sub
+        m = mats[i].astype(np.float64)
+        steps = []
+        for t in range(m.shape[0]):
+            zc = m[t] - mu
+            tot = float(zc @ zc)
+            if tot <= 1e-12:
+                steps.append(None)
+                continue
+            proj = Vt @ zc
+            steps.append((tot, np.cumsum(proj * proj)))
+        chain_steps[i] = steps
+
     results = []
-    for k in [int(x) for x in args.ks.split(",")]:
+    for k in ks:
         chain_spe = np.full(N, np.nan)
-        # per-step SPE kept for localization
         step_spe = [None] * N
-        for f in range(args.folds):
-            tr = keep & correct & (foldof != f)
-            X = [mats[i] for i in np.where(tr)[0] if mats[i].size]
-            if not X:
+        for i in range(N):
+            if chain_steps[i] is None:
                 continue
-            X = np.concatenate(X, 0)
-            X = X[np.isfinite(X).all(1)]
-            if X.shape[0] <= k:
-                continue
-            mu, Vt = healthy_subspace(X, k)
-            for i in np.where(keep & (foldof == f))[0]:
-                m = mats[i]
-                if m.size == 0:
+            ss = np.full(len(chain_steps[i]), np.nan)
+            for t, sp in enumerate(chain_steps[i]):
+                if sp is None:
                     continue
-                s = np.array([spe(m[t], mu, Vt) for t in range(m.shape[0])])
-                step_spe[i] = s
-                chain_spe[i] = np.nanmean(s)
+                tot, csum = sp
+                expl = csum[min(k, len(csum)) - 1]
+                ss[t] = (tot - expl) / tot
+            step_spe[i] = ss
+            if np.isfinite(ss).any():
+                chain_spe[i] = np.nanmean(ss)
 
         wa = within_auroc(chain_spe[keep], y_ans[keep], pid[keep])
         ca = auroc(chain_spe[keep], y_ans[keep])
