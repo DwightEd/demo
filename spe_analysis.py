@@ -37,13 +37,22 @@ def _r(x, nd=3):
     return round(float(x), nd) if x is not None and np.isfinite(x) else None
 
 
-def healthy_subspace(X, k):
-    """PCA subspace of rows of X (M,d): return (mu, Vt_k) with Vt_k (k,d)."""
-    mu = X.mean(0)
-    Xc = X - mu
-    # economy SVD; right singular vectors are the principal axes
-    _, _, Vt = np.linalg.svd(Xc, full_matrices=False)
-    return mu, Vt[:k]
+def randomized_top_k(Xc, k, oversample=10, n_power=2, seed=0):
+    """Top-k right singular vectors of Xc (M,d) via randomized SVD (Halko et al.).
+
+    Returns (k, d). Avoids the full d-dim eigendecomposition of X^T X, which is
+    very slow for d=4096; we only ever need the top ~100 components.
+    """
+    M, d = Xc.shape
+    p = min(k + oversample, d, M)
+    rng = np.random.default_rng(seed)
+    Y = Xc @ rng.standard_normal((d, p))         # (M, p) range sketch
+    for _ in range(n_power):                     # power iterations for accuracy
+        Y = Xc @ (Xc.T @ Y)
+    Q, _ = np.linalg.qr(Y)                        # (M, p)
+    B = Q.T @ Xc                                  # (p, d)
+    _, _, Vt = np.linalg.svd(B, full_matrices=False)
+    return np.ascontiguousarray(Vt[:k])
 
 
 def spe(z, mu, Vt_k, eps=1e-12):
@@ -152,11 +161,8 @@ def main():
             fold_sub[f] = None
             continue
         mu = X.mean(0)
-        Xc = X - mu
-        w, V = np.linalg.eigh(Xc.T @ Xc)             # ascending eigenvalues
-        Vt = np.ascontiguousarray(V[:, ::-1][:, :max_k].T)   # (max_k, d)
+        Vt = randomized_top_k(X - mu, max_k)         # (max_k, d) top components
         fold_sub[f] = (mu, Vt)
-        print(f"  fold {f}: healthy subspace from {X.shape[0]} correct step vecs")
 
     # Per chain/step: total energy + cumulative explained energy of top-1..max_k,
     # so SPE at any k is one slice (no recomputation).
