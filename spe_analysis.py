@@ -26,6 +26,11 @@ import argparse
 import numpy as np
 
 
+def _r(x, nd=3):
+    """Round for JSON; NaN/inf -> None."""
+    return round(float(x), nd) if x is not None and np.isfinite(x) else None
+
+
 def healthy_subspace(X, k):
     """PCA subspace of rows of X (M,d): return (mu, Vt_k) with Vt_k (k,d)."""
     mu = X.mean(0)
@@ -81,6 +86,7 @@ def main():
     ap.add_argument("--format_ok_only", action="store_true")
     ap.add_argument("--healthy_label", default="answer", choices=["answer", "strict"],
                     help="which chains define 'correct' for the healthy subspace.")
+    ap.add_argument("--json", action="store_true", help="also print results as JSON.")
     args = ap.parse_args()
 
     z = np.load(args.npz, allow_pickle=True)
@@ -122,6 +128,7 @@ def main():
           f"{'meanSPE_err':>11s} {'meanSPE_cor':>11s} {'loc_auroc':>9s}")
     print("-" * 72)
 
+    results = []
     for k in [int(x) for x in args.ks.split(",")]:
         chain_spe = np.full(N, np.nan)
         # per-step SPE kept for localization
@@ -164,10 +171,22 @@ def main():
                 npair += others.size
         loc = (conc + 0.5 * tie) / npair if npair else float("nan")
         print(f"{k:5d} {wa:10.3f} {ca:9.3f} {ws:10.3f} {me:11.4f} {mc:11.4f} {loc:9.3f}")
+        results.append({"k": k, "within_ans": _r(wa), "cross_ans": _r(ca),
+                        "within_strict": _r(ws), "meanSPE_err": _r(me, 4),
+                        "meanSPE_cor": _r(mc, 4), "loc_auroc": _r(loc)})
 
     print("\nwithin_ans>0.5 => error chains leak MORE outside the healthy subspace "
           "(anchor holds). meanSPE_err vs _cor shows direction; loc_auroc>0.5 => "
           "SPE higher at the gold error step.")
+
+    if args.json:
+        import json
+        meta = {"file": args.npz, "layer": args.layer, "chains": int(N),
+                "n_error_answer": int(y_ans[keep].sum()),
+                "format_ok_only": bool(args.format_ok_only),
+                "healthy_label": args.healthy_label}
+        print("\n=== JSON ===")
+        print(json.dumps({"meta": meta, "results": results}, indent=2))
 
 
 if __name__ == "__main__":
