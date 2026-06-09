@@ -342,7 +342,9 @@ def main():
         print(f"  U_E ON: {n_ue/1e6:.1f}M params carry grad, stride={args.ue_stride}, "
               f"layers_from={args.ue_layers_from}")
     else:
-        print("  U_E OFF")
+        for p in model.parameters():        # free autograd bookkeeping entirely
+            p.requires_grad_(False)
+        print("  U_E OFF (gradients disabled)")
 
     # record stream
     if args.source == "processbench":

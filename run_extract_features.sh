@@ -24,6 +24,9 @@ N_PROBLEMS="${N_PROBLEMS:-300}"
 mkdir -p "$OUTDIR"
 UE_ARG=""
 [ -n "$UE_LAYERS_FROM" ] && UE_ARG="--ue_layers_from $UE_LAYERS_FROM"
+# NO_UE=1 skips the epistemic gradient-norm channel (needed on small GPUs; the
+# per-token backward + retain_graph OOMs on ~24GB). U_D/U_C + geometry still run.
+[ "${NO_UE:-0}" = "1" ] && UE_ARG="--no_ue"
 
 if [ "${SMOKE:-0}" = "1" ]; then
   echo "==================================================================="
