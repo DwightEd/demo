@@ -25,6 +25,12 @@ from __future__ import annotations
 import argparse
 import numpy as np
 
+try:
+    from tqdm import tqdm
+except ImportError:                      # graceful fallback if tqdm is absent
+    def tqdm(it, **kw):
+        return it
+
 
 def _r(x, nd=3):
     """Round for JSON; NaN/inf -> None."""
@@ -134,7 +140,7 @@ def main():
     # Build each fold's healthy subspace ONCE (top max_k components, via the
     # covariance eigendecomposition -- far cheaper than a full SVD per k).
     fold_sub = {}
-    for f in range(args.folds):
+    for f in tqdm(range(args.folds), desc="build subspaces"):
         tr = keep & correct & (foldof != f)
         X = [mats[i] for i in np.where(tr)[0] if mats[i].size]
         if not X:
@@ -155,7 +161,7 @@ def main():
     # Per chain/step: total energy + cumulative explained energy of top-1..max_k,
     # so SPE at any k is one slice (no recomputation).
     chain_steps = [None] * N
-    for i in range(N):
+    for i in tqdm(range(N), desc="project chains"):
         if not keep[i] or mats[i].size == 0:
             continue
         sub = fold_sub.get(foldof[i])
