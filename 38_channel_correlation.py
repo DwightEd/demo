@@ -41,11 +41,21 @@ UNC_SPEC = [("UD", "sv_out_entropy"), ("UC", "sv_out_committal")]
 # ===========================================================================
 # Aggregation primitives  (raw arrays -> per-step scalar -> per-chain summary)
 # ===========================================================================
-def band_cols(L: int, band: str) -> np.ndarray:
-    """Layer indices for a depth band of an L-layer stack."""
-    if band == "deep": return np.arange(int(L * 0.6), L)
-    if band == "mid":  return np.arange(int(L * 0.3), int(L * 0.7))
-    return np.arange(L)
+def band_cols(L, band) -> np.ndarray:
+    """Layer indices to extract from an L-layer stack.
+
+    `band` is either an explicit sequence of layer indices (list/tuple/array) ->
+    exactly those layers, or a named depth band ('deep'/'mid'/'all'). Indices are
+    clipped to the valid range [0, L).
+    """
+    if isinstance(band, str):
+        if band == "deep":  idx = np.arange(int(L * 0.6), L)
+        elif band == "mid": idx = np.arange(int(L * 0.3), int(L * 0.7))
+        elif band == "all": idx = np.arange(L)
+        else: raise ValueError(f"unknown band name {band!r}")
+    else:
+        idx = np.asarray(list(band), dtype=int)
+    return idx[(idx >= 0) & (idx < L)]
 
 
 def steptrace(M, cols) -> np.ndarray | None:
@@ -286,17 +296,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--mode", default="step_exp")
-    ap.add_argument("--band", default="deep", choices=["deep", "mid", "all"])
+    ap.add_argument("--band", default="deep",
+                    help="named depth band (deep/mid/all) OR explicit layer indices, "
+                         "e.g. '24,25,26'")
     ap.add_argument("--kfold", type=int, default=5)
     ap.add_argument("--n_seeds", type=int, default=5)
     ap.add_argument("--format_ok", action="store_true")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
-    d = np.load(args.input, allow_pickle=True)
-    out = run(d, args.mode, args.band, args.kfold, args.n_seeds, args.format_ok)
+    band = args.band if args.band in ("deep", "mid", "all") else \
+        [int(x) for x in args.band.split(",") if x.strip() != ""]
 
-    o = args.out or f"results_uncertainty/channels_{args.mode}_{args.band}.json"
+    d = np.load(args.input, allow_pickle=True)
+    out = run(d, args.mode, band, args.kfold, args.n_seeds, args.format_ok)
+
+    band_tag = args.band.replace(",", "-")
+    o = args.out or f"results_uncertainty/channels_{args.mode}_{band_tag}.json"
     os.makedirs(os.path.dirname(o) or ".", exist_ok=True)
     json.dump(out, open(o, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     m = out["meta"]
