@@ -16,6 +16,7 @@ LAYERS="${LAYERS:-8,16,24,31}"          # hidden_states indices (0=embeddings)
 OUTDIR="${OUTDIR:-data/features}"
 UE_STRIDE="${UE_STRIDE:-1}"             # 1 = U_E at every token (faithful)
 UE_LAYERS_FROM="${UE_LAYERS_FROM:-}"   # e.g. 16 -> only layers>=16 carry grad (faster)
+PB_PATH="${PB_PATH:-data/processbench}"   # jsonl dir, OR an HF ProcessBench dir
 SAMPLED_NPZ="${SAMPLED_NPZ:-data/gsm8k_multisample_sv.npz}"
 SAMPLED_SUBSET="${SAMPLED_SUBSET:-gsm8k}"
 N_PROBLEMS="${N_PROBLEMS:-300}"
@@ -38,7 +39,7 @@ echo "[1/2] ProcessBench $SAMPLED_SUBSET  (gold step labels, teacher-forced)"
 echo "==================================================================="
 $PY extract_features.py \
     --source processbench \
-    --pb_path data/processbench --pb_subset "$SAMPLED_SUBSET" \
+    --pb_path "$PB_PATH" --pb_subset "$SAMPLED_SUBSET" \
     --model "$MODEL" --layers "$LAYERS" \
     --ue_stride "$UE_STRIDE" $UE_ARG \
     --output "$OUTDIR/processbench_${SAMPLED_SUBSET}_features.npz"

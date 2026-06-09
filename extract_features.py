@@ -63,38 +63,69 @@ EXTRACT_PROMPT = "Problem: {q}\n\nSolution:\n\n"   # identical to 10's teacher-f
 # Data sources -> a uniform record stream
 # ---------------------------------------------------------------------------
 
+def _pb_record(d, subset, n):
+    """Build one record from a ProcessBench row (jsonl dict or HF dataset row)."""
+    steps = [s.strip() for s in (d.get("steps") or []) if s and s.strip()]
+    if len(steps) < 3:
+        return None
+    correct = bool(d.get("final_answer_correct", d.get("label", 0) == -1))
+    return {
+        "id": str(d.get("id", f"{subset}-{n}")),
+        "source": "processbench",
+        "problem_id": n,
+        "sample_idx": 0,
+        "question": d["problem"],
+        "response": "\n".join(steps),
+        "steps_text": steps,
+        "is_correct": int(correct),
+        "is_correct_strict": int(correct),
+        "format_ok": 1,
+        "gold_error_step": int(d.get("label", -1)),
+        "gold_answer": float("nan"),
+        "pred_answer": float("nan"),
+    }
+
+
 def iter_processbench(path, subset, limit=None):
-    """Yield records from a local ProcessBench <subset>.jsonl."""
-    fp = os.path.join(path, f"{subset}.jsonl") if os.path.isdir(path) else path
+    """Yield records from ProcessBench.
+
+    Tries a raw <subset>.jsonl first (local dir or explicit file); if neither is
+    present, falls back to HF `load_dataset(path, split=subset)` -- the same
+    loader 10 uses for an HF-arrow ProcessBench dir (e.g. data/hf_datasets/
+    ProcessBench). Set --pb_path to wherever your ProcessBench lives.
+    """
+    fp = None
+    if os.path.isfile(path):
+        fp = path
+    elif os.path.isfile(os.path.join(path, f"{subset}.jsonl")):
+        fp = os.path.join(path, f"{subset}.jsonl")
+
     n = 0
-    with open(fp, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+    if fp is not None:
+        with open(fp, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = _pb_record(json.loads(line), subset, n)
+                if rec is None:
+                    continue
+                yield rec
+                n += 1
+                if limit and n >= limit:
+                    return
+    else:
+        from datasets import load_dataset
+        print(f"  no jsonl at {path}; loading HF dataset {path} split={subset}")
+        ds = load_dataset(path, split=subset)
+        for ex in ds:
+            rec = _pb_record(ex, subset, n)
+            if rec is None:
                 continue
-            d = json.loads(line)
-            steps = [s.strip() for s in (d.get("steps") or []) if s and s.strip()]
-            if len(steps) < 3:
-                continue
-            correct = bool(d.get("final_answer_correct", d.get("label", 0) == -1))
-            yield {
-                "id": str(d.get("id", f"{subset}-{n}")),
-                "source": "processbench",
-                "problem_id": n,
-                "sample_idx": 0,
-                "question": d["problem"],
-                "response": "\n".join(steps),
-                "steps_text": steps,
-                "is_correct": int(correct),
-                "is_correct_strict": int(correct),
-                "format_ok": 1,
-                "gold_error_step": int(d.get("label", -1)),
-                "gold_answer": float("nan"),
-                "pred_answer": float("nan"),
-            }
+            yield rec
             n += 1
             if limit and n >= limit:
-                break
+                return
 
 
 def iter_sampled(npz_path, problems, limit=None):
