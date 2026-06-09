@@ -222,7 +222,7 @@ def iter_sampled(npz_path, problems, limit=None):
 
 def extract_chain(model, tokenizer, rec, device, layer_indices,
                   massive_m, want_ue, ue_params, ue_stride,
-                  store_token_geom, max_seq_len):
+                  store_token_geom, max_seq_len, store_step_vectors=False):
     """Return a dict of arrays for one chain, or None if it cannot be aligned."""
     prompt = EXTRACT_PROMPT.format(q=rec["question"])
     response = rec["response"]
@@ -259,9 +259,12 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
     del out, logits
 
     T = len(safe)
+    d = hs[0].shape[1]
     stepgeom = np.full((T, L, F), np.nan, dtype=np.float32)
     R = b1 - a0 + 1
     tokgeom = np.full((R, L, F), np.nan, dtype=np.float16) if store_token_geom else None
+    # raw per-step exp-pooled vectors (for SPE / subspace-leakage analysis)
+    stepvec = np.full((T, L, d), np.nan, dtype=np.float16) if store_step_vectors else None
 
     for li in range(L):
         H_l = hs[li]                                   # (seq, d)
@@ -270,6 +273,8 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
             if z is not None:
                 f = geo.vector_features(z, massive_m=massive_m)
                 stepgeom[sj, li] = [f[k] for k in geo.GEOM_FEATURE_NAMES]
+                if store_step_vectors:
+                    stepvec[sj, li] = z.astype(np.float16)
         if store_token_geom:
             for ti, pos in enumerate(range(a0, b1 + 1)):
                 f = geo.vector_features(H_l[pos], massive_m=massive_m)
@@ -298,6 +303,7 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
         "tok_U_E_offsets": U_E_off,
         "stepgeom": stepgeom,
         "tokgeom": tokgeom,
+        "stepvec": stepvec,
         "step_token_ranges": step_ranges,
         "n_steps": T, "n_resp_tokens": R,
         "profile": prof,
@@ -338,6 +344,9 @@ def main():
                          "approximation; default None = all params, faithful).")
     ap.add_argument("--no_token_geom", action="store_true",
                     help="do not store per-token geometry (keeps per-step only).")
+    ap.add_argument("--store_step_vectors", action="store_true",
+                    help="also store the raw per-step exp-pooled vectors (T,L,d, "
+                         "fp16) for SPE / subspace-leakage analysis (spe_analysis.py).")
     ap.add_argument("--max_seq_len", type=int, default=4096)
     ap.add_argument("--limit", type=int, default=None, help="cap #chains (debug).")
     ap.add_argument("--output", required=True)
@@ -400,7 +409,8 @@ def main():
                 model, tokenizer, rec, device, layer_indices,
                 args.massive_m, want_ue, ue_params, args.ue_stride,
                 store_token_geom=not args.no_token_geom,
-                max_seq_len=args.max_seq_len)
+                max_seq_len=args.max_seq_len,
+                store_step_vectors=args.store_step_vectors)
         except Exception as e:
             print(f"  warn: chain {rec['id']} failed: {e}")
             res = None
@@ -440,6 +450,8 @@ def main():
         # geometry
         stepgeom=np.array([r["stepgeom"] for r in rows], dtype=object),
         tokgeom=np.array([r["tokgeom"] for r in rows], dtype=object),
+        stepvec=np.array([r["stepvec"] for r in rows], dtype=object),
+        step_vectors_stored=np.array(args.store_step_vectors),
         geom_feature_names=np.array(geo.GEOM_FEATURE_NAMES, dtype=object),
         # paper trace-profile table
         profile_paper=np.array([[p[c] for c in prof_cols] for p in profiles],
