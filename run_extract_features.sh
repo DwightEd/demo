@@ -53,8 +53,7 @@ echo "==================================================================="
 if [ -f "$SAMPLED_NPZ" ]; then
   $PY extract_features.py \
       --source sampled --sampled_npz "$SAMPLED_NPZ" \
-      --dataset_format processbench --dataset data/processbench \
-      --subset "$SAMPLED_SUBSET" --n_problems "$N_PROBLEMS" \
+      --pb_path "$PB_PATH" --pb_subset "$SAMPLED_SUBSET" \
       --model "$MODEL" --layers "$LAYERS" \
       --ue_stride "$UE_STRIDE" $UE_ARG \
       --output "$OUTDIR/sampled_${SAMPLED_SUBSET}_features.npz"

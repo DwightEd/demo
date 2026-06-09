@@ -86,25 +86,25 @@ def _pb_record(d, subset, n):
     }
 
 
-def iter_processbench(path, subset, limit=None):
-    """Yield records from ProcessBench.
+def _pb_raw_rows(path, subset):
+    """Yield RAW ProcessBench rows (dicts), no filtering, in dataset order.
 
-    Tries a raw <subset>.jsonl first (local dir or explicit file); if neither is
-    present, falls back to HF `load_dataset(path, split=subset)` -- the same
-    loader 10 uses for an HF-arrow ProcessBench dir (e.g. data/hf_datasets/
-    ProcessBench). Set --pb_path to wherever your ProcessBench lives.
+    Accepts: an explicit .json/.jsonl file; a dir holding <subset>.json or
+    <subset>.jsonl; or an HF-saved dataset dir (load_dataset). Whole-file JSON
+    array / {"data":[...]} and line-delimited jsonl are both handled.
     """
     fp = None
     if os.path.isfile(path):
         fp = path
-    elif os.path.isfile(os.path.join(path, f"{subset}.jsonl")):
-        fp = os.path.join(path, f"{subset}.jsonl")
-
-    n = 0
+    else:
+        for cand in (os.path.join(path, f"{subset}.json"),
+                     os.path.join(path, f"{subset}.jsonl")):
+            if os.path.isfile(cand):
+                fp = cand
+                break
     if fp is not None:
         with open(fp, encoding="utf-8") as f:
             text = f.read()
-        # accept a whole-file JSON array / {"data": [...]}, or line-delimited jsonl
         rows = None
         try:
             obj = json.loads(text)
@@ -117,25 +117,51 @@ def iter_processbench(path, subset, limit=None):
         if rows is None:
             rows = (json.loads(ln) for ln in text.splitlines() if ln.strip())
         for d in rows:
-            rec = _pb_record(d, subset, n)
-            if rec is None:
-                continue
-            yield rec
-            n += 1
-            if limit and n >= limit:
-                return
+            yield d
     else:
         from datasets import load_dataset
-        print(f"  no jsonl at {path}; loading HF dataset {path} split={subset}")
-        ds = load_dataset(path, split=subset)
-        for ex in ds:
-            rec = _pb_record(ex, subset, n)
-            if rec is None:
-                continue
-            yield rec
-            n += 1
-            if limit and n >= limit:
-                return
+        print(f"  no json/jsonl at {path}; load_dataset({path}, split={subset})")
+        for ex in load_dataset(path, split=subset):
+            yield ex
+
+
+def iter_processbench(path, subset, limit=None):
+    """Yield extraction records from ProcessBench (steps>=3 kept)."""
+    n = 0
+    for d in _pb_raw_rows(path, subset):
+        rec = _pb_record(d, subset, n)
+        if rec is None:
+            continue
+        yield rec
+        n += 1
+        if limit and n >= limit:
+            return
+
+
+def reconstruct_questions(path, subset, s10):
+    """Rebuild the ordered (question, gold) list EXACTLY as 10.load_problems does
+    for ProcessBench, so a stored npz's problem_id maps back to its question.
+    Reads the SAME ProcessBench source as iter_processbench (no step filter)."""
+    gold_fields = ["answer", "final_answer", "gt_answer", "ground_truth", "gold_answer"]
+    probs = {}
+    for ex in _pb_raw_rows(path, subset):
+        prob = ex.get("problem")
+        if not prob:
+            continue
+        gold = None
+        for f in gold_fields:
+            if ex.get(f) is not None:
+                gold = s10._to_number(str(ex[f]))
+                if gold is not None:
+                    break
+        if gold is None:
+            lab = int(ex.get("label", -1))
+            fac = ex.get("final_answer_correct", None)
+            if lab == -1 or fac is True:
+                gold = s10.predicted_answer("\n".join(ex.get("steps", []) or []))
+        if gold is not None and prob not in probs:
+            probs[prob] = gold
+    return list(probs.items())
 
 
 def iter_sampled(npz_path, problems, limit=None):
@@ -154,6 +180,11 @@ def iter_sampled(npz_path, problems, limit=None):
     fok = z["format_ok"] if "format_ok" in z.files else np.ones(len(pids), int)
     gold = z["gold_answers"] if "gold_answers" in z.files else np.full(len(pids), np.nan)
     pred = z["pred_answers"] if "pred_answers" in z.files else np.full(len(pids), np.nan)
+    maxpid = int(np.max(pids)) if len(pids) else -1
+    if maxpid >= len(problems):
+        print(f"  WARN: max problem_id {maxpid} >= #reconstructed problems "
+              f"{len(problems)} -- alignment mismatch, those chains are skipped. "
+              f"Check the npz 'dataset' field matches --pb_path/--pb_subset.")
     n = 0
     for i in range(len(responses)):
         pid = int(pids[i])
@@ -352,11 +383,9 @@ def main():
     else:
         if not args.sampled_npz:
             raise SystemExit("--source sampled needs --sampled_npz")
-        nsp = argparse.Namespace(
-            dataset_format=args.dataset_format, dataset=args.dataset,
-            subset=args.subset, split=args.split, n_problems=args.n_problems)
-        problems = _s10.load_problems(nsp)
-        print(f"  reconstructed {len(problems)} questions for problem_id lookup")
+        problems = reconstruct_questions(args.pb_path, args.pb_subset, _s10)
+        print(f"  reconstructed {len(problems)} ProcessBench questions for "
+              f"problem_id lookup (from {args.pb_path})")
         records = iter_sampled(args.sampled_npz, problems, args.limit)
 
     rows, profiles = [], []
