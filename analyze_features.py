@@ -132,9 +132,21 @@ def main():
     feats = build_features(z)
 
     keep = np.ones(len(pid), bool)
-    if args.format_ok_only and "format_ok" in z.files:
-        keep = z["format_ok"].astype(int) == 1
-        print(f"[format_ok=1 subset: {int(keep.sum())}/{len(keep)} chains]")
+    if args.format_ok_only:
+        if "format_ok" in z.files:
+            fok = z["format_ok"].astype(int)
+        elif "responses" in z.files:
+            import re
+            fok = np.array([1 if re.search(r"####", str(r)) else 0
+                            for r in z["responses"]], int)
+            print("  (format_ok not stored; recomputed from responses via '####')")
+        else:
+            fok = None
+            print("  WARN: --format_ok_only requested but no format_ok/responses "
+                  "in npz -> filter IGNORED (showing full data).")
+        if fok is not None:
+            keep = fok == 1
+            print(f"[format_ok=1 subset: {int(keep.sum())}/{len(keep)} chains]")
     pid, y_strict, y_lenient = pid[keep], y_strict[keep], y_lenient[keep]
     feats = {k: v[keep] for k, v in feats.items()}
     N = len(pid)
