@@ -45,7 +45,8 @@ def per_step_series(z):
 
     names = (["U_D", "U_C"]
              + [f"{fn}_L{ly}" for ly in layers for fn in geom_names]
-             + [f"{fn}_L{ly}" for ly in layers for fn in cnames])
+             + [f"{fn}_L{ly}" for ly in layers for fn in cnames]
+             + ["step_ntokens"])   # length control: cloud_D <= tokens per step
     out = []
     for i in range(N):
         sg = np.asarray(SG[i], float)              # (T, L, F)
@@ -77,6 +78,8 @@ def per_step_series(z):
             for li in range(sc.shape[1]):
                 for fi in range(sc.shape[2]):
                     cols.append(sc[:, li, fi])
+        # length control: tokens per step (cloud_D is bounded by this)
+        cols.append((ranges[:, 1] - ranges[:, 0] + 1).astype(float))
         out.append(np.column_stack(cols))          # (T, n_feat)
     return names, out
 
