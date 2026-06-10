@@ -41,7 +41,7 @@ from utils.step_vector import step_vector
 from utils.spectral import step_layer_spectral_summary, cim_tle_intrinsic_dim
 
 CLOUD_NAMES = ("cloud_D", "cloud_V", "cloud_C")   # point-cloud eff-rank / energy / concentration
-INTRINSIC_NAMES = ("id_mle", "id_twonn")          # whole-chain nonlinear intrinsic dim (length-robust)
+INTRINSIC_NAMES = ("id_mle", "id_twonn", "cim_V")  # whole-chain CIM: intrinsic dim (D) + information volume (V)
 from features import geometry as geo
 from features import uncertainty as unc
 from features import trace_profile as tp
@@ -287,10 +287,11 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
                     stepvec[sj, li] = z.astype(np.float16)
             if cloud_eff_rank:
                 stepcloud[sj, li] = step_layer_spectral_summary(cloud)
-        if intrinsic_dim:                              # pool ALL response tokens of this chain
+        if intrinsic_dim:                              # CIM on the whole-chain last-token trajectory
             whole = H_l[a0:b1 + 1]                      # (R, d)
-            chain_id[li, 0] = cim_tle_intrinsic_dim(whole)
-            chain_id[li, 1] = geo.twonn_dim(whole)
+            chain_id[li, 0] = cim_tle_intrinsic_dim(whole)   # D_stim (kNN-ID)
+            chain_id[li, 1] = geo.twonn_dim(whole)           # D_stim (TwoNN)
+            chain_id[li, 2] = geo.information_volume(whole)  # V (information volume, Eq.14)
         if store_token_geom:
             for ti, pos in enumerate(range(a0, b1 + 1)):
                 f = geo.vector_features(H_l[pos], massive_m=massive_m)

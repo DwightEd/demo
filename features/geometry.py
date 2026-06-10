@@ -122,6 +122,27 @@ GEOM_FEATURE_NAMES = (
 )
 
 
+def information_volume(H, eps=1e-12):
+    """CIM information volume V (Ma et al. 2026, Eq.14) of a trajectory H (T, d):
+
+        V = 1/2 * logdet( I + (d/T) Z Zᵀ ),   Z = centered H, shape (d, T).
+
+    The non-zero eigenvalues of Z Zᵀ equal the squared singular values of the
+    centered trajectory, so V = 1/2 Σ_i log(1 + (d/T) σ_i²). High V = trajectory
+    spreads along many informative directions (non-degenerate); low V = collapse
+    to a point/line. This is the "information" half of CIM that complements the
+    intrinsic-dimension (compression) half -- CIM shows ID alone is weak but ID+V
+    is strong.
+    """
+    H = np.asarray(H, dtype=np.float64)
+    if H.ndim != 2 or H.shape[0] < 2:
+        return float("nan")
+    T, d = H.shape
+    Z = H - H.mean(0, keepdims=True)
+    s = np.linalg.svd(Z, compute_uv=False)            # singular values (len <= T)
+    return 0.5 * float(np.sum(np.log1p((d / T) * (s ** 2))))
+
+
 def twonn_dim(H, frac=0.9, eps=1e-12):
     """TwoNN intrinsic dimension (Facco et al. 2017) of a point cloud H (n, d).
 

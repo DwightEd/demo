@@ -153,7 +153,7 @@ def main():
     is_dyn = cset(lambda c: c.endswith(("_slope", "_r2")))
     is_len = cset(lambda c: c in ("n_steps", "n_resp_tokens"))
     is_paper = cset(lambda c: c.startswith(("UD_", "UC_", "UE_")))
-    is_id = cset(lambda c: c.startswith("id_"))
+    is_id = cset(lambda c: c.startswith(("id_", "cim_")))   # CIM D (id_*) + V (cim_V_*)
     is_static = ~is_dyn & ~is_len                 # means + chain-level scalars (id_*)
     is_geom = ~is_paper & ~is_len
 
@@ -169,9 +169,13 @@ def main():
         "ALL static":        is_static,
         "ALL +dyn":          is_static | is_dyn,
         "dyn only":          is_dyn,
-        # minimal, overfit-proof complementarity test (2 vs 4 features)
+        # minimal, overfit-proof tests (few features, no overfitting)
         "min: UD+UC":        incol(["UD_mid", "UC_mid"]),
         "min: +id_mle":      incol(["UD_mid", "UC_mid", "id_mle_L8", "id_mle_L16"]),
+        "min: +cim_V":       incol(["UD_mid", "UC_mid", "cim_V_L8", "cim_V_L16"]),
+        "min: +id+V":        incol(["UD_mid", "UC_mid", "id_mle_L8", "cim_V_L8",
+                                    "cim_V_L16"]),
+        "CIM D+V only":      incol(["id_mle_L8", "id_mle_L16", "cim_V_L8", "cim_V_L16"]),
     }
 
     print(f"file: {args.npz} | chains {len(y)} | error(answer) {int(y.sum())} | "
