@@ -102,6 +102,9 @@ def main():
     ap.add_argument("npz")
     ap.add_argument("--top", type=int, default=20)
     ap.add_argument("--win", type=int, default=2, help="aligned-curve half width")
+    ap.add_argument("--traj_feats", default="",
+                    help="comma list of features for the correct-vs-error "
+                         "trajectory tables (default: U_D/U_C + our geometry).")
     args = ap.parse_args()
 
     z = np.load(args.npz, allow_pickle=True)
@@ -185,7 +188,13 @@ def main():
     # ---- (2) correct vs error trajectory (normalized position) ----
     is_err = (z["is_correct"].astype(int) == 0)
     nb = 10
-    for label, sel in [("U_D", 0), ("U_C", 1)]:
+    idx = {n: i for i, n in enumerate(names)}
+    # default: U_D/U_C + OUR geometry + cloud, at a representative layer if present
+    want = (args.traj_feats.split(",") if args.traj_feats else
+            ["U_D", "U_C", "norm_L16", "ed_half_L16", "anom_k10_L16",
+             "cloud_D_L16", "cloud_C_L16", "norm_L24", "ed_half_L24"])
+    traj = [(n, idx[n]) for n in want if n in idx]
+    for label, sel in traj:
         acc = {0: np.zeros(nb), 1: np.zeros(nb)}
         cnt = {0: np.zeros(nb), 1: np.zeros(nb)}
         for i in range(len(series)):
