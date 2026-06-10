@@ -77,8 +77,33 @@ def build_table(z):
                 pr = profile(g[:, li, fi]) if g.ndim == 3 else {}
                 for st in PROFILE_STATS:
                     geo[i, c] = pr.get(st, np.nan); c += 1
-    X = np.column_stack([P, geo])
+    blocks = [P, geo]
     allcols = cols + geo_cols
+    # point-cloud D/V/C profiles (same per-step profiling as geometry)
+    if "stepcloud" in z.files and bool(z.get("cloud_stored", np.array(False))):
+        cnames = [str(x) for x in z["cloud_feature_names"]]
+        SC = z["stepcloud"]
+        cl_cols = [f"{fn}_L{ly}_{st}" for ly in layers for fn in cnames
+                   for st in PROFILE_STATS]
+        cl = np.full((N, len(cl_cols)), np.nan)
+        for i in range(N):
+            g = np.asarray(SC[i], float)
+            c = 0
+            for li in range(len(layers)):
+                for fi in range(len(cnames)):
+                    pr = profile(g[:, li, fi]) if g.ndim == 3 else {}
+                    for st in PROFILE_STATS:
+                        cl[i, c] = pr.get(st, np.nan); c += 1
+        blocks.append(cl); allcols = allcols + cl_cols
+    # whole-chain intrinsic dimension (already chain-level, one per layer)
+    if "chain_intrinsic" in z.files and bool(z.get("intrinsic_stored", np.array(False))):
+        inames = [str(x) for x in z["intrinsic_names"]]
+        CI = np.asarray(z["chain_intrinsic"], float)             # (N, L, n_est)
+        id_cols = [f"{en}_L{ly}" for li, ly in enumerate(layers) for en in inames]
+        idm = np.column_stack([CI[:, li, ei] for li in range(len(layers))
+                               for ei in range(len(inames))])
+        blocks.append(idm); allcols = allcols + id_cols
+    X = np.column_stack(blocks)
     # length baseline appended last
     if "n_steps" in z.files:
         X = np.column_stack([X, z["n_steps"].astype(float)])
@@ -121,10 +146,11 @@ def main():
     X, y, pid = X[keep], y[keep], pid[keep]
 
     cset = lambda f: np.array([f(c) for c in cols])
-    is_static = cset(lambda c: c.endswith(("_early", "_mid", "_late")))
     is_dyn = cset(lambda c: c.endswith(("_slope", "_r2")))
+    is_len = cset(lambda c: c in ("n_steps", "n_resp_tokens"))
     is_paper = cset(lambda c: c.startswith(("UD_", "UC_", "UE_")))
-    is_len = cset(lambda c: c == "n_steps")
+    is_id = cset(lambda c: c.startswith("id_"))
+    is_static = ~is_dyn & ~is_len                 # means + chain-level scalars (id_*)
     is_geom = ~is_paper & ~is_len
 
     sets = {
@@ -133,6 +159,8 @@ def main():
         "paper +dyn":        is_paper,
         "geom static":       is_geom & is_static,
         "geom +dyn":         is_geom,
+        "id_dim only":       is_id,
+        "paper + id_dim":    is_paper | is_id,
         "ALL static":        is_static,
         "ALL +dyn":          is_static | is_dyn,
         "dyn only":          is_dyn,
