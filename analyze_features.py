@@ -136,12 +136,52 @@ def build_features(z):
     return feats
 
 
+def _spearman_matrix(X):
+    """Spearman correlation among columns of X (listwise-complete rows)."""
+    m = np.isfinite(X).all(1)
+    A = X[m]
+    if A.shape[0] < 5:
+        return None, 0
+    R = np.argsort(np.argsort(A, axis=0), axis=0).astype(float)
+    R = (R - R.mean(0)) / (R.std(0) + 1e-12)
+    return (R.T @ R) / R.shape[0], A.shape[0]
+
+
+def correlation_report(feats, pid, want):
+    cols = [n for n in want if n in feats]
+    if len(cols) < 2:
+        print("\n(correlation: <2 of the requested features present)")
+        return
+    X = np.column_stack([feats[n] for n in cols])
+    # within-problem residual: subtract each problem's mean (removes difficulty)
+    Xw = X.copy()
+    for p in np.unique(pid):
+        idx = pid == p
+        Xw[idx] -= np.nanmean(X[idx], axis=0, keepdims=True)
+    for tag, M in [("RAW (cross-problem)", X), ("WITHIN-problem residual", Xw)]:
+        C, n = _spearman_matrix(M)
+        print(f"\n=== Spearman correlation [{tag}]  (n={n}) ===")
+        print("        " + " ".join(f"{c[:7]:>7s}" for c in cols))
+        if C is None:
+            print("  (too few complete rows)")
+            continue
+        for i, c in enumerate(cols):
+            print(f"{c[:8]:8s} " + " ".join(f"{C[i, j]:7.2f}" for j in range(len(cols))))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("npz")
     ap.add_argument("--top", type=int, default=40)
     ap.add_argument("--sort", default="within_strict",
                     choices=["within_strict", "cross_strict", "within_lenient"])
+    ap.add_argument("--corr", action="store_true",
+                    help="print Spearman correlation (raw + within-problem residual) "
+                         "among dimension vs entropy features to test redundancy.")
+    ap.add_argument("--corr_feats",
+                    default="UD_mid,UC_mid,cloud_D_L16_mean,ed_half_L16_mean,"
+                            "norm_L16_mean,anom_k10_L16_mean,id_twonn_L16,id_mle_L16",
+                    help="features for the --corr matrix.")
     ap.add_argument("--format_ok_only", action="store_true",
                     help="restrict to format_ok==1 chains (drops '#### missing' "
                          "format failures, so strict==answer-only -> isolates the "
@@ -184,6 +224,10 @@ def main():
     if "ue_on" in z.files:
         print(f"U_E stored: {bool(z['ue_on'])} | "
               f"layers: {[int(x) for x in z['layers_used']]}")
+
+    if args.corr:
+        correlation_report(feats, pid, args.corr_feats.split(","))
+        return
 
     rows = []
     for name, s in feats.items():
