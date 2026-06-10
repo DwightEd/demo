@@ -110,6 +110,22 @@ def build_features(z):
                     late_arr[i] = late_window(s)
             feats[f"{fn}_L{lyr}_mean"] = mean_arr
             feats[f"{fn}_L{lyr}_late"] = late_arr
+    # optional point-cloud effective rank D / energy V / concentration C
+    if "stepcloud" in z.files and bool(z.get("cloud_stored", np.array(False))):
+        cnames = [str(x) for x in z["cloud_feature_names"]]
+        SC = z["stepcloud"]
+        for li, lyr in enumerate(layers):
+            for fi, fn in enumerate(cnames):
+                mean_arr = np.full(N, np.nan)
+                late_arr = np.full(N, np.nan)
+                for i in range(N):
+                    g = np.asarray(SC[i], float)
+                    if g.ndim == 3 and g.shape[1] > li and g.shape[2] > fi:
+                        s = g[:, li, fi]
+                        mean_arr[i] = np.nanmean(s) if np.isfinite(s).any() else np.nan
+                        late_arr[i] = late_window(s)
+                feats[f"{fn}_L{lyr}_mean"] = mean_arr
+                feats[f"{fn}_L{lyr}_late"] = late_arr
     return feats
 
 

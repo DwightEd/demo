@@ -39,8 +39,13 @@ def per_step_series(z):
     SR = z["step_token_ranges"]
     UD = z["tok_U_D"] if "tok_U_D" in z.files else None
     UC = z["tok_U_C"] if "tok_U_C" in z.files else None
+    has_cloud = "stepcloud" in z.files and bool(z.get("cloud_stored", np.array(False)))
+    cnames = [str(x) for x in z["cloud_feature_names"]] if has_cloud else []
+    SC = z["stepcloud"] if has_cloud else None
 
-    names = ["U_D", "U_C"] + [f"{fn}_L{ly}" for ly in layers for fn in geom_names]
+    names = (["U_D", "U_C"]
+             + [f"{fn}_L{ly}" for ly in layers for fn in geom_names]
+             + [f"{fn}_L{ly}" for ly in layers for fn in cnames])
     out = []
     for i in range(N):
         sg = np.asarray(SG[i], float)              # (T, L, F)
@@ -66,6 +71,12 @@ def per_step_series(z):
         for li in range(sg.shape[1]):
             for fi in range(sg.shape[2]):
                 cols.append(sg[:, li, fi])
+        # point-cloud D/V/C, same (L, F) flatten order
+        if SC is not None:
+            sc = np.asarray(SC[i], float)          # (T, L, 3)
+            for li in range(sc.shape[1]):
+                for fi in range(sc.shape[2]):
+                    cols.append(sc[:, li, fi])
         out.append(np.column_stack(cols))          # (T, n_feat)
     return names, out
 
