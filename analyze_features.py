@@ -126,6 +126,13 @@ def build_features(z):
                         late_arr[i] = late_window(s)
                 feats[f"{fn}_L{lyr}_mean"] = mean_arr
                 feats[f"{fn}_L{lyr}_late"] = late_arr
+    # whole-chain nonlinear intrinsic dimension (already chain-level, one per layer)
+    if "chain_intrinsic" in z.files and bool(z.get("intrinsic_stored", np.array(False))):
+        inames = [str(x) for x in z["intrinsic_names"]]
+        CI = np.asarray(z["chain_intrinsic"], float)          # (N, L, n_est)
+        for li, lyr in enumerate(layers):
+            for ei, en in enumerate(inames):
+                feats[f"{en}_L{lyr}"] = CI[:, li, ei]
     return feats
 
 

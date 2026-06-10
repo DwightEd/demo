@@ -38,9 +38,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from utils.step_boundaries import find_step_token_ranges
 from utils.step_vector import step_vector
-from utils.spectral import step_layer_spectral_summary
+from utils.spectral import step_layer_spectral_summary, cim_tle_intrinsic_dim
 
 CLOUD_NAMES = ("cloud_D", "cloud_V", "cloud_C")   # point-cloud eff-rank / energy / concentration
+INTRINSIC_NAMES = ("id_mle", "id_twonn")          # whole-chain nonlinear intrinsic dim (length-robust)
 from features import geometry as geo
 from features import uncertainty as unc
 from features import trace_profile as tp
@@ -226,7 +227,7 @@ def iter_sampled(npz_path, problems, limit=None):
 def extract_chain(model, tokenizer, rec, device, layer_indices,
                   massive_m, want_ue, ue_params, ue_stride,
                   store_token_geom, max_seq_len, store_step_vectors=False,
-                  cloud_eff_rank=False):
+                  cloud_eff_rank=False, intrinsic_dim=False):
     """Return a dict of arrays for one chain, or None if it cannot be aligned."""
     prompt = EXTRACT_PROMPT.format(q=rec["question"])
     response = rec["response"]
@@ -271,6 +272,8 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
     stepvec = np.full((T, L, d), np.nan, dtype=np.float16) if store_step_vectors else None
     # point-cloud effective rank / spectral energy / concentration (the old CIM D,V,C)
     stepcloud = np.full((T, L, 3), np.nan, dtype=np.float32) if cloud_eff_rank else None
+    # whole-chain nonlinear intrinsic dimension (length-robust), per layer
+    chain_id = np.full((L, len(INTRINSIC_NAMES)), np.nan, np.float32) if intrinsic_dim else None
 
     for li in range(L):
         H_l = hs[li]                                   # (seq, d)
@@ -284,6 +287,10 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
                     stepvec[sj, li] = z.astype(np.float16)
             if cloud_eff_rank:
                 stepcloud[sj, li] = step_layer_spectral_summary(cloud)
+        if intrinsic_dim:                              # pool ALL response tokens of this chain
+            whole = H_l[a0:b1 + 1]                      # (R, d)
+            chain_id[li, 0] = cim_tle_intrinsic_dim(whole)
+            chain_id[li, 1] = geo.twonn_dim(whole)
         if store_token_geom:
             for ti, pos in enumerate(range(a0, b1 + 1)):
                 f = geo.vector_features(H_l[pos], massive_m=massive_m)
@@ -314,6 +321,7 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
         "tokgeom": tokgeom,
         "stepvec": stepvec,
         "stepcloud": stepcloud,
+        "chain_id": chain_id,
         "step_token_ranges": step_ranges,
         "n_steps": T, "n_resp_tokens": R,
         "profile": prof,
@@ -361,6 +369,10 @@ def main():
                     help="also compute the point-cloud effective rank D + spectral "
                          "energy V + top concentration C per (step, layer) -- the old "
                          "CIM triple, the n<<d cloud-dimension feature.")
+    ap.add_argument("--intrinsic_dim", action="store_true",
+                    help="also compute the WHOLE-chain nonlinear intrinsic dimension "
+                         "(MLE-kNN + TwoNN) per layer -- length-robust, better-"
+                         "conditioned than per-step effective rank.")
     ap.add_argument("--max_seq_len", type=int, default=4096)
     ap.add_argument("--limit", type=int, default=None, help="cap #chains (debug).")
     ap.add_argument("--output", required=True)
@@ -425,7 +437,8 @@ def main():
                 store_token_geom=not args.no_token_geom,
                 max_seq_len=args.max_seq_len,
                 store_step_vectors=args.store_step_vectors,
-                cloud_eff_rank=args.cloud_eff_rank)
+                cloud_eff_rank=args.cloud_eff_rank,
+                intrinsic_dim=args.intrinsic_dim)
         except Exception as e:
             print(f"  warn: chain {rec['id']} failed: {e}")
             res = None
@@ -470,6 +483,10 @@ def main():
         stepcloud=np.array([r["stepcloud"] for r in rows], dtype=object),
         cloud_stored=np.array(args.cloud_eff_rank),
         cloud_feature_names=np.array(CLOUD_NAMES, dtype=object),
+        chain_intrinsic=(np.stack([r["chain_id"] for r in rows])
+                         if args.intrinsic_dim else np.array(False)),
+        intrinsic_stored=np.array(args.intrinsic_dim),
+        intrinsic_names=np.array(INTRINSIC_NAMES, dtype=object),
         geom_feature_names=np.array(geo.GEOM_FEATURE_NAMES, dtype=object),
         # paper trace-profile table
         profile_paper=np.array([[p[c] for c in prof_cols] for p in profiles],

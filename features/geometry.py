@@ -122,6 +122,36 @@ GEOM_FEATURE_NAMES = (
 )
 
 
+def twonn_dim(H, frac=0.9, eps=1e-12):
+    """TwoNN intrinsic dimension (Facco et al. 2017) of a point cloud H (n, d).
+
+    Length-ROBUST: estimates the manifold dimension from the ratio of 2nd to 1st
+    nearest-neighbour distances, asymptotically independent of the number of
+    points -- unlike the linear effective rank, which is bounded by n and so
+    tracks token count. Meant for the WHOLE-chain pooled cloud (n ~ hundreds).
+    """
+    H = np.asarray(H, dtype=np.float64)
+    n = H.shape[0]
+    if n < 10:
+        return float("nan")
+    sq = (H * H).sum(1)
+    D2 = sq[:, None] + sq[None, :] - 2.0 * (H @ H.T)
+    np.maximum(D2, 0.0, out=D2)
+    D = np.sqrt(D2)
+    np.fill_diagonal(D, np.inf)
+    two = np.partition(D, 1, axis=1)[:, :2]          # 1st, 2nd NN distances
+    mu = two[:, 1] / np.maximum(two[:, 0], eps)
+    mu = np.sort(mu[np.isfinite(mu) & (mu > 1.0)])
+    if mu.size < 10:
+        return float("nan")
+    Femp = np.arange(1, mu.size + 1) / (mu.size + 1.0)
+    x, y = np.log(mu), -np.log(1.0 - Femp)
+    keep = Femp < frac                                # drop the unstable tail
+    if keep.sum() < 5:
+        return float("nan")
+    return float(np.sum(x[keep] * y[keep]) / np.sum(x[keep] ** 2))
+
+
 def vector_features(h: np.ndarray, massive_m: int = 4) -> dict:
     """All RAW activation-degree features of one vector h.
 
