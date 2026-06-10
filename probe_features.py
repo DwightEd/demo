@@ -108,6 +108,10 @@ def build_table(z):
     if "n_steps" in z.files:
         X = np.column_stack([X, z["n_steps"].astype(float)])
         allcols = allcols + ["n_steps"]
+    # drop all-NaN columns (e.g. UE_* when U_E was skipped) -> no imputer warnings
+    good = np.isfinite(X).any(axis=0)
+    X = X[:, good]
+    allcols = [c for c, g in zip(allcols, good) if g]
     return X, allcols
 
 
