@@ -157,6 +157,7 @@ def main():
     is_static = ~is_dyn & ~is_len                 # means + chain-level scalars (id_*)
     is_geom = ~is_paper & ~is_len
 
+    incol = lambda lst: cset(lambda c: c in lst)
     sets = {
         "length(n_steps)":   is_len,
         "paper static":      is_paper & is_static,
@@ -168,6 +169,9 @@ def main():
         "ALL static":        is_static,
         "ALL +dyn":          is_static | is_dyn,
         "dyn only":          is_dyn,
+        # minimal, overfit-proof complementarity test (2 vs 4 features)
+        "min: UD+UC":        incol(["UD_mid", "UC_mid"]),
+        "min: +id_mle":      incol(["UD_mid", "UC_mid", "id_mle_L8", "id_mle_L16"]),
     }
 
     print(f"file: {args.npz} | chains {len(y)} | error(answer) {int(y.sum())} | "
