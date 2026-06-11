@@ -96,24 +96,31 @@ def main():
     args = ap.parse_args()
 
     z = np.load(args.npz, allow_pickle=True)
-    layers = [int(x) for x in z["layers_used"]]
-    L = len(layers)
-    # locate the metric in stepgeom or stepcloud
     geom_names = [str(x) for x in z["geom_feature_names"]]
     cloud_names = [str(x) for x in z["cloud_feature_names"]] if "cloud_feature_names" in z.files else []
-    if args.metric in geom_names:
+    if args.metric == "grad":                              # GRADIENT spectral field
+        if not bool(z.get("grad_stored", np.array(False))):
+            raise SystemExit("no gradprof; re-extract with --grad_profile")
+        SRC, fi = z["gradprof"], None
+        layers = [int(x) for x in z["grad_layers"]]
+    elif args.metric in geom_names:
         SRC, fi = z["stepgeom"], geom_names.index(args.metric)
+        layers = [int(x) for x in z["layers_used"]]
     elif args.metric in cloud_names and bool(z.get("cloud_stored", np.array(False))):
         SRC, fi = z["stepcloud"], cloud_names.index(args.metric)
+        layers = [int(x) for x in z["layers_used"]]
     else:
-        raise SystemExit(f"metric {args.metric} not in geom {geom_names} or cloud {cloud_names}")
+        raise SystemExit(f"metric {args.metric} not in grad / geom {geom_names} / cloud {cloud_names}")
+    L = len(layers)
     ges = z["gold_error_step"].astype(int)
 
     # ---- build step-level dataset (m_j, y, chain group, healthy flag) ----
     rows_m, rows_y, rows_g, rows_h = [], [], [], []
     for i in range(len(SRC)):
+        if SRC[i] is None:
+            continue
         g = np.asarray(SRC[i], float)                     # (T, L) for this metric
-        if g.ndim == 3:
+        if fi is not None and g.ndim == 3:
             g = g[:, :, fi]
         T = g.shape[0]
         k = int(ges[i])

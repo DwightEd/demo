@@ -45,6 +45,7 @@ INTRINSIC_NAMES = ("id_mle", "id_twonn", "cim_V")  # whole-chain CIM: intrinsic 
 from features import geometry as geo
 from features import uncertainty as unc
 from features import trace_profile as tp
+from features import gradients as grad_mod
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -227,7 +228,8 @@ def iter_sampled(npz_path, problems, limit=None):
 def extract_chain(model, tokenizer, rec, device, layer_indices,
                   massive_m, want_ue, ue_params, ue_stride,
                   store_token_geom, max_seq_len, store_step_vectors=False,
-                  cloud_eff_rank=False, intrinsic_dim=False, sv_layers=None):
+                  cloud_eff_rank=False, intrinsic_dim=False, sv_layers=None,
+                  grad_block=None):
     """Return a dict of arrays for one chain, or None if it cannot be aligned."""
     prompt = EXTRACT_PROMPT.format(q=rec["question"])
     response = rec["response"]
@@ -316,6 +318,13 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
         U_E, U_E_off = unc.epistemic_grad_norms(
             model, input_ids, attn, a0, b1, ue_params, ue_stride=ue_stride)
 
+    # --- gradient spectral field: per-step, per-layer parameter-gradient norms ---
+    gradprof = grad_total = None
+    if grad_block is not None:
+        bof, n_blocks, gparams = grad_block
+        gradprof, grad_total = grad_mod.step_gradient_profile(
+            model, input_ids, attn, safe, bof, n_blocks, gparams)
+
     # --- paper trace-profile summary (15 numbers) ---
     prof = {}
     prof.update(tp.profile_flat(U_D, "UD"))
@@ -336,6 +345,8 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
         "qvec": qvec,
         "stepcloud": stepcloud,
         "chain_id": chain_id,
+        "gradprof": gradprof,
+        "grad_total": grad_total,
         "step_token_ranges": step_ranges,
         "n_steps": T, "n_resp_tokens": R,
         "profile": prof,
@@ -391,6 +402,12 @@ def main():
                     help="also compute the WHOLE-chain nonlinear intrinsic dimension "
                          "(MLE-kNN + TwoNN) per layer -- length-robust, better-"
                          "conditioned than per-step effective rank.")
+    ap.add_argument("--grad_profile", action="store_true",
+                    help="GRADIENT spectral field: per step, backward on the step NLL, "
+                         "per-transformer-block grad norm (gradprof T x n_blocks) + total "
+                         "step grad norm (signal 1). Needs ~param-size memory (H100).")
+    ap.add_argument("--grad_from_layer", type=int, default=None,
+                    help="only blocks >= this carry grad for --grad_profile (memory).")
     ap.add_argument("--max_seq_len", type=int, default=4096)
     ap.add_argument("--limit", type=int, default=None, help="cap #chains (debug).")
     ap.add_argument("--output", required=True)
@@ -438,6 +455,13 @@ def main():
             p.requires_grad_(False)
         print("  U_E OFF (gradients disabled)")
 
+    grad_block = None
+    if args.grad_profile:                   # re-enables grad on the chosen blocks
+        grad_block = grad_mod.build_block_map(model, args.grad_from_layer)
+        bof, n_blocks, gparams = grad_block
+        print(f"  GRAD PROFILE ON: {sum(p.numel() for p in gparams)/1e6:.0f}M grad "
+              f"params over {n_blocks} blocks (from_layer={args.grad_from_layer})")
+
     # record stream
     if args.source == "processbench":
         records = iter_processbench(args.pb_path, args.pb_subset, args.limit)
@@ -461,7 +485,8 @@ def main():
                 max_seq_len=args.max_seq_len,
                 store_step_vectors=args.store_step_vectors,
                 cloud_eff_rank=args.cloud_eff_rank,
-                intrinsic_dim=args.intrinsic_dim, sv_layers=sv_set)
+                intrinsic_dim=args.intrinsic_dim, sv_layers=sv_set,
+                grad_block=grad_block)
         except Exception as e:
             print(f"  warn: chain {rec['id']} failed: {e}")
             res = None
@@ -512,6 +537,11 @@ def main():
                          if args.intrinsic_dim else np.array(False)),
         intrinsic_stored=np.array(args.intrinsic_dim),
         intrinsic_names=np.array(INTRINSIC_NAMES, dtype=object),
+        gradprof=np.array([r["gradprof"] for r in rows], dtype=object),
+        grad_total=np.array([r["grad_total"] for r in rows], dtype=object),
+        grad_stored=np.array(args.grad_profile),
+        grad_layers=np.array(list(range(grad_block[1])) if grad_block else [],
+                             dtype=np.int32),
         geom_feature_names=np.array(geo.GEOM_FEATURE_NAMES, dtype=object),
         # paper trace-profile table
         profile_paper=np.array([[p[c] for c in prof_cols] for p in profiles],
