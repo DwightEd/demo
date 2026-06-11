@@ -227,7 +227,7 @@ def iter_sampled(npz_path, problems, limit=None):
 def extract_chain(model, tokenizer, rec, device, layer_indices,
                   massive_m, want_ue, ue_params, ue_stride,
                   store_token_geom, max_seq_len, store_step_vectors=False,
-                  cloud_eff_rank=False, intrinsic_dim=False):
+                  cloud_eff_rank=False, intrinsic_dim=False, sv_layers=None):
     """Return a dict of arrays for one chain, or None if it cannot be aligned."""
     prompt = EXTRACT_PROMPT.format(q=rec["question"])
     response = rec["response"]
@@ -268,11 +268,14 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
     stepgeom = np.full((T, L, F), np.nan, dtype=np.float32)
     R = b1 - a0 + 1
     tokgeom = np.full((R, L, F), np.nan, dtype=np.float16) if store_token_geom else None
-    # raw per-step exp-pooled vectors (for SPE / baseline-normalization analysis)
-    stepvec = np.full((T, L, d), np.nan, dtype=np.float16) if store_step_vectors else None
-    # exp-pooled vector of the QUESTION/prompt tokens (positions 0..a0-1), per layer,
+    # raw per-step exp-pooled vectors (only for sv_layers, to bound memory/disk)
+    sv_set = (list(layer_indices) if sv_layers is None
+              else [l for l in layer_indices if l in sv_layers])
+    n_sv = len(sv_set)
+    stepvec = np.full((T, n_sv, d), np.nan, dtype=np.float16) if store_step_vectors else None
+    # exp-pooled vector of the QUESTION/prompt tokens (positions 0..a0-1), per sv layer,
     # used as the "question" baseline for normalization (z_j - q)
-    qvec = np.full((L, d), np.nan, dtype=np.float16) if store_step_vectors else None
+    qvec = np.full((n_sv, d), np.nan, dtype=np.float16) if store_step_vectors else None
     # point-cloud effective rank / spectral energy / concentration (the old CIM D,V,C)
     stepcloud = np.full((T, L, 3), np.nan, dtype=np.float32) if cloud_eff_rank else None
     # whole-chain nonlinear intrinsic dimension (length-robust), per layer
@@ -280,18 +283,20 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
 
     for li in range(L):
         H_l = hs[li]                                   # (seq, d)
-        if store_step_vectors and a0 > 0:              # question/prompt baseline q
+        sv_k = sv_set.index(layer_indices[li]) if (store_step_vectors and
+                layer_indices[li] in sv_set) else None
+        if sv_k is not None and a0 > 0:                # question/prompt baseline q
             qv = step_vector(H_l[0:a0], mode="step_exp", l2_normalize=False)
             if qv is not None:
-                qvec[li] = qv.astype(np.float16)
+                qvec[sv_k] = qv.astype(np.float16)
         for sj, (a, b) in enumerate(safe):
             cloud = H_l[a:b + 1]                        # (n_j, d) token cloud
             z = step_vector(cloud, mode="step_exp", l2_normalize=False)
             if z is not None:
                 f = geo.vector_features(z, massive_m=massive_m)
                 stepgeom[sj, li] = [f[k] for k in geo.GEOM_FEATURE_NAMES]
-                if store_step_vectors:
-                    stepvec[sj, li] = z.astype(np.float16)
+                if sv_k is not None:
+                    stepvec[sj, sv_k] = z.astype(np.float16)
             if cloud_eff_rank:
                 stepcloud[sj, li] = step_layer_spectral_summary(cloud)
         if intrinsic_dim:                              # CIM on the whole-chain last-token trajectory
@@ -372,8 +377,12 @@ def main():
     ap.add_argument("--no_token_geom", action="store_true",
                     help="do not store per-token geometry (keeps per-step only).")
     ap.add_argument("--store_step_vectors", action="store_true",
-                    help="also store the raw per-step exp-pooled vectors (T,L,d, "
-                         "fp16) for SPE / subspace-leakage analysis (spe_analysis.py).")
+                    help="also store the raw per-step exp-pooled vectors (fp16) for "
+                         "SPE / baseline-norm / trajectory-dynamics analysis.")
+    ap.add_argument("--sv_layers", default="",
+                    help="comma list of layers to store step vectors for (subset of "
+                         "--layers). Default empty = all --layers. Use e.g. '16' to "
+                         "store ONE layer and avoid the OOM that killed the full run.")
     ap.add_argument("--cloud_eff_rank", action="store_true",
                     help="also compute the point-cloud effective rank D + spectral "
                          "energy V + top concentration C per (step, layer) -- the old "
@@ -413,6 +422,11 @@ def main():
         layer_indices = list(range(n_hs))
     print(f"  layers (hidden_states idx): {layer_indices}  of 0..{n_hs - 1}")
 
+    sv_set = (layer_indices if not args.sv_layers
+              else [int(x) for x in args.sv_layers.split(",") if int(x) in layer_indices])
+    if args.store_step_vectors:
+        print(f"  storing step vectors for layers {sv_set}")
+
     want_ue = not args.no_ue
     ue_params = unc.set_ue_grad_scope(model, args.ue_layers_from) if want_ue else None
     if want_ue:
@@ -447,7 +461,7 @@ def main():
                 max_seq_len=args.max_seq_len,
                 store_step_vectors=args.store_step_vectors,
                 cloud_eff_rank=args.cloud_eff_rank,
-                intrinsic_dim=args.intrinsic_dim)
+                intrinsic_dim=args.intrinsic_dim, sv_layers=sv_set)
         except Exception as e:
             print(f"  warn: chain {rec['id']} failed: {e}")
             res = None
@@ -489,6 +503,7 @@ def main():
         tokgeom=np.array([r["tokgeom"] for r in rows], dtype=object),
         stepvec=np.array([r["stepvec"] for r in rows], dtype=object),
         qvec=np.array([r["qvec"] for r in rows], dtype=object),
+        sv_layers=np.array(sv_set, dtype=np.int32),
         step_vectors_stored=np.array(args.store_step_vectors),
         stepcloud=np.array([r["stepcloud"] for r in rows], dtype=object),
         cloud_stored=np.array(args.cloud_eff_rank),

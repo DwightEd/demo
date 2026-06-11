@@ -45,9 +45,10 @@ def main():
     z = np.load(args.npz, allow_pickle=True)
     if not bool(z.get("step_vectors_stored", np.array(False))):
         raise SystemExit("npz has no step vectors. Re-extract with --store_step_vectors.")
-    layers = [int(x) for x in z["layers_used"]]
+    layers = [int(x) for x in (z["sv_layers"] if "sv_layers" in z.files
+                               else z["layers_used"])]
     if args.layer not in layers:
-        raise SystemExit(f"layer {args.layer} not in {layers}")
+        raise SystemExit(f"layer {args.layer} not in stored step-vector layers {layers}")
     li = layers.index(args.layer)
 
     SV = z["stepvec"]; QV = z["qvec"]
