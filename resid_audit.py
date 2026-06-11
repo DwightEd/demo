@@ -167,13 +167,18 @@ def main():
             p.fit(X[tr], Y[tr]); s[te] = p.predict_proba(X[te])[:, 1]
         return auroc(s, Y)
     a_nuis = oof_logit(NUIS[:, use_nuis])
+    a_nuis_M = oof_logit(np.c_[NUIS[:, use_nuis], M])      # non-discarding increment test
     a_raw = oof_logit(M)
     a_res = oof_logit(np.nan_to_num(resid, nan=0.0))
 
     print(f"\nbest single layer   raw {braw:.3f} -> resid {bres:.3f}  ({braw-bres:+.3f})")
     print(f"nuisance-only AUROC ({args.nuis}): {a_nuis:.3f}  <- confound alone")
     print(f"all-layer logistic  raw {a_raw:.3f} -> resid {a_res:.3f}  ({a_raw-a_res:+.3f})")
-    print("\nlarge drop => naive geometric signal was mostly confound; residual = honest geometry.")
+    print(f"INCREMENT (non-discarding): nuisance {a_nuis:.3f} -> nuisance+metric "
+          f"{a_nuis_M:.3f}  (+{a_nuis_M-a_nuis:.3f})  <- does the metric add OVER the "
+          f"confounds, without throwing anything away?")
+    print("\nincrement ~0 => metric carries no info beyond the confounds. residual drop "
+          "alone can over-correct; the increment is the fair test.")
 
 
 if __name__ == "__main__":
