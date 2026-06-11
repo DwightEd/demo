@@ -124,6 +124,12 @@ def _pb_raw_rows(path, subset):
         for d in rows:
             yield d
     else:
+        if path.endswith((".json", ".jsonl")) or path.endswith((".json/", ".jsonl/")):
+            raise SystemExit(
+                f"--pb_path '{path}' looks like a file but does NOT exist. "
+                f"Check the real filename: ls the ProcessBench dir. "
+                f"(gsm8k worked because gsm8k.json exists there; the other configs "
+                f"may have different names or not be present.)")
         from datasets import load_dataset
         print(f"  no json/jsonl at {path}; load_dataset({path}, split={subset})")
         for ex in load_dataset(path, split=subset):
