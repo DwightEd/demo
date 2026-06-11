@@ -268,8 +268,11 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
     stepgeom = np.full((T, L, F), np.nan, dtype=np.float32)
     R = b1 - a0 + 1
     tokgeom = np.full((R, L, F), np.nan, dtype=np.float16) if store_token_geom else None
-    # raw per-step exp-pooled vectors (for SPE / subspace-leakage analysis)
+    # raw per-step exp-pooled vectors (for SPE / baseline-normalization analysis)
     stepvec = np.full((T, L, d), np.nan, dtype=np.float16) if store_step_vectors else None
+    # exp-pooled vector of the QUESTION/prompt tokens (positions 0..a0-1), per layer,
+    # used as the "question" baseline for normalization (z_j - q)
+    qvec = np.full((L, d), np.nan, dtype=np.float16) if store_step_vectors else None
     # point-cloud effective rank / spectral energy / concentration (the old CIM D,V,C)
     stepcloud = np.full((T, L, 3), np.nan, dtype=np.float32) if cloud_eff_rank else None
     # whole-chain nonlinear intrinsic dimension (length-robust), per layer
@@ -277,6 +280,10 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
 
     for li in range(L):
         H_l = hs[li]                                   # (seq, d)
+        if store_step_vectors and a0 > 0:              # question/prompt baseline q
+            qv = step_vector(H_l[0:a0], mode="step_exp", l2_normalize=False)
+            if qv is not None:
+                qvec[li] = qv.astype(np.float16)
         for sj, (a, b) in enumerate(safe):
             cloud = H_l[a:b + 1]                        # (n_j, d) token cloud
             z = step_vector(cloud, mode="step_exp", l2_normalize=False)
@@ -321,6 +328,7 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
         "stepgeom": stepgeom,
         "tokgeom": tokgeom,
         "stepvec": stepvec,
+        "qvec": qvec,
         "stepcloud": stepcloud,
         "chain_id": chain_id,
         "step_token_ranges": step_ranges,
@@ -480,6 +488,7 @@ def main():
         stepgeom=np.array([r["stepgeom"] for r in rows], dtype=object),
         tokgeom=np.array([r["tokgeom"] for r in rows], dtype=object),
         stepvec=np.array([r["stepvec"] for r in rows], dtype=object),
+        qvec=np.array([r["qvec"] for r in rows], dtype=object),
         step_vectors_stored=np.array(args.store_step_vectors),
         stepcloud=np.array([r["stepcloud"] for r in rows], dtype=object),
         cloud_stored=np.array(args.cloud_eff_rank),
