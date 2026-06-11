@@ -156,7 +156,7 @@ def main():
     braw = max(bdir(auroc(M[:, l], Y)) for l in range(L))
     bres = max(bdir(auroc(resid[:, l], Y)) for l in range(L))
 
-    # nuisance-only baseline + combined logistic raw vs residual (OOF)
+    # OOF scores for the decomposition: nuisance-only, nuisance+metric, raw, residual
     def oof_logit(X):
         s = np.full(len(Y), np.nan)
         for tr, te in gkf.split(X, Y, G):
@@ -165,20 +165,33 @@ def main():
             p = make_pipeline(StandardScaler(),
                               LogisticRegression(max_iter=2000))
             p.fit(X[tr], Y[tr]); s[te] = p.predict_proba(X[te])[:, 1]
-        return auroc(s, Y)
-    a_nuis = oof_logit(NUIS[:, use_nuis])
-    a_nuis_M = oof_logit(np.c_[NUIS[:, use_nuis], M])      # non-discarding increment test
-    a_raw = oof_logit(M)
-    a_res = oof_logit(np.nan_to_num(resid, nan=0.0))
+        return s
+    s_n = oof_logit(NUIS[:, use_nuis])
+    s_nm = oof_logit(np.c_[NUIS[:, use_nuis], M])
+    s_raw = oof_logit(M)
+    s_res = oof_logit(np.nan_to_num(resid, nan=0.0))
+    a_nuis, a_nm = auroc(s_n, Y), auroc(s_nm, Y)
+    a_raw, a_res = auroc(s_raw, Y), auroc(s_res, Y)
 
     print(f"\nbest single layer   raw {braw:.3f} -> resid {bres:.3f}  ({braw-bres:+.3f})")
-    print(f"nuisance-only AUROC ({args.nuis}): {a_nuis:.3f}  <- confound alone")
     print(f"all-layer logistic  raw {a_raw:.3f} -> resid {a_res:.3f}  ({a_raw-a_res:+.3f})")
-    print(f"INCREMENT (non-discarding): nuisance {a_nuis:.3f} -> nuisance+metric "
-          f"{a_nuis_M:.3f}  (+{a_nuis_M-a_nuis:.3f})  <- does the metric add OVER the "
-          f"confounds, without throwing anything away?")
-    print("\nincrement ~0 => metric carries no info beyond the confounds. residual drop "
-          "alone can over-correct; the increment is the fair test.")
+
+    # === DECOMPOSITION: raw = confound-explainable + mechanistic increment ===
+    rng = np.random.default_rng(0); chains = np.unique(G); diffs = []
+    for _ in range(500):
+        cb = rng.choice(chains, size=len(chains), replace=True)
+        mask = np.concatenate([np.where(G == c)[0] for c in cb])
+        diffs.append(auroc(s_nm[mask], Y[mask]) - auroc(s_n[mask], Y[mask]))
+    d = np.array(diffs); lo, hi = np.nanpercentile(d, [2.5, 97.5])
+    sig = "SIGNIFICANT" if lo > 0 else "ns"
+    print(f"\n=== decomposition (raw = confound part + mechanistic increment) ===")
+    print(f"  confound-only (nuisance {args.nuis}):        {a_nuis:.3f}")
+    print(f"  + metric (full):                            {a_nm:.3f}")
+    print(f"  MECHANISTIC INCREMENT:  +{a_nm-a_nuis:.3f}  [{lo:+.3f}, {hi:+.3f}]  {sig}")
+    print("\nMechanistic claim ('metric carries hallucination signal') rests ONLY on the "
+          "increment (significant>0). Confound part stays as an honest shallow feature "
+          "in the fused detector. Residualized-standalone is a lower bound (discards "
+          "legitimate shared variance) -- do not use it for the mechanistic verdict.")
 
 
 if __name__ == "__main__":
