@@ -59,7 +59,12 @@ def main():
     ap.add_argument("npz")
     ap.add_argument("--metric", default="cloud_D")
     ap.add_argument("--folds", type=int, default=5)
+    ap.add_argument("--nuis", default="n_tok,pos,density",
+                    help="which nuisances to residualize on (subset of "
+                         "n_tok,pos,density). e.g. 'n_tok,density' keeps position.")
     args = ap.parse_args()
+    NUIS_NAMES = ["n_tok", "pos", "density"]
+    use_nuis = [NUIS_NAMES.index(x) for x in args.nuis.split(",") if x in NUIS_NAMES]
 
     z = np.load(args.npz, allow_pickle=True)
     layers = [int(x) for x in z["layers_used"]]
@@ -110,6 +115,15 @@ def main():
     print(f"file: {args.npz} | metric {args.metric} | layers {layers}")
     print(f"steps: {len(Y)} | first-error: {int(Y.sum())} | correct-chain: {int(H.sum())}")
 
+    # --- per-nuisance breakdown: are error steps really longer/later/denser? ---
+    print(f"\n=== nuisance breakdown (error-step vs good-step) ===")
+    print(f"{'nuisance':9s} {'err mean':>9s} {'good mean':>9s} {'standalone AUROC':>17s}")
+    for c, nm in enumerate(NUIS_NAMES):
+        col = NUIS[:, c]
+        me, mg = col[Y == 1].mean(), col[Y == 0].mean()
+        print(f"{nm:9s} {me:9.3f} {mg:9.3f} {bdir(auroc(col, Y)):17.3f}")
+    print(f"residualizing on: {[NUIS_NAMES[i] for i in use_nuis]}")
+
     # cross-fit residuals per layer (regressor trained on correct-chain steps)
     resid = np.full_like(M, np.nan)
     gkf = GroupKFold(args.folds)
@@ -117,12 +131,13 @@ def main():
         Htr = H[tr]
         if Htr.sum() < 20:
             continue
-        Xtr = NUIS[tr][Htr]
+        Xtr = NUIS[tr][Htr][:, use_nuis]
+        Xte = NUIS[te][:, use_nuis]
         for l in range(L):
             reg = GradientBoostingRegressor(n_estimators=120, max_depth=3,
                                             random_state=0)
             reg.fit(Xtr, M[tr][Htr][:, l])
-            resid[te, l] = M[te][:, l] - reg.predict(NUIS[te])
+            resid[te, l] = M[te][:, l] - reg.predict(Xte)
 
     # per-layer raw vs residual AUROC
     print(f"\n{'layer':>6s} {'raw':>7s} {'resid':>7s} {'drop':>7s}")
@@ -143,12 +158,12 @@ def main():
                               LogisticRegression(max_iter=2000))
             p.fit(X[tr], Y[tr]); s[te] = p.predict_proba(X[te])[:, 1]
         return auroc(s, Y)
-    a_nuis = oof_logit(NUIS)
+    a_nuis = oof_logit(NUIS[:, use_nuis])
     a_raw = oof_logit(M)
     a_res = oof_logit(np.nan_to_num(resid, nan=0.0))
 
     print(f"\nbest single layer   raw {braw:.3f} -> resid {bres:.3f}  ({braw-bres:+.3f})")
-    print(f"nuisance-only AUROC (n_tok,j/T,density): {a_nuis:.3f}  <- how much is confound alone")
+    print(f"nuisance-only AUROC ({args.nuis}): {a_nuis:.3f}  <- confound alone")
     print(f"all-layer logistic  raw {a_raw:.3f} -> resid {a_res:.3f}  ({a_raw-a_res:+.3f})")
     print("\nlarge drop => naive geometric signal was mostly confound; residual = honest geometry.")
 
