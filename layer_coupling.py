@@ -74,6 +74,16 @@ def coord(M, Vt, eps=1e-12):
     return num.sum(1) / np.maximum(den, eps)
 
 
+def smooth_basis(L, k):
+    """Top-k low-frequency DCT-II modes on the layer axis (k, L). This is the
+    GENERIC residual-stream smoothness null: adjacent layers correlate, so every
+    chain's layer profile is smooth. c built on THIS basis measures 'how smooth',
+    not 'reasoning-specific coordination'. The healthy-V* c must beat it."""
+    n = np.arange(L)
+    B = np.stack([np.cos(np.pi * (n + 0.5) * m / L) for m in range(k)])
+    return B / np.linalg.norm(B, axis=1, keepdims=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("npz")
@@ -131,7 +141,8 @@ def main():
     rng = np.random.default_rng(args.seed)
     n = len(Y)
     oof = {s: np.full(n, np.nan) for s in
-           ["iii", "iv_a", "iv_b", "ctrl", "iip_max", "iip_mean", "c"]}
+           ["iii", "iv_a", "iv_b", "ctrl", "iv_smooth", "iip_max", "iip_mean", "c"]}
+    Vs = smooth_basis(L, args.k)                          # generic smoothness null (fixed)
     gkf = GroupKFold(args.folds)
     for tr, te in gkf.split(M, Y, G):
         Htr = H[tr]
@@ -145,6 +156,7 @@ def main():
         R = top_k_subspace(rng.standard_normal((max(args.k * 4, args.k + 5), L)), args.k)
         c_tr, c_te = coord(M[tr] - mu, Vt), coord(M[te] - mu, Vt)
         cr_tr, cr_te = coord(M[tr] - mu, R), coord(M[te] - mu, R)
+        cs_tr, cs_te = coord(M[tr] - mu, Vs), coord(M[te] - mu, Vs)   # smoothness null
         std_tr = M[tr].std(1); std_te = M[te].std(1)
         oof["c"][te] = c_te
         # per-layer z, aggregate (cross-fit calibration)
@@ -162,6 +174,7 @@ def main():
         oof["iv_a"][te] = fit(np.c_[M[tr], c_tr], np.c_[M[te], c_te])
         oof["iv_b"][te] = fit(np.c_[M[tr], c_tr, std_tr], np.c_[M[te], c_te, std_te])
         oof["ctrl"][te] = fit(np.c_[M[tr], cr_tr], np.c_[M[te], cr_te])
+        oof["iv_smooth"][te] = fit(np.c_[M[tr], cs_tr], np.c_[M[te], cs_te])
 
     # ---- point AUROCs ----
     a_i = best_dir(max(auroc(M[:, l], Y) for l in range(L)))
@@ -175,6 +188,7 @@ def main():
         "(iv-a) iii + c": auroc(oof["iv_a"], Y),
         "(iv-b) iii + c + std": auroc(oof["iv_b"], Y),
         "ctrl iii + rand-quad": auroc(oof["ctrl"], Y),
+        "ctrl iii + smooth-c": auroc(oof["iv_smooth"], Y),
     }
     print(f"\n{'scheme':26s} {'AUROC':>7s}")
     print("-" * 36)
@@ -195,7 +209,8 @@ def main():
 
     print(f"\n=== decisive gaps (chain-paired bootstrap, n={args.n_boot}) ===")
     for sa, sb, name in [("iv_a", "iii", "(iv-a) - (iii)"),
-                         ("iv_a", "ctrl", "(iv-a) - ctrl(rand-quad)")]:
+                         ("iv_a", "ctrl", "(iv-a) - ctrl(rand-quad)"),
+                         ("iv_a", "iv_smooth", "(iv-a) - ctrl(smooth-c)")]:
         m, lo, hi = boot_gap(sa, sb)
         sig = "SIGNIFICANT" if lo > 0 else ("neg" if hi < 0 else "ns")
         print(f"  {name:26s} {m:+.3f}  [{lo:+.3f}, {hi:+.3f}]  {sig}")
