@@ -62,6 +62,9 @@ def main():
     ap.add_argument("--nuis", default="n_tok,pos,density",
                     help="which nuisances to residualize on (subset of "
                          "n_tok,pos,density). e.g. 'n_tok,density' keeps position.")
+    ap.add_argument("--with_ud", action="store_true",
+                    help="also put per-step U_D (and U_C) in the baseline, so the "
+                         "increment = metric's signal BEYOND uncertainty too.")
     args = ap.parse_args()
     NUIS_NAMES = ["n_tok", "pos", "density"]
     use_nuis = [NUIS_NAMES.index(x) for x in args.nuis.split(",") if x in NUIS_NAMES]
@@ -85,8 +88,10 @@ def main():
     L = len(layers)
     ges = z["gold_error_step"].astype(int)
     SR = z["step_token_ranges"]; ST = z["steps_text"]
+    UD = z["tok_U_D"] if ("tok_U_D" in z.files and args.with_ud) else None
+    UC = z["tok_U_C"] if ("tok_U_C" in z.files and args.with_ud) else None
 
-    M, NUIS, Y, G, H = [], [], [], [], []
+    M, NUIS, Y, G, H, EXTRA = [], [], [], [], [], []
     for i in range(len(SRC)):
         if SRC[i] is None:
             continue
@@ -114,11 +119,24 @@ def main():
             dens = density(txt[j]) if j < len(txt) else np.nan
             M.append(g[j]); NUIS.append([ntok, j / max(1, T - 1), dens])
             Y.append(y); G.append(i); H.append(correct)
+            if UD is not None:
+                a0 = int(rng[0, 0]); lo = int(rng[j, 0]) - a0; hi = int(rng[j, 1]) - a0 + 1
+                ud = np.asarray(UD[i], float); uc = np.asarray(UC[i], float)
+                lo, hi = max(0, lo), min(len(ud), hi)
+                EXTRA.append([np.nanmean(ud[lo:hi]) if hi > lo else np.nan,
+                              np.nanmean(uc[lo:hi]) if hi > lo else np.nan])
     M = np.asarray(M, float); NUIS = np.asarray(NUIS, float)
     Y = np.asarray(Y, int); G = np.asarray(G, int); H = np.asarray(H, bool)
     # impute nuisance NaNs with column means
     for c in range(NUIS.shape[1]):
         col = NUIS[:, c]; col[~np.isfinite(col)] = np.nanmean(col)
+    base_X = NUIS[:, use_nuis]
+    base_lbl = args.nuis
+    if EXTRA:
+        EX = np.asarray(EXTRA, float)
+        for c in range(EX.shape[1]):
+            col = EX[:, c]; col[~np.isfinite(col)] = np.nanmean(col)
+        base_X = np.c_[base_X, EX]; base_lbl = args.nuis + "+U_D,U_C"
 
     print(f"file: {args.npz} | metric {args.metric} | layers {layers}")
     print(f"steps: {len(Y)} | first-error: {int(Y.sum())} | correct-chain: {int(H.sum())}")
@@ -166,8 +184,8 @@ def main():
                               LogisticRegression(max_iter=2000))
             p.fit(X[tr], Y[tr]); s[te] = p.predict_proba(X[te])[:, 1]
         return s
-    s_n = oof_logit(NUIS[:, use_nuis])
-    s_nm = oof_logit(np.c_[NUIS[:, use_nuis], M])
+    s_n = oof_logit(base_X)
+    s_nm = oof_logit(np.c_[base_X, M])
     s_raw = oof_logit(M)
     s_res = oof_logit(np.nan_to_num(resid, nan=0.0))
     a_nuis, a_nm = auroc(s_n, Y), auroc(s_nm, Y)
@@ -184,8 +202,8 @@ def main():
         diffs.append(auroc(s_nm[mask], Y[mask]) - auroc(s_n[mask], Y[mask]))
     d = np.array(diffs); lo, hi = np.nanpercentile(d, [2.5, 97.5])
     sig = "SIGNIFICANT" if lo > 0 else "ns"
-    print(f"\n=== decomposition (raw = confound part + mechanistic increment) ===")
-    print(f"  confound-only (nuisance {args.nuis}):        {a_nuis:.3f}")
+    print(f"\n=== decomposition (raw = baseline + mechanistic increment) ===")
+    print(f"  baseline ({base_lbl}):        {a_nuis:.3f}")
     print(f"  + metric (full):                            {a_nm:.3f}")
     print(f"  MECHANISTIC INCREMENT:  +{a_nm-a_nuis:.3f}  [{lo:+.3f}, {hi:+.3f}]  {sig}")
     print("\nMechanistic claim ('metric carries hallucination signal') rests ONLY on the "
