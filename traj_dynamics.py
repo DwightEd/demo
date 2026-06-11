@@ -99,15 +99,27 @@ def main():
         sv = np.asarray(SV[i], np.float32)
         if sv.ndim == 3 and sv.shape[1] > li:
             series[i] = chain_series(sv[:, li, :])
+    # length control: tokens per step (so curv/disp can be compared to length)
+    feat_list = list(FEATS)
+    if "step_token_ranges" in z.files:
+        SR = z["step_token_ranges"]
+        for i in range(N):
+            if series[i] is not None:
+                r = np.asarray(SR[i], int)
+                if r.shape[0] == len(series[i][FEATS[0]]):
+                    series[i]["ntok"] = (r[:, 1] - r[:, 0] + 1).astype(float)
+        feat_list.append("ntok")
 
     # (1) chain-level within-problem AUROC
     print(f"file: {args.npz} | layer {args.layer} | chains {int(keep.sum())} | "
           f"error(answer) {int(y[keep].sum())}")
     print(f"\n=== chain-level within-AUROC (mean / late) ===")
     print(f"{'feature':14s} {'mean':>8s} {'late':>8s}")
-    for f in FEATS:
-        cm = np.array([np.nanmean(series[i][f]) if series[i] else np.nan for i in range(N)])
-        cl = np.array([late_mean(series[i][f]) if series[i] else np.nan for i in range(N)])
+    for f in feat_list:
+        cm = np.array([np.nanmean(series[i][f]) if (series[i] and f in series[i])
+                       else np.nan for i in range(N)])
+        cl = np.array([late_mean(series[i][f]) if (series[i] and f in series[i])
+                       else np.nan for i in range(N)])
         print(f"{f:14s} {within_auroc(cm[keep], y[keep], pid[keep]):8.3f} "
               f"{within_auroc(cl[keep], y[keep], pid[keep]):8.3f}")
 
@@ -117,11 +129,13 @@ def main():
     if usable:
         print(f"\n=== error-step localization (within error chains, n={len(usable)}) ===")
         print(f"{'feature':14s} {'loc_auroc':>9s} {'z_at_err':>8s}")
-        for f in FEATS:
+        for f in feat_list:
             conc = tie = npair = 0.0
             zes = []
             for i in usable:
-                s = series[i][f]
+                s = series[i].get(f)
+                if s is None:
+                    continue
                 k = int(ges[i])
                 if not np.isfinite(s[k]):
                     continue
