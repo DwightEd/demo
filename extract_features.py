@@ -40,7 +40,10 @@ from utils.step_boundaries import find_step_token_ranges
 from utils.step_vector import step_vector
 from utils.spectral import step_layer_spectral_summary, cim_tle_intrinsic_dim
 
-CLOUD_NAMES = ("cloud_D", "cloud_V", "cloud_C")   # point-cloud eff-rank / energy / concentration
+CLOUD_NAMES = ("cloud_D", "cloud_V", "cloud_C", "coherence", "mean_tok_norm")
+# cloud_D/V/C = point-cloud eff-rank / energy / concentration;
+# coherence = ||exp-pooled vec|| / mean_t ||h_t|| (alignment; low = diffuse/cancelling);
+# mean_tok_norm = mean per-token norm (so coherence's denominator is auditable separately)
 INTRINSIC_NAMES = ("id_mle", "id_twonn", "cim_V")  # whole-chain CIM: intrinsic dim (D) + information volume (V)
 from features import geometry as geo
 from features import uncertainty as unc
@@ -284,8 +287,8 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
     # exp-pooled vector of the QUESTION/prompt tokens (positions 0..a0-1), per sv layer,
     # used as the "question" baseline for normalization (z_j - q)
     qvec = np.full((n_sv, d), np.nan, dtype=np.float16) if store_step_vectors else None
-    # point-cloud effective rank / spectral energy / concentration (the old CIM D,V,C)
-    stepcloud = np.full((T, L, 3), np.nan, dtype=np.float32) if cloud_eff_rank else None
+    # cloud D/V/C + coherence + mean_tok_norm (see CLOUD_NAMES)
+    stepcloud = np.full((T, L, len(CLOUD_NAMES)), np.nan, dtype=np.float32) if cloud_eff_rank else None
     # whole-chain nonlinear intrinsic dimension (length-robust), per layer
     chain_id = np.full((L, len(INTRINSIC_NAMES)), np.nan, np.float32) if intrinsic_dim else None
 
@@ -306,7 +309,13 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
                 if sv_k is not None:
                     stepvec[sj, sv_k] = z.astype(np.float16)
             if cloud_eff_rank:
-                stepcloud[sj, li] = step_layer_spectral_summary(cloud)
+                D, V, C = step_layer_spectral_summary(cloud)
+                coh = mtn = np.nan
+                if z is not None:
+                    mtn = float(np.linalg.norm(cloud, axis=1).mean())   # mean per-token norm
+                    if mtn > 1e-9:
+                        coh = float(np.linalg.norm(z) / mtn)            # pooled / per-token
+                stepcloud[sj, li] = (D, V, C, coh, mtn)
         if intrinsic_dim:                              # CIM on the whole-chain last-token trajectory
             whole = H_l[a0:b1 + 1]                      # (R, d)
             chain_id[li, 0] = cim_tle_intrinsic_dim(whole)   # D_stim (kNN-ID)
