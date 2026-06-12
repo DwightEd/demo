@@ -56,6 +56,10 @@ def main():
     ap.add_argument("npz")
     ap.add_argument("--layer", type=int, default=14)
     ap.add_argument("--k_massive", type=int, default=5, help="# massive dims")
+    ap.add_argument("--per_token", action="store_true",
+                    help="also compare pooled norm vs MEAN per-token norm (needs "
+                         "tokgeom): low pooled + normal per-token = cancellation/"
+                         "diffuseness; low per-token = individually weak tokens.")
     args = ap.parse_args()
 
     z = np.load(args.npz, allow_pickle=True)
@@ -66,14 +70,24 @@ def main():
         raise SystemExit(f"layer {args.layer} not in stored sv_layers {svl}")
     li = svl.index(args.layer)
     SV = z["stepvec"]; SR = z["step_token_ranges"]; ges = z["gold_error_step"].astype(int)
+    # optional per-token norm from tokgeom (to separate cancellation vs weak tokens)
+    TG = lit = ni = None
+    if args.per_token:
+        if "tokgeom" not in z.files or z["tokgeom"][0] is None:
+            raise SystemExit("--per_token needs tokgeom (extract without --no_token_geom)")
+        TG = z["tokgeom"]
+        tlayers = [int(x) for x in z["layers_used"]]
+        lit = tlayers.index(args.layer)
+        ni = [str(x) for x in z["geom_feature_names"]].index("norm")
 
-    Z, NT, Y, H = [], [], [], []
+    Z, NT, Y, H, MTN = [], [], [], [], []
     for i in range(len(SV)):
         sv = np.asarray(SV[i], np.float32)
         if sv.ndim != 3 or sv.shape[1] <= li:
             continue
         rng = np.asarray(SR[i], int); k = int(ges[i]); corr = (k < 0)
-        T = sv.shape[0]
+        a0 = int(rng[0, 0]); T = sv.shape[0]
+        tg = np.asarray(TG[i], float) if TG is not None else None
         for j in range(T):
             zj = sv[j, li, :]
             if not np.isfinite(zj).all():
@@ -86,7 +100,12 @@ def main():
                 keep = False
             if keep:
                 Z.append(zj); NT.append(int(rng[j, 1] - rng[j, 0] + 1)); Y.append(y); H.append(corr)
+                if tg is not None:
+                    lo, hi = int(rng[j, 0]) - a0, int(rng[j, 1]) - a0 + 1
+                    lo, hi = max(0, lo), min(tg.shape[0], hi)
+                    MTN.append(np.nanmean(tg[lo:hi, lit, ni]) if hi > lo else np.nan)
     Z = np.asarray(Z, np.float64); NT = np.asarray(NT, float); Y = np.asarray(Y, int); H = np.asarray(H, bool)
+    MTN = np.asarray(MTN, float) if MTN else None
 
     # identify massive dims from correct-chain step vectors (median |value| per dim)
     med = np.median(np.abs(Z[H]), axis=0)
@@ -104,12 +123,19 @@ def main():
           f"good {frac[Y==0].mean():.3f}")
 
     print(f"\n{'component':14s} {'err mean':>9s} {'good mean':>9s} {'raw AUROC':>10s} {'bucket AUROC':>13s}")
-    for name, v in [("norm_total", n_tot), ("norm_massive", n_mas), ("norm_bulk", n_bulk),
-                    ("massive_frac", frac)]:
-        print(f"{name:14s} {v[Y==1].mean():9.2f} {v[Y==0].mean():9.2f} "
+    comps = [("norm_total", n_tot), ("norm_massive", n_mas), ("norm_bulk", n_bulk),
+             ("massive_frac", frac)]
+    if MTN is not None:
+        coherence = n_tot / np.maximum(MTN, 1e-9)        # pooled / mean-token = alignment
+        comps += [("mean_tok_norm", MTN), ("coherence(pool/tok)", coherence)]
+    for name, v in comps:
+        print(f"{name:20s} {v[Y==1].mean():9.2f} {v[Y==0].mean():9.2f} "
               f"{bdir(auroc(v, Y)):10.3f} {bucket_auroc(v, Y, NT):13.3f}")
-    print("\nbucket AUROC = within-length-bucket (length ~fixed). >0.5 => real beyond length. "
-          "Compare norm_massive vs norm_bulk to see where the signal lives.")
+    print("\nbucket AUROC = within-length-bucket (length ~fixed). >0.5 => real beyond length.")
+    if MTN is not None:
+        print("per-token read: if error has LOW pooled but NORMAL mean_tok_norm (so LOW "
+              "coherence) -> tokens cancel = diffuseness (anchor revived). If mean_tok_norm "
+              "also LOW -> individual tokens are weaker.")
 
 
 if __name__ == "__main__":
