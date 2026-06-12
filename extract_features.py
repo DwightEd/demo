@@ -40,10 +40,14 @@ from utils.step_boundaries import find_step_token_ranges
 from utils.step_vector import step_vector
 from utils.spectral import step_layer_spectral_summary, cim_tle_intrinsic_dim
 
-CLOUD_NAMES = ("cloud_D", "cloud_V", "cloud_C", "coherence", "mean_tok_norm")
+CLOUD_NAMES = ("cloud_D", "cloud_V", "cloud_C", "coherence", "mean_tok_norm", "resultant")
 # cloud_D/V/C = point-cloud eff-rank / energy / concentration;
-# coherence = ||exp-pooled vec|| / mean_t ||h_t|| (alignment; low = diffuse/cancelling);
-# mean_tok_norm = mean per-token norm (so coherence's denominator is auditable separately)
+# coherence  = ||exp-pooled vec|| / mean_t ||h_t||  (alignment, but contaminated by
+#              within-step magnitude variance);
+# mean_tok_norm = mean per-token norm;
+# resultant  = ||exp-pool(UNIT tokens)|| in [0,1] -- normalize each token FIRST, so it is
+#              PURE directional concentration (immune to magnitude); low = diffuse. THE
+#              clean diffuseness estimator.
 INTRINSIC_NAMES = ("id_mle", "id_twonn", "cim_V")  # whole-chain CIM: intrinsic dim (D) + information volume (V)
 from features import geometry as geo
 from features import uncertainty as unc
@@ -310,12 +314,19 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
                     stepvec[sj, sv_k] = z.astype(np.float16)
             if cloud_eff_rank:
                 D, V, C = step_layer_spectral_summary(cloud)
-                coh = mtn = np.nan
+                coh = mtn = res = np.nan
                 if z is not None:
-                    mtn = float(np.linalg.norm(cloud, axis=1).mean())   # mean per-token norm
+                    tn = np.linalg.norm(cloud, axis=1)                  # per-token norms
+                    mtn = float(tn.mean())                              # mean per-token norm
                     if mtn > 1e-9:
-                        coh = float(np.linalg.norm(z) / mtn)            # pooled / per-token
-                stepcloud[sj, li] = (D, V, C, coh, mtn)
+                        coh = float(np.linalg.norm(z) / mtn)           # pooled / per-token
+                    # resultant: normalize EACH token first, then exp-pool -> ||Sum w_t h_hat_t||
+                    # in [0,1]; pure directional concentration, immune to magnitude. low=diffuse
+                    unit = cloud / np.maximum(tn[:, None], 1e-9)
+                    rvec = step_vector(unit, mode="step_exp", l2_normalize=False)
+                    if rvec is not None:
+                        res = float(np.linalg.norm(rvec))
+                stepcloud[sj, li] = (D, V, C, coh, mtn, res)
         if intrinsic_dim:                              # CIM on the whole-chain last-token trajectory
             whole = H_l[a0:b1 + 1]                      # (R, d)
             chain_id[li, 0] = cim_tle_intrinsic_dim(whole)   # D_stim (kNN-ID)
