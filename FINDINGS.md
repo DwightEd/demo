@@ -151,3 +151,42 @@ ProcessBench gsm8k + 采样 K=12 (v2_5shot)，Llama-3.1-8B，teacher-forcing 抽
 
 **待办（norm 深挖）**：逐层扫描确认中层定位；跨 ProcessBench config（math/olympiad/omnimath）；
 与 Mahalanobis 关系；机制解释（为何中层模长在错步下降）。另一条活线：梯度谱场（H100）。
+
+## 7. 再修正：norm 下降 = 方向弥散（不是幅度）→ 弥散锚点干净复活 (2026-06-13)
+
+第 6 节说"幅度 norm 是独立信号"。把 norm **逐 token 拆开**后真相更深一层——**不是 token 变弱，是池化时方向抵消更多 = 弥散**，锚点（最初被有效秩证伪的那个）以干净形式复活，估计器从"有效秩"换成"方向相干度"。
+
+### 关键拆解（`norm_decomp.py --per_token`，gsm8k layer 14）
+| 量 | err | good | 读数 |
+|---|---|---|---|
+| `mean_tok_norm`（逐 token 模长均值） | 8.09 | 8.15 | **几乎相等 → token 个体不弱** |
+| `norm`（exp 池化后模长） | 4.81 | 5.18 | **池化后缩水 → 抵消更多** |
+- 个体一样强、池化缩水 = **错步 token 方向更发散、池化时互相抵消** = 弥散。不是"激活变弱"。
+
+### 两个弥散估计器（步级，混淆+U_D 全控，链 bootstrap CI）
+| 指标 | 定义 | 增量(over 长度+位置+密度+U_D) | 桶内 L14 | raw L14 | 长度相关 |
+|---|---|---|---|---|---|
+| `coherence` | `‖池化‖ / mean_t‖h_t‖`（除整体尺度） | **+0.062 [0.039, 0.087] 显著** | 0.717 | 0.778 | −0.831 |
+| `resultant` | `‖exp池化(单位化 token)‖ ∈[0,1]`（纯方向） | **+0.059 [0.038, 0.083] 显著** | 0.708 | 0.772 | −0.832 |
+- **两个独立估计器数值几乎重合**（CI 重叠）→ 互证。resultant 把**全部逐 token 幅度除掉、只留方向**,信号纹丝不动 → **弥散是真方向现象,不是任何幅度假象**。
+
+### massive activation：测过——不是独立信号,也不污染 coherence
+`norm_decomp` 数据驱动定 massive 维 [290,291,682,3266,4055]：
+- `massive_frac` AUROC = **0.577 近随机**（err 0.36 vs good 0.38）→ **错步并未对 massive 维做特别的事**，massive 不是该单列的独立信号。
+- `norm_massive`(0.709)/`norm_bulk`(0.733) 看着有区分度，但是**全谱按比例一起缩**的"搭便车"，非 massive 特异。
+- `coherence` = 0.59 vs 0.64（**不是 ≈1**）→ massive 没把弥散云伪装成相干，**未污染 coherence**。
+- 次要线（弱）：`massive_frac` 桶内 0.627 > raw 0.577 → 固定长度下错步能量略离开 sink 维，远不及 coherence，仅一句话提及。
+
+### 机制论断（逐项钉死,所有混淆排除）
+> **首错步的 token 云方向更发散——这一步没有单一主导的相干方向。** 纯几何信号:
+> ❌token变弱(mean_tok_norm 平) ❌massive(frac 近随机+resultant 免疫) ❌幅度方差(resultant 除尽幅度仍在)
+> ❌长度(桶内 0.708) ❌输出熵(U_D 之上 +0.059 显著) ❌密度(残差化后仍在) → ✅**方向弥散**
+
+### 叙事最终形态（CIM 逐步操作化）
+- **最初假设"错误推理更弥散"**对，但**估计器错了**:有效秩 cloud_D 在 n≪d 下退化为长度（第 5 节证伪）。
+- **正确估计器 = 方向相干度 `resultant`**（无量纲∈[0,1]、纯方向、构造上免疫幅度与 massive,审稿人挑不出毛病）;`coherence` 作伴随互证。
+- **on/off 受约束流形的逐步操作化**:正确步 token 共享主导方向(on-manifold,相干);首错步方向发散(off-manifold,弥散)。
+- 第 6 节"幅度(norm)"的措辞**修正**为"方向弥散,norm 只是被幅度/massive 污染的代理"。
+
+**论文主特征 = `resultant`**;coherence 互证;norm 是发现脚手架。诚实保留:原始 0.77 大半是长度(corr −0.83),干净机制效应中等(增量 +0.06、桶内 0.71)。
+**待办**:resultant 跨 config（math/olympiad/omnimath，需新代码重抽,但 gsm8k 上 resultant≈coherence,已有的 coherence 跨 config 数是忠实代理）;resultant 全层扫描;与 Mahalanobis 关系。
