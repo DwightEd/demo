@@ -194,25 +194,27 @@ ProcessBench gsm8k + 采样 K=12 (v2_5shot)，Llama-3.1-8B，teacher-forcing 抽
 
 ProcessBench 四 config(olympiadbench 待补),Llama-3.1-8B teacher-forcing,步级过程标签。
 
-### resultant 跨 config:过 gate,但难度梯度明显
+### resultant 跨 config:过 gate,但难度梯度明显(4/4 config)
 | config | 增量(over 混淆+U_D) | 桶内 L14 | raw L14 | 长度相关 |
 |---|---|---|---|---|
 | gsm8k(易) | **+0.059** [0.038,0.083] | **0.708** | 0.772 | −0.832 |
 | math(中) | **+0.048** [0.035,0.061] | **0.620** | 0.703 | −0.837 |
+| olympiad(难) | **+0.039** [0.027,0.049] | **0.588** | 0.703 | −0.843 |
 | omnimath(难) | **+0.027** [0.019,0.035] | **0.569** | 0.702 | −0.843 |
-- 三个**都显著、桶内都 >0.55** → gate 过。但**信号随难度单调衰减**(桶内 0.708→0.620→0.569,贴近地板)。
-- **论文必须写成 difficulty-graded,不能写 uniformly robust。** 机制假设:难题上正确步本身也更发散(gap 缩小)+ 难数据混淆更强(omnimath baseline 0.796、n_tok 单独 0.717)。
+- 四个**都显著、桶内都 >0.55** → gate 过。**信号随难度单调衰减**(桶内 0.708→0.620→0.588→0.569,四点一条线,贴近地板)。
+- **论文写 difficulty-graded but uniformly significant,不能写 uniformly robust。** 机制假设:难题上正确步本身也更发散(gap 缩小)+ 难数据混淆更强(omnimath/olympiad baseline ~0.78-0.80、n_tok 单独 ~0.71)。
 
 ### R1 融合(GroupKFold-by-chain,混淆+熵进基线)
 | config | baseline | best single | FUSED | FUSED−base | FUSED−single |
 |---|---|---|---|---|---|
 | gsm8k | 0.775 | coherence@14 0.822 | 0.847 | +0.073 | +0.026 显著 |
 | math | 0.751 | norm@14 0.791 | 0.805 | +0.055 | +0.015 显著 |
+| olympiad | 0.780 | cloud_D@10 0.783 | 0.818 | +0.038 | **+0.035 显著** |
 | omnimath | 0.796 | cloud_D@10 0.799 | 0.835 | +0.039 | **+0.036 显著** |
 
 **两个硬结论(决定 ML 路线)**:
-1. **最佳单标量跨 config 不稳定**:coherence(gsm8k)/norm(math)/cloud_D(omnimath) 各赢一个 → **没有单一手工标量普适**。
-2. **越难单标量越崩、越需结构**:omnimath 上 best single 仅比 baseline +0.003(几乎死),FUSED 救回 +0.039,`FUSED−single` 在 omnimath 最大(+0.036)。
+1. **最佳单标量跨 config 不稳定**:coherence(gsm8k)/norm(math)/cloud_D(olympiad,omnimath) 跟着难度换 → **没有单一手工标量普适**。
+2. **越难单标量越崩、越需结构**:两个难 config(olympiad/omnimath)best single 仅比 baseline +0.003(几乎死),FUSED 救回 ~+0.038,`FUSED−single` 在难 config 最大(+0.035/+0.036)。
 - 配合 gsm8k 上 **GBM 全面 < logit**(非线性无效)→ **瓶颈在表征,不在分类器,也不在"选哪个标量"**。
 - → **R2(token 云学习池化/富表征)被坐实,尤其为难数据。** 在手工标量上堆更大模型=浪费。
 
