@@ -242,7 +242,7 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
                   massive_m, want_ue, ue_params, ue_stride,
                   store_token_geom, max_seq_len, store_step_vectors=False,
                   cloud_eff_rank=False, intrinsic_dim=False, sv_layers=None,
-                  grad_block=None):
+                  grad_block=None, cloud_layers=None, cloud_P=None):
     """Return a dict of arrays for one chain, or None if it cannot be aligned."""
     prompt = EXTRACT_PROMPT.format(q=rec["question"])
     response = rec["response"]
@@ -295,9 +295,20 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
     stepcloud = np.full((T, L, len(CLOUD_NAMES)), np.nan, dtype=np.float32) if cloud_eff_rank else None
     # whole-chain nonlinear intrinsic dimension (length-robust), per layer
     chain_id = np.full((L, len(INTRINSIC_NAMES)), np.nan, np.float32) if intrinsic_dim else None
+    # R2: per-token response cloud, random-projected (JL) to k dims, per cloud layer.
+    # rows are absolute tokens a0..b1; slice with step_token_ranges at train time.
+    Lc = len(cloud_layers) if cloud_layers else 0
+    kdim = (cloud_P.shape[1] if cloud_P is not None else d) if Lc else 0
+    respcloud = np.full((R, Lc, kdim), np.nan, dtype=np.float16) if Lc else None
 
     for li in range(L):
         H_l = hs[li]                                   # (seq, d)
+        cl_k = (cloud_layers.index(layer_indices[li])
+                if (cloud_layers and layer_indices[li] in cloud_layers) else None)
+        if cl_k is not None:                           # store projected response cloud
+            block = H_l[a0:b1 + 1]                     # (R, d)
+            proj = block @ cloud_P if cloud_P is not None else block
+            respcloud[:, cl_k, :] = proj.astype(np.float16)
         sv_k = sv_set.index(layer_indices[li]) if (store_step_vectors and
                 layer_indices[li] in sv_set) else None
         if sv_k is not None and a0 > 0:                # question/prompt baseline q
@@ -370,6 +381,7 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
         "stepvec": stepvec,
         "qvec": qvec,
         "stepcloud": stepcloud,
+        "respcloud": respcloud,
         "chain_id": chain_id,
         "gradprof": gradprof,
         "grad_total": grad_total,
@@ -428,6 +440,15 @@ def main():
                     help="also compute the WHOLE-chain nonlinear intrinsic dimension "
                          "(MLE-kNN + TwoNN) per layer -- length-robust, better-"
                          "conditioned than per-step effective rank.")
+    ap.add_argument("--store_clouds", action="store_true",
+                    help="R2: store the per-token response cloud (random-projected, "
+                         "JL) per --cloud_store_layers, for learned-pooling detectors "
+                         "over the within-step token cloud. Cheap: ~total_tokens*k*2B.")
+    ap.add_argument("--cloud_store_layers", default="10,14",
+                    help="layers to store projected clouds for (subset of --layers).")
+    ap.add_argument("--cloud_proj_dim", type=int, default=256,
+                    help="JL random-projection dim k (preserves directions/norms); "
+                         "0 = full d (large). Fixed seed -> reproducible projection.")
     ap.add_argument("--grad_profile", action="store_true",
                     help="GRADIENT spectral field: per step, backward on the step NLL, "
                          "per-transformer-block grad norm (gradprof T x n_blocks) + total "
@@ -469,6 +490,19 @@ def main():
               else [int(x) for x in args.sv_layers.split(",") if int(x) in layer_indices])
     if args.store_step_vectors:
         print(f"  storing step vectors for layers {sv_set}")
+
+    # R2: fixed JL random projection for cloud storage (seed 0 -> reproducible)
+    cloud_set, cloud_P = [], None
+    if args.store_clouds:
+        cloud_set = [int(x) for x in args.cloud_store_layers.split(",")
+                     if int(x) in layer_indices]
+        d_model = model.config.hidden_size
+        if args.cloud_proj_dim > 0:
+            rng_p = np.random.default_rng(0)
+            cloud_P = (rng_p.standard_normal((d_model, args.cloud_proj_dim))
+                       / np.sqrt(args.cloud_proj_dim)).astype(np.float32)
+        kd = args.cloud_proj_dim if args.cloud_proj_dim > 0 else d_model
+        print(f"  STORE CLOUDS: layers {cloud_set}, proj d={d_model}->k={kd} (JL seed0)")
 
     want_ue = not args.no_ue
     ue_params = unc.set_ue_grad_scope(model, args.ue_layers_from) if want_ue else None
@@ -512,7 +546,8 @@ def main():
                 store_step_vectors=args.store_step_vectors,
                 cloud_eff_rank=args.cloud_eff_rank,
                 intrinsic_dim=args.intrinsic_dim, sv_layers=sv_set,
-                grad_block=grad_block)
+                grad_block=grad_block,
+                cloud_layers=cloud_set, cloud_P=cloud_P)
         except Exception as e:
             print(f"  warn: chain {rec['id']} failed: {e}")
             res = None
@@ -559,6 +594,12 @@ def main():
         stepcloud=np.array([r["stepcloud"] for r in rows], dtype=object),
         cloud_stored=np.array(args.cloud_eff_rank),
         cloud_feature_names=np.array(CLOUD_NAMES, dtype=object),
+        # R2: random-projected per-token response clouds (object: (R, Lc, k) fp16 each)
+        respcloud=np.array([r["respcloud"] for r in rows], dtype=object),
+        clouds_stored=np.array(args.store_clouds),
+        cloud_store_layers=np.array(cloud_set, dtype=np.int32),
+        cloud_proj_dim=np.array(args.cloud_proj_dim),
+        cloud_proj=(cloud_P if cloud_P is not None else np.array(False)),
         chain_intrinsic=(np.stack([r["chain_id"] for r in rows])
                          if args.intrinsic_dim else np.array(False)),
         intrinsic_stored=np.array(args.intrinsic_dim),
