@@ -189,4 +189,31 @@ ProcessBench gsm8k + 采样 K=12 (v2_5shot)，Llama-3.1-8B，teacher-forcing 抽
 - 第 6 节"幅度(norm)"的措辞**修正**为"方向弥散,norm 只是被幅度/massive 污染的代理"。
 
 **论文主特征 = `resultant`**;coherence 互证;norm 是发现脚手架。诚实保留:原始 0.77 大半是长度(corr −0.83),干净机制效应中等(增量 +0.06、桶内 0.71)。
-**待办**:resultant 跨 config（math/olympiad/omnimath，需新代码重抽,但 gsm8k 上 resultant≈coherence,已有的 coherence 跨 config 数是忠实代理）;resultant 全层扫描;与 Mahalanobis 关系。
+
+## 8. 跨数据集 gate + R1 融合检测器 (2026-06-14, `fuse_detector.py`)
+
+ProcessBench 四 config(olympiadbench 待补),Llama-3.1-8B teacher-forcing,步级过程标签。
+
+### resultant 跨 config:过 gate,但难度梯度明显
+| config | 增量(over 混淆+U_D) | 桶内 L14 | raw L14 | 长度相关 |
+|---|---|---|---|---|
+| gsm8k(易) | **+0.059** [0.038,0.083] | **0.708** | 0.772 | −0.832 |
+| math(中) | **+0.048** [0.035,0.061] | **0.620** | 0.703 | −0.837 |
+| omnimath(难) | **+0.027** [0.019,0.035] | **0.569** | 0.702 | −0.843 |
+- 三个**都显著、桶内都 >0.55** → gate 过。但**信号随难度单调衰减**(桶内 0.708→0.620→0.569,贴近地板)。
+- **论文必须写成 difficulty-graded,不能写 uniformly robust。** 机制假设:难题上正确步本身也更发散(gap 缩小)+ 难数据混淆更强(omnimath baseline 0.796、n_tok 单独 0.717)。
+
+### R1 融合(GroupKFold-by-chain,混淆+熵进基线)
+| config | baseline | best single | FUSED | FUSED−base | FUSED−single |
+|---|---|---|---|---|---|
+| gsm8k | 0.775 | coherence@14 0.822 | 0.847 | +0.073 | +0.026 显著 |
+| math | 0.751 | norm@14 0.791 | 0.805 | +0.055 | +0.015 显著 |
+| omnimath | 0.796 | cloud_D@10 0.799 | 0.835 | +0.039 | **+0.036 显著** |
+
+**两个硬结论(决定 ML 路线)**:
+1. **最佳单标量跨 config 不稳定**:coherence(gsm8k)/norm(math)/cloud_D(omnimath) 各赢一个 → **没有单一手工标量普适**。
+2. **越难单标量越崩、越需结构**:omnimath 上 best single 仅比 baseline +0.003(几乎死),FUSED 救回 +0.039,`FUSED−single` 在 omnimath 最大(+0.036)。
+- 配合 gsm8k 上 **GBM 全面 < logit**(非线性无效)→ **瓶颈在表征,不在分类器,也不在"选哪个标量"**。
+- → **R2(token 云学习池化/富表征)被坐实,尤其为难数据。** 在手工标量上堆更大模型=浪费。
+
+**待办**:补 olympiadbench;**R2 设计**(DeepSets/set-attention 在步内 token 云,需 `--store_clouds` GPU 重抽,复用 21_token_cloud_geometry 存云基础设施);resultant 全层扫描;resultant ⊥ Mahalanobis ⊥ U_D 正交性→融合;跨模型(Qwen/DeepSeek,相对深度,dimensionless 免重标定)。
