@@ -141,6 +141,32 @@ def main():
         print(f"\nQ2 within-chain effect size: error step is {np.mean(devs):+.2f} within-chain "
               f"std above its chain mean (median {np.median(devs):+.2f}). "
               f">~1 => clears the noise (single-step detectable); <~0.5 => buried, need CUSUM.")
+    # Q2-decomposition: of the t=0 jump, geometry vs perplexity each contribute how much?
+    # residualize each single feature on length+pos (cross-fit on correct), then the error-step
+    # within-chain effect size (signed so "more error-like" is +).
+    def effect_at0(col, sign):
+        r = np.full(len(col), np.nan)
+        for tr, te in gkf.split(col, np.nan_to_num(DET), G):
+            ctr = tr[CORR[tr]]
+            if len(ctr) < 50:
+                continue
+            rg = GradientBoostingRegressor(n_estimators=120, max_depth=3, random_state=0)
+            rg.fit(np.c_[NT[ctr], POS[ctr]], col[ctr])
+            r[te] = sign * (col[te] - rg.predict(np.c_[NT[te], POS[te]]))
+        ds = []
+        for c in np.unique(G[err]):
+            m = (G == c); v = r[m]; jj = (J[m] - K[m]); fin = np.isfinite(v)
+            if fin.sum() < 3 or not ((jj == 0) & fin).any():
+                continue
+            sd = v[fin].std()
+            if sd > 1e-9:
+                ds.append((v[(jj == 0) & fin][0] - v[fin].mean()) / sd)
+        return float(np.mean(ds)) if ds else float("nan")
+    g_eff = effect_at0(F[:, 0], -1.0)            # resultant: LOW at error -> sign -1
+    u_eff = effect_at0(F[:, 4], +1.0)            # U_D: HIGH at error -> sign +1
+    print(f"\nQ2 decomposition of the t=0 jump (error-step within-chain std, signed +=error-like):")
+    print(f"  geometry (resultant): {g_eff:+.2f}   perplexity (U_D): {u_eff:+.2f}   "
+          f"-> {'GEOMETRY-dominated' if abs(g_eff) > abs(u_eff) else 'perplexity-dominated'}")
     print("\nread: rises before 0 (precursor>0) -> EARLY WARNING; jump at 0 with flat before "
           "-> synchronous detection; elevated only after 0 -> lagged ripple.")
 
