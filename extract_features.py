@@ -68,6 +68,13 @@ INTRINSIC_NAMES = ("id_mle", "id_twonn", "cim_V")  # whole-chain CIM: intrinsic 
 # resultant_delta = ||exp-pool(dh_t / ||dh_t||)|| in [0,1] (directional concentration of the write,
 # immune to magnitude -- the Delta analog of `resultant`).
 CLOUD_DELTA_NAMES = ("norm_delta", "resultant_delta")
+# Attention-sink channel (--attn_sink, needs eager attention): per (step, layer), averaged
+# over the step's response tokens and heads. sink_frac = attention mass on position 0 (the
+# BOS attention sink); q_frac = attention mass on the question/prompt span (0..a0-1, the
+# [B] Get-Lost-in-Attention "problem-relevant" region); attn_entropy = entropy of each
+# token's attention distribution (low = focused/anchored, high = diffuse). Direct read of
+# anchoring at the attention end (vs the indirect hidden-state read).
+ATTN_NAMES = ("sink_frac", "q_frac", "attn_entropy")
 from features import geometry as geo
 from features import uncertainty as unc
 from features import trace_profile as tp
@@ -262,7 +269,7 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
                   store_token_geom, max_seq_len, store_step_vectors=False,
                   cloud_eff_rank=False, intrinsic_dim=False, sv_layers=None,
                   grad_block=None, cloud_layers=None, cloud_P=None, cloud_delta=False,
-                  massive_fixed=None):
+                  massive_fixed=None, want_attn=False):
     """Return a dict of arrays for one chain, or None if it cannot be aligned."""
     prompt = EXTRACT_PROMPT.format(q=rec["question"])
     response = rec["response"]
@@ -288,17 +295,33 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
     F = len(geo.GEOM_FEATURE_NAMES)
     L = len(layer_indices)
 
+    T = len(safe)
+    # --- attention-sink channel: per (step, layer) sink/question/entropy ---
+    stepattn = np.full((T, L, len(ATTN_NAMES)), np.nan, dtype=np.float32) if want_attn else None
+
     # --- hidden states (no grad): per-step exp-pool + per-token geometry ---
     with torch.no_grad():
         out = model(input_ids=input_ids.unsqueeze(0),
                     attention_mask=attn.unsqueeze(0),
-                    output_hidden_states=True)
+                    output_hidden_states=True, output_attentions=want_attn)
         logits = out.logits[0]
         U_D, U_C = unc._entropy_committal(logits, input_ids, a0, b1)
         hs = [out.hidden_states[l][0].float().cpu().numpy() for l in layer_indices]
+        if want_attn:                                   # attentions[l-1] = block-l attn (heads,seq,seq)
+            for li, l in enumerate(layer_indices):
+                if l < 1:
+                    continue
+                A = out.attentions[l - 1][0].float()    # (heads, seq, seq)
+                for sj, (a, b) in enumerate(safe):
+                    rows = A[:, a:b + 1, :]              # (heads, n_j, seq): attn FROM step tokens
+                    sink = rows[:, :, 0].mean().item()
+                    qf = (rows[:, :, :a0].sum(-1).mean().item() if a0 > 0 else float("nan"))
+                    pp = rows.clamp_min(1e-12)
+                    ent = (-(pp * pp.log()).sum(-1)).mean().item()
+                    stepattn[sj, li] = (sink, qf, ent)
+                del A
     del out, logits
 
-    T = len(safe)
     d = hs[0].shape[1]
     stepgeom = np.full((T, L, F), np.nan, dtype=np.float32)
     R = b1 - a0 + 1
@@ -440,6 +463,7 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
         "qvec": qvec,
         "stepcloud": stepcloud,
         "stepdelta": stepdelta,
+        "stepattn": stepattn,
         "respcloud": respcloud,
         "chain_id": chain_id,
         "gradprof": gradprof,
@@ -540,6 +564,10 @@ def main():
                     help="also compute the WHOLE-chain nonlinear intrinsic dimension "
                          "(MLE-kNN + TwoNN) per layer -- length-robust, better-"
                          "conditioned than per-step effective rank.")
+    ap.add_argument("--attn_sink", action="store_true",
+                    help="ATTENTION channel: per (step, layer) sink_frac (attn to pos 0) + "
+                         "q_frac (attn to prompt) + attn_entropy. Forces eager attention "
+                         "(slower). The direct attention-end read of anchoring.")
     ap.add_argument("--cloud_delta", action="store_true",
                     help="also compute the per-token residual-stream INCREMENT cloud "
                          "(dh_t = h_t^l - h_t^{l-1}) norm_delta + resultant_delta per "
@@ -578,6 +606,7 @@ def main():
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
     model = AutoModelForCausalLM.from_pretrained(
         model_name, torch_dtype=dtype,
+        attn_implementation="eager" if args.attn_sink else None,   # eager -> output_attentions
         device_map="auto" if device == "cuda" else None)
     if device == "cpu":
         model.to(device)
@@ -661,7 +690,8 @@ def main():
                 intrinsic_dim=args.intrinsic_dim, sv_layers=sv_set,
                 grad_block=grad_block,
                 cloud_layers=cloud_set, cloud_P=cloud_P,
-                cloud_delta=args.cloud_delta, massive_fixed=massive_fixed)
+                cloud_delta=args.cloud_delta, massive_fixed=massive_fixed,
+                want_attn=args.attn_sink)
         except Exception as e:
             import traceback
             print(f"  warn: chain {rec['id']} failed: {e}")
@@ -713,6 +743,9 @@ def main():
         stepdelta=np.array([r["stepdelta"] for r in rows], dtype=object),
         cloud_delta_stored=np.array(args.cloud_delta),
         cloud_delta_names=np.array(CLOUD_DELTA_NAMES, dtype=object),
+        stepattn=np.array([r["stepattn"] for r in rows], dtype=object),
+        attn_stored=np.array(args.attn_sink),
+        attn_names=np.array(ATTN_NAMES, dtype=object),
         # R2: random-projected per-token response clouds (object: (R, Lc, k) fp16 each)
         respcloud=np.array([r["respcloud"] for r in rows], dtype=object),
         clouds_stored=np.array(args.store_clouds),
