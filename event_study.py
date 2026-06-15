@@ -124,6 +124,23 @@ def main():
         d = at0.mean() - near.mean(); se = np.sqrt(at0.std()**2/len(at0) + near.std()**2/len(near))
         print(f"jump:      mean_resid(Δ=0) − mean_resid(Δ∈-1,-2)   = {d:+.4f} "
               f"[{d-2*se:+.4f},{d+2*se:+.4f}]")
+    # Q2: error-step deviation in units of WITHIN-CHAIN std (does the jump clear the noise?)
+    devs = []
+    for c in np.unique(G[err]):
+        m = (G == c); v = resid[m]; jj = (J[m] - K[m])
+        fin = np.isfinite(v)
+        if fin.sum() < 3 or not (jj == 0).any():
+            continue
+        e = v[(jj == 0) & fin]
+        if len(e):
+            sd = v[fin].std()
+            if sd > 1e-9:
+                devs.append((e[0] - v[fin].mean()) / sd)
+    if devs:
+        devs = np.asarray(devs)
+        print(f"\nQ2 within-chain effect size: error step is {np.mean(devs):+.2f} within-chain "
+              f"std above its chain mean (median {np.median(devs):+.2f}). "
+              f">~1 => clears the noise (single-step detectable); <~0.5 => buried, need CUSUM.")
     print("\nread: rises before 0 (precursor>0) -> EARLY WARNING; jump at 0 with flat before "
           "-> synchronous detection; elevated only after 0 -> lagged ripple.")
 
