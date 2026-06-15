@@ -115,13 +115,12 @@ def main():
         print("WARN: cloud_delta_stored is False / missing -- did you extract with --cloud_delta?")
     dnames = [str(x) for x in z["cloud_delta_names"]]
     gnames = [str(x) for x in z["geom_feature_names"]]
-    cnames = [str(x) for x in z["cloud_feature_names"]]
     layers = [int(x) for x in z["layers_used"]]
-    SD = z["stepdelta"]; SG = z["stepgeom"]; SC = z["stepcloud"]
+    SD = z["stepdelta"]; SG = z["stepgeom"]        # stepcloud NOT needed (minimal Δ config)
     SR = z["step_token_ranges"]
     ges = z["gold_error_step"].astype(int)
     nidx = dnames.index("norm_delta"); ridx = dnames.index("resultant_delta")
-    cum_norm_i = gnames.index("norm"); cum_res_i = cnames.index("resultant")
+    cum_norm_i = gnames.index("norm")              # orthogonality uses cumulative norm (always stored)
     li_chk = layers.index(args.layer)
 
     # ---- pick layers with enough finite delta (drops layer 0 etc.) ----
@@ -142,7 +141,7 @@ def main():
     ocn, orr = [], []                     # orthogonality: cumulative norm, resultant_delta @ layer
     ylab, chain, is_corr_chain, is_prefix = [], [], [], []
     for i in range(len(SD)):
-        sd = np.asarray(SD[i], float); sg = np.asarray(SG[i], float); sc = np.asarray(SC[i], float)
+        sd = np.asarray(SD[i], float); sg = np.asarray(SG[i], float)
         k = int(ges[i]); correct = (k < 0); T = sd.shape[0]
         if not correct and (k < 0 or k >= T):
             continue

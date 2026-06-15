@@ -601,7 +601,9 @@ def main():
                 cloud_layers=cloud_set, cloud_P=cloud_P,
                 cloud_delta=args.cloud_delta)
         except Exception as e:
+            import traceback
             print(f"  warn: chain {rec['id']} failed: {e}")
+            traceback.print_exc()                       # surface WHICH channel silently kills chains
             res = None
         if res is None:
             continue
