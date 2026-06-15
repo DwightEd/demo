@@ -41,7 +41,7 @@ from utils.step_vector import step_vector
 from utils.spectral import step_layer_spectral_summary, cim_tle_intrinsic_dim
 
 CLOUD_NAMES = ("cloud_D", "cloud_V", "cloud_C", "coherence", "mean_tok_norm", "resultant",
-               "resultant_bulk", "resultant_unif")
+               "resultant_bulk", "resultant_unif", "norm_bulk")
 # cloud_D/V/C = point-cloud eff-rank / energy / concentration;
 # coherence  = ||exp-pooled vec|| / mean_t ||h_t||  (alignment, but contaminated by
 #              within-step magnitude variance);
@@ -54,6 +54,12 @@ CLOUD_NAMES = ("cloud_D", "cloud_V", "cloud_C", "coherence", "mean_tok_norm", "r
 #              massive subspace (signal_audit: AUROC + corr-with-norm should survive).
 # resultant_unif = resultant with UNIFORM weights -> (resultant - resultant_unif) probes
 #              whether exp-weighting concentrates on a coherent core (expected small).
+# norm_bulk  = ||exp-pool(cloud with massive dims zeroed)|| -- bulk MAGNITUDE. Paired with
+#              resultant_bulk to test whether the norm<->resultant 0.94 correlation is
+#              massive-driven: if corr(norm_bulk, resultant_bulk) collapses, the shared
+#              signal lived in the massive subspace (one signal); if it stays + both
+#              survive, energy vs direction are two axes. Use GLOBAL fixed massive dims
+#              (--massive_global) so removal is not per-chain content selection.
 INTRINSIC_NAMES = ("id_mle", "id_twonn", "cim_V")  # whole-chain CIM: intrinsic dim (D) + information volume (V)
 # Delta cloud = per-token residual-stream increment written by block l: dh_t = h_t^l - h_t^{l-1}
 # (attn + FFN sublayer write, identity path removed). Only a clean single-block write when the
@@ -255,7 +261,8 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
                   massive_m, want_ue, ue_params, ue_stride,
                   store_token_geom, max_seq_len, store_step_vectors=False,
                   cloud_eff_rank=False, intrinsic_dim=False, sv_layers=None,
-                  grad_block=None, cloud_layers=None, cloud_P=None, cloud_delta=False):
+                  grad_block=None, cloud_layers=None, cloud_P=None, cloud_delta=False,
+                  massive_fixed=None):
     """Return a dict of arrays for one chain, or None if it cannot be aligned."""
     prompt = EXTRACT_PROMPT.format(q=rec["question"])
     response = rec["response"]
@@ -319,11 +326,14 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
 
     for li in range(L):
         H_l = hs[li]                                   # (seq, d)
-        # per-layer massive dims (top-m by mean|h| over the response) for resultant_bulk
+        # massive dims for resultant_bulk/norm_bulk: GLOBAL fixed (preferred) or per-chain
         massive_dims = None
         if cloud_eff_rank and b1 > a0:
-            mean_abs = np.abs(H_l[a0:b1 + 1]).mean(axis=0)
-            massive_dims = np.argpartition(mean_abs, -massive_m)[-massive_m:]
+            if massive_fixed is not None:
+                massive_dims = massive_fixed[li]               # global, all chains share
+            else:
+                mean_abs = np.abs(H_l[a0:b1 + 1]).mean(axis=0)
+                massive_dims = np.argpartition(mean_abs, -massive_m)[-massive_m:]
         cl_k = (cloud_layers.index(layer_indices[li])
                 if (cloud_layers and layer_indices[li] in cloud_layers) else None)
         if cl_k is not None:                           # store projected response cloud
@@ -350,7 +360,7 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
                     stepvec[sj, sv_k] = z.astype(np.float16)
             if cloud_eff_rank:
                 D, V, C = step_layer_spectral_summary(cloud)
-                coh = mtn = res = res_bulk = res_unif = np.nan
+                coh = mtn = res = res_bulk = res_unif = nbulk = np.nan
                 if z is not None:
                     tn = np.linalg.norm(cloud, axis=1)                  # per-token norms
                     mtn = float(tn.mean())                              # mean per-token norm
@@ -365,14 +375,17 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
                     runif = step_vector(unit, mode="mean", l2_normalize=False)
                     if runif is not None:
                         res_unif = float(np.linalg.norm(runif))         # uniform-weight resultant
-                    if massive_dims is not None:                        # resultant in bulk subspace
+                    if massive_dims is not None:                        # bulk subspace (massive zeroed)
                         cb = cloud.copy(); cb[:, massive_dims] = 0.0
                         tnb = np.linalg.norm(cb, axis=1)
                         ub = cb / np.maximum(tnb[:, None], 1e-9)
                         rb = step_vector(ub, mode="step_exp", l2_normalize=False)
                         if rb is not None:
-                            res_bulk = float(np.linalg.norm(rb))
-                stepcloud[sj, li] = (D, V, C, coh, mtn, res, res_bulk, res_unif)
+                            res_bulk = float(np.linalg.norm(rb))     # bulk DIRECTION
+                        zb = step_vector(cb, mode="step_exp", l2_normalize=False)
+                        if zb is not None:
+                            nbulk = float(np.linalg.norm(zb))        # bulk MAGNITUDE
+                stepcloud[sj, li] = (D, V, C, coh, mtn, res, res_bulk, res_unif, nbulk)
             if delta_ok:                                # per-token residual-stream increment cloud
                 dcloud = H_l[a:b + 1] - prevH[a:b + 1]  # (n_j, d): block-l write to each token
                 dtn = np.linalg.norm(dcloud, axis=1)
@@ -438,6 +451,42 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
 
 
 # ---------------------------------------------------------------------------
+# Global massive dims (fixed across chains) -- for clean resultant_bulk/norm_bulk
+# ---------------------------------------------------------------------------
+
+def compute_global_massive(model, tokenizer, records, layer_indices, m, device,
+                           max_seq_len, n=60):
+    """Per-layer top-m dims by mean|h| over the response tokens of up to n CORRECT
+    chains (label==-1). Massive activations are fixed dims -> a small correct-chain
+    sample suffices, and sharing one set across all chains avoids per-chain content
+    selection (the resultant_bulk leak fix)."""
+    d = model.config.hidden_size
+    acc = np.zeros((len(layer_indices), d), dtype=np.float64); seen = 0
+    for rec in records:
+        if int(rec.get("gold_error_step", -1)) >= 0:          # correct chains only
+            continue
+        try:
+            prompt = EXTRACT_PROMPT.format(q=rec["question"])
+            enc = tokenizer(prompt + rec["response"], return_tensors="pt",
+                            truncation=True, max_length=max_seq_len)
+            ids = enc["input_ids"][0].to(device)
+            with torch.no_grad():
+                out = model(input_ids=ids.unsqueeze(0), output_hidden_states=True)
+            for li, l in enumerate(layer_indices):
+                H = out.hidden_states[l][0].float().cpu().numpy()
+                acc[li] += np.abs(H).mean(0)
+            del out; seen += 1
+        except Exception:
+            continue
+        if seen >= n:
+            break
+    massive = np.argpartition(acc, -m, axis=1)[:, -m:]         # (L, m)
+    print(f"  GLOBAL massive dims from {seen} correct chains (top-{m}/layer); "
+          f"e.g. mid-layer -> {sorted(massive[len(layer_indices)//2].tolist())}")
+    return massive
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -462,6 +511,11 @@ def main():
                          "(0=embeddings, 1..n=blocks). Stored per layer.")
     ap.add_argument("--massive_m", type=int, default=4,
                     help="#top-magnitude dims removed for the AE_robust feature.")
+    ap.add_argument("--massive_global", type=int, default=0,
+                    help="if >0, pre-scan this many CORRECT chains to fix GLOBAL per-layer "
+                         "massive dims (shared by all chains) for resultant_bulk/norm_bulk -- "
+                         "the clean massive-attribution (vs per-chain selection). Needs "
+                         "--cloud_eff_rank.")
     ap.add_argument("--no_ue", action="store_true",
                     help="skip epistemic U_E (no backward); keeps U_D/U_C/geometry.")
     ap.add_argument("--ue_stride", type=int, default=1,
@@ -583,10 +637,18 @@ def main():
         print(f"  reconstructed {len(problems)} ProcessBench questions for "
               f"problem_id lookup (from {args.pb_path})")
         records = iter_sampled(args.sampled_npz, problems, args.limit)
+    records = list(records)
+
+    # global fixed massive dims (clean resultant_bulk/norm_bulk attribution)
+    massive_fixed = None
+    if args.massive_global > 0 and args.cloud_eff_rank:
+        massive_fixed = compute_global_massive(
+            model, tokenizer, records, layer_indices, args.massive_m, device,
+            args.max_seq_len, n=args.massive_global)
 
     rows, profiles = [], []
     n_seen = n_kept = 0
-    for rec in tqdm(list(records), desc="chains"):
+    for rec in tqdm(records, desc="chains"):
         n_seen += 1
         try:
             res = extract_chain(
@@ -599,7 +661,7 @@ def main():
                 intrinsic_dim=args.intrinsic_dim, sv_layers=sv_set,
                 grad_block=grad_block,
                 cloud_layers=cloud_set, cloud_P=cloud_P,
-                cloud_delta=args.cloud_delta)
+                cloud_delta=args.cloud_delta, massive_fixed=massive_fixed)
         except Exception as e:
             import traceback
             print(f"  warn: chain {rec['id']} failed: {e}")
