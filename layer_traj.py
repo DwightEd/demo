@@ -146,6 +146,7 @@ def main():
     shape = np.c_[slope, deep_sh, curv, rngf]
     one = PROF[:, [best_li]]
     s_one = oof(one); s_shape = oof(shape); s_prof = oof(PROF); s_one_shape = oof(np.c_[one, shape])
+    s_prof_shape = oof(np.c_[PROF, shape])      # linear bag + shape (the CORRECT iv-a vs iii)
     base = np.c_[np.log(np.maximum(NT, 1)), POS]
     if UEX:
         UEX = np.asarray(UEX, float)
@@ -168,7 +169,10 @@ def main():
     print(f"  shape only (slope/ds/curv/rng): {auroc(s_shape, Y):.3f}")
     print(f"  full profile (all layers):  {auroc(s_prof, Y):.3f}")
     print(f"  one + shape:                {auroc(s_one_shape, Y):.3f}")
-    print(f"  shape OVER one layer:       {ci(s_one_shape, s_one)}")
+    print(f"  linear-bag + shape:         {auroc(s_prof_shape, Y):.3f}")
+    print(f"  shape OVER one layer:       {ci(s_one_shape, s_one)}   (loose: more features)")
+    print(f"  shape OVER LINEAR BAG:      {ci(s_prof_shape, s_prof)}   (CORRECT decision: "
+          f"non-trivial cross-layer structure beyond the per-layer linear bag)")
     print(f"\n=== over confound+U ===")
     print(f"  base(len+pos+U):            {auroc(s_b, Y):.3f}")
     print(f"  + best layer:               {auroc(s_b1, Y):.3f}")
