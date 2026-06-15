@@ -95,7 +95,8 @@ def main():
 
     print(f"file: {args.npz} | layer {args.layer} | error-chains {len(chains)} | "
           f"pooled-det steps {len(det_y)} (pos {int(det_y.sum())})")
-    print(f"\n{'metric':11s} {'pooled_det':>11s} {'wc_loc':>8s} {'MRR':>7s} {'rand_MRR':>9s} {'nchains':>8s}")
+    print(f"\n{'metric':11s} {'pooled_det':>11s} {'wc_loc':>8s} {'MRR':>7s} {'rand_MRR':>9s} "
+          f"{'wc_loc(⊥nt)':>11s} {'nchains':>8s}")
 
     for m in METRICS:
         dv = np.asarray(det_v[m], float)
@@ -118,10 +119,28 @@ def main():
             mrrs.append(1.0 / rank)
             n = len(others) + 1
             rand.append(np.mean([1.0 / r for r in range(1, n + 1)]))
+        # length-residualized within chain: is loc beyond "error step is longer"?
+        rlocs, rw = [], []
+        if m not in ("position", "n_tok"):
+            for ch in chains:
+                T = ch["T"]; k = ch["k"]
+                if T < args.min_steps:
+                    continue
+                mv = ch["vals"][m]; nt = ch["vals"]["n_tok"]
+                fin = np.isfinite(mv) & np.isfinite(nt)
+                if fin.sum() < 3 or not fin[k]:
+                    continue
+                b = np.polyfit(nt[fin], mv[fin], 1)
+                resid = sign * (mv - (b[0] * nt + b[1]))   # higher = more error-like
+                others = np.array([jj for jj in range(T) if jj != k and fin[jj]])
+                if len(others) < 2:
+                    continue
+                rlocs.append(np.mean(resid[others] < resid[k])); rw.append(len(others))
         if locs:
             w = np.asarray(w, float)
+            rl = np.average(rlocs, weights=np.asarray(rw, float)) if rlocs else float("nan")
             print(f"{m:11s} {a_det:11.3f} {np.average(locs, weights=w):8.3f} "
-                  f"{np.mean(mrrs):7.3f} {np.mean(rand):9.3f} {len(locs):8d}")
+                  f"{np.mean(mrrs):7.3f} {np.mean(rand):9.3f} {rl:11.3f} {len(locs):8d}")
         else:
             print(f"{m:11s} {a_det:11.3f} {'nan':>8s}")
 
@@ -129,6 +148,8 @@ def main():
     print("wc_loc = per error chain, frac of OTHER steps (pre+post) the first-error beats")
     print("         (0.5 = random WITHIN a chain). Compare geometric rows to 'position'/'n_tok'.")
     print("MRR vs rand_MRR: localization rank quality vs the random-ranker floor.")
+    print("wc_loc(⊥nt): wc_loc after residualizing the metric on n_tok WITHIN each chain "
+          "-> localization BEYOND 'error step is longer'. >0.5 = geometric loc beyond length.")
     print("\nverdict: if resultant/norm wc_loc ~ position/n_tok wc_loc or ~0.5, the signal "
           "does NOT localize the error within a chain beyond position/length -> the pooled "
           "AUROC was between-chain (difficulty), useless for within-chain monitoring.")
