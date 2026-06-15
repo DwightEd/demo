@@ -55,6 +55,13 @@ CLOUD_NAMES = ("cloud_D", "cloud_V", "cloud_C", "coherence", "mean_tok_norm", "r
 # resultant_unif = resultant with UNIFORM weights -> (resultant - resultant_unif) probes
 #              whether exp-weighting concentrates on a coherent core (expected small).
 INTRINSIC_NAMES = ("id_mle", "id_twonn", "cim_V")  # whole-chain CIM: intrinsic dim (D) + information volume (V)
+# Delta cloud = per-token residual-stream increment written by block l: dh_t = h_t^l - h_t^{l-1}
+# (attn + FFN sublayer write, identity path removed). Only a clean single-block write when the
+# stored layers are CONSECUTIVE (use --layers all); with sparse layers the increment spans
+# several blocks and is left nan. norm_delta = mean_t ||dh_t|| (energy written per token);
+# resultant_delta = ||exp-pool(dh_t / ||dh_t||)|| in [0,1] (directional concentration of the write,
+# immune to magnitude -- the Delta analog of `resultant`).
+CLOUD_DELTA_NAMES = ("norm_delta", "resultant_delta")
 from features import geometry as geo
 from features import uncertainty as unc
 from features import trace_profile as tp
@@ -248,7 +255,7 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
                   massive_m, want_ue, ue_params, ue_stride,
                   store_token_geom, max_seq_len, store_step_vectors=False,
                   cloud_eff_rank=False, intrinsic_dim=False, sv_layers=None,
-                  grad_block=None, cloud_layers=None, cloud_P=None):
+                  grad_block=None, cloud_layers=None, cloud_P=None, cloud_delta=False):
     """Return a dict of arrays for one chain, or None if it cannot be aligned."""
     prompt = EXTRACT_PROMPT.format(q=rec["question"])
     response = rec["response"]
@@ -299,6 +306,9 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
     qvec = np.full((n_sv, d), np.nan, dtype=np.float16) if store_step_vectors else None
     # cloud D/V/C + coherence + mean_tok_norm (see CLOUD_NAMES)
     stepcloud = np.full((T, L, len(CLOUD_NAMES)), np.nan, dtype=np.float32) if cloud_eff_rank else None
+    # Delta cloud (per-token increment) norm + resultant, per (step, layer); nan unless the
+    # previous stored layer is hidden_states idx (this layer - 1) i.e. layers are consecutive.
+    stepdelta = np.full((T, L, len(CLOUD_DELTA_NAMES)), np.nan, dtype=np.float32) if cloud_delta else None
     # whole-chain nonlinear intrinsic dimension (length-robust), per layer
     chain_id = np.full((L, len(INTRINSIC_NAMES)), np.nan, np.float32) if intrinsic_dim else None
     # R2: per-token response cloud, random-projected (JL) to k dims, per cloud layer.
@@ -326,6 +336,10 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
             qv = step_vector(H_l[0:a0], mode="step_exp", l2_normalize=False)
             if qv is not None:
                 qvec[sv_k] = qv.astype(np.float16)
+        # Delta cloud only well-defined when the previous stored layer is exactly l-1
+        delta_ok = (cloud_delta and li >= 1
+                    and layer_indices[li] == layer_indices[li - 1] + 1)
+        prevH = hs[li - 1] if delta_ok else None
         for sj, (a, b) in enumerate(safe):
             cloud = H_l[a:b + 1]                        # (n_j, d) token cloud
             z = step_vector(cloud, mode="step_exp", l2_normalize=False)
@@ -359,6 +373,16 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
                         if rb is not None:
                             res_bulk = float(np.linalg.norm(rb))
                 stepcloud[sj, li] = (D, V, C, coh, mtn, res, res_bulk, res_unif)
+            if delta_ok:                                # per-token residual-stream increment cloud
+                dcloud = H_l[a:b + 1] - prevH[a:b + 1]  # (n_j, d): block-l write to each token
+                dtn = np.linalg.norm(dcloud, axis=1)
+                nd = float(dtn.mean()); rd = np.nan
+                if nd > 1e-9:
+                    du = dcloud / np.maximum(dtn[:, None], 1e-9)   # unit increments
+                    drv = step_vector(du, mode="step_exp", l2_normalize=False)
+                    if drv is not None:
+                        rd = float(np.linalg.norm(drv))            # directional concentration in [0,1]
+                stepdelta[sj, li] = (nd, rd)
         if intrinsic_dim:                              # CIM on the whole-chain last-token trajectory
             whole = H_l[a0:b1 + 1]                      # (R, d)
             chain_id[li, 0] = cim_tle_intrinsic_dim(whole)   # D_stim (kNN-ID)
@@ -402,6 +426,7 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
         "stepvec": stepvec,
         "qvec": qvec,
         "stepcloud": stepcloud,
+        "stepdelta": stepdelta,
         "respcloud": respcloud,
         "chain_id": chain_id,
         "gradprof": gradprof,
@@ -461,6 +486,11 @@ def main():
                     help="also compute the WHOLE-chain nonlinear intrinsic dimension "
                          "(MLE-kNN + TwoNN) per layer -- length-robust, better-"
                          "conditioned than per-step effective rank.")
+    ap.add_argument("--cloud_delta", action="store_true",
+                    help="also compute the per-token residual-stream INCREMENT cloud "
+                         "(dh_t = h_t^l - h_t^{l-1}) norm_delta + resultant_delta per "
+                         "(step, layer). Only well-defined for CONSECUTIVE layers -> use "
+                         "with --layers all (sparse layers leave it nan). ~free given hs.")
     ap.add_argument("--store_clouds", action="store_true",
                     help="R2: store the per-token response cloud (random-projected, "
                          "JL) per --cloud_store_layers, for learned-pooling detectors "
@@ -568,7 +598,8 @@ def main():
                 cloud_eff_rank=args.cloud_eff_rank,
                 intrinsic_dim=args.intrinsic_dim, sv_layers=sv_set,
                 grad_block=grad_block,
-                cloud_layers=cloud_set, cloud_P=cloud_P)
+                cloud_layers=cloud_set, cloud_P=cloud_P,
+                cloud_delta=args.cloud_delta)
         except Exception as e:
             print(f"  warn: chain {rec['id']} failed: {e}")
             res = None
@@ -615,6 +646,9 @@ def main():
         stepcloud=np.array([r["stepcloud"] for r in rows], dtype=object),
         cloud_stored=np.array(args.cloud_eff_rank),
         cloud_feature_names=np.array(CLOUD_NAMES, dtype=object),
+        stepdelta=np.array([r["stepdelta"] for r in rows], dtype=object),
+        cloud_delta_stored=np.array(args.cloud_delta),
+        cloud_delta_names=np.array(CLOUD_DELTA_NAMES, dtype=object),
         # R2: random-projected per-token response clouds (object: (R, Lc, k) fp16 each)
         respcloud=np.array([r["respcloud"] for r in rows], dtype=object),
         clouds_stored=np.array(args.store_clouds),
