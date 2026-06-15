@@ -40,7 +40,8 @@ from utils.step_boundaries import find_step_token_ranges
 from utils.step_vector import step_vector
 from utils.spectral import step_layer_spectral_summary, cim_tle_intrinsic_dim
 
-CLOUD_NAMES = ("cloud_D", "cloud_V", "cloud_C", "coherence", "mean_tok_norm", "resultant")
+CLOUD_NAMES = ("cloud_D", "cloud_V", "cloud_C", "coherence", "mean_tok_norm", "resultant",
+               "resultant_bulk", "resultant_unif")
 # cloud_D/V/C = point-cloud eff-rank / energy / concentration;
 # coherence  = ||exp-pooled vec|| / mean_t ||h_t||  (alignment, but contaminated by
 #              within-step magnitude variance);
@@ -48,6 +49,11 @@ CLOUD_NAMES = ("cloud_D", "cloud_V", "cloud_C", "coherence", "mean_tok_norm", "r
 # resultant  = ||exp-pool(UNIT tokens)|| in [0,1] -- normalize each token FIRST, so it is
 #              PURE directional concentration (immune to magnitude); low = diffuse. THE
 #              clean diffuseness estimator.
+# resultant_bulk = resultant after zeroing the top-massive dims (per-layer, by mean|h| over
+#              the response) -> tests if directional concentration is trivially driven by the
+#              massive subspace (signal_audit: AUROC + corr-with-norm should survive).
+# resultant_unif = resultant with UNIFORM weights -> (resultant - resultant_unif) probes
+#              whether exp-weighting concentrates on a coherent core (expected small).
 INTRINSIC_NAMES = ("id_mle", "id_twonn", "cim_V")  # whole-chain CIM: intrinsic dim (D) + information volume (V)
 from features import geometry as geo
 from features import uncertainty as unc
@@ -303,6 +309,11 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
 
     for li in range(L):
         H_l = hs[li]                                   # (seq, d)
+        # per-layer massive dims (top-m by mean|h| over the response) for resultant_bulk
+        massive_dims = None
+        if cloud_eff_rank and b1 > a0:
+            mean_abs = np.abs(H_l[a0:b1 + 1]).mean(axis=0)
+            massive_dims = np.argpartition(mean_abs, -massive_m)[-massive_m:]
         cl_k = (cloud_layers.index(layer_indices[li])
                 if (cloud_layers and layer_indices[li] in cloud_layers) else None)
         if cl_k is not None:                           # store projected response cloud
@@ -325,7 +336,7 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
                     stepvec[sj, sv_k] = z.astype(np.float16)
             if cloud_eff_rank:
                 D, V, C = step_layer_spectral_summary(cloud)
-                coh = mtn = res = np.nan
+                coh = mtn = res = res_bulk = res_unif = np.nan
                 if z is not None:
                     tn = np.linalg.norm(cloud, axis=1)                  # per-token norms
                     mtn = float(tn.mean())                              # mean per-token norm
@@ -337,7 +348,17 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
                     rvec = step_vector(unit, mode="step_exp", l2_normalize=False)
                     if rvec is not None:
                         res = float(np.linalg.norm(rvec))
-                stepcloud[sj, li] = (D, V, C, coh, mtn, res)
+                    runif = step_vector(unit, mode="mean", l2_normalize=False)
+                    if runif is not None:
+                        res_unif = float(np.linalg.norm(runif))         # uniform-weight resultant
+                    if massive_dims is not None:                        # resultant in bulk subspace
+                        cb = cloud.copy(); cb[:, massive_dims] = 0.0
+                        tnb = np.linalg.norm(cb, axis=1)
+                        ub = cb / np.maximum(tnb[:, None], 1e-9)
+                        rb = step_vector(ub, mode="step_exp", l2_normalize=False)
+                        if rb is not None:
+                            res_bulk = float(np.linalg.norm(rb))
+                stepcloud[sj, li] = (D, V, C, coh, mtn, res, res_bulk, res_unif)
         if intrinsic_dim:                              # CIM on the whole-chain last-token trajectory
             whole = H_l[a0:b1 + 1]                      # (R, d)
             chain_id[li, 0] = cim_tle_intrinsic_dim(whole)   # D_stim (kNN-ID)
