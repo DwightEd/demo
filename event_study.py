@@ -115,11 +115,8 @@ def main():
     pre = resid[err & (J - K <= -4)]; pre = pre[np.isfinite(pre)]
     near = resid[err & ((J - K == -1) | (J - K == -2))]; near = near[np.isfinite(near)]
     at0 = resid[err & (J - K == 0)]; at0 = at0[np.isfinite(at0)]
-    def cmp(a, b, na, nb):
-        d = a - b; se = np.sqrt(a.std()**2/len(a) + b.std()**2/len(b)) if (len(a) and len(b)) else np.nan
-        return d, se
     if len(pre) and len(near):
-        d, se = cmp(near.mean(), pre.mean(), 0, 0); d = near.mean() - pre.mean()
+        d = near.mean() - pre.mean()
         se = np.sqrt(near.std()**2/len(near) + pre.std()**2/len(pre))
         print(f"\nprecursor: mean_resid(Δ∈-1,-2) − mean_resid(Δ≤-4) = {d:+.4f} "
               f"[{d-2*se:+.4f},{d+2*se:+.4f}] {'RISES before error' if d-2*se>0 else 'ns'}")
