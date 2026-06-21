@@ -63,7 +63,7 @@ def main():
     UD = z["tok_U_D"] if "tok_U_D" in z.files else None
     METS = [("resultant", "c"), ("coherence", "c"), ("norm", "g"), ("cloud_D", "c"), ("U_D", "u")]
 
-    out = {m[0]: {"raw": [], "ratio": [], "diff": []} for m in METS}
+    out = {m[0]: {"raw": [], "ratio": [], "diff": [], "prev": []} for m in METS}
     NT, Y = [], []
     for i in range(len(SG)):
         sg = np.asarray(SG[i], float); sc = np.asarray(SC[i], float)
@@ -87,10 +87,11 @@ def main():
             else:
                 continue
             for nm, src in METS:
-                mj = val(nm, src, j); r0 = m0[nm]
+                mj = val(nm, src, j); r0 = m0[nm]; mp = val(nm, src, j - 1)
                 out[nm]["raw"].append(mj)
                 out[nm]["ratio"].append(mj / r0 if abs(r0) > 1e-9 else np.nan)
                 out[nm]["diff"].append(mj - r0)
+                out[nm]["prev"].append(mj / mp if abs(mp) > 1e-9 else np.nan)   # m_j / m_{j-1}
             NT.append(int(rng[j, 1] - rng[j, 0] + 1)); Y.append(y)
     Y = np.asarray(Y, int); NT = np.asarray(NT, float)
     for nm in out:
@@ -98,16 +99,18 @@ def main():
             out[nm][k2] = np.asarray(out[nm][k2], float)
 
     print(f"file: {args.npz} | layer {args.layer} | steps(j>=1) {len(Y)} | first-error {int(Y.sum())}")
-    print(f"\n{'metric':11s} | {'raw AUROC/bucket':>17s} | {'m_j/m_0':>15s} | {'m_j - m_0':>15s}")
+    print(f"\n{'metric':11s} | {'raw':>13s} | {'m_j/m_0':>13s} | {'m_j/m_(j-1)':>13s} | {'m_j-m_0':>13s}")
     for nm, _ in METS:
-        r, rt, df = out[nm]["raw"], out[nm]["ratio"], out[nm]["diff"]
-        print(f"{nm:11s} | {bdir(auroc(r,Y)):.3f}/{bucket(r,Y,NT):.3f}{'':6s} | "
-              f"{bdir(auroc(rt,Y)):.3f}/{bucket(rt,Y,NT):.3f}{'':4s} | "
+        r, rt, pv, df = out[nm]["raw"], out[nm]["ratio"], out[nm]["prev"], out[nm]["diff"]
+        print(f"{nm:11s} | {bdir(auroc(r,Y)):.3f}/{bucket(r,Y,NT):.3f} | "
+              f"{bdir(auroc(rt,Y)):.3f}/{bucket(rt,Y,NT):.3f} | "
+              f"{bdir(auroc(pv,Y)):.3f}/{bucket(pv,Y,NT):.3f} | "
               f"{bdir(auroc(df,Y)):.3f}/{bucket(df,Y,NT):.3f}")
-    print("\nformat raw/bucket = pooled AUROC / within-length-bucket AUROC. If m_j/m_0 or "
-          "m_j-m_0 beats raw -> normalizing by the first step helps. Usually it drops the "
-          "pooled (removes between-chain difficulty) -- check whether the BUCKET (length-"
-          "controlled) improves, which is the within-chain relative signal the figure showed.")
+    print("\nformat raw/bucket = pooled AUROC / within-length-bucket AUROC. m_j/m_(j-1) = ratio to "
+          "the IMMEDIATE previous step (most local dynamic view). If any relative beats raw -> "
+          "normalizing helps; usually pooled DROPS (removes between-chain difficulty) while the "
+          "length-controlled BUCKET may improve on hard configs -- that is the within-chain "
+          "relative signal, mode-robust but weaker than raw which already encodes the drop.")
 
 
 if __name__ == "__main__":
