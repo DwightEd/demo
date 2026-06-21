@@ -134,17 +134,20 @@ class Solver:
             self._hook.remove(); self._hook = None
 
 
-def trigger_idx(res, en, kind, k=1.0):
-    """first sentence index that trips the trigger. geom = R drops below running mean - k*std;
-    entropy = entropy rises above running mean + k*std. returns None if never."""
-    if kind == "none" or len(res) < 3:
-        return None
-    s = -res if kind == "geom" else en                  # both: 'higher = more suspicious'
+def sol_score(res, en, kind):
+    """per-solution anomaly = max over sentences of the within-solution z-deviation, with the
+    argmax sentence index. geom: -R (concentration drop); entropy: entropy spike. Higher = more
+    suspicious. Returns (score, idx) or (-inf, None) if too short."""
+    if len(res) < 3:
+        return -np.inf, None
+    s = -res if kind == "geom" else en
+    best, bi = -np.inf, None
     for t in range(2, len(s)):
         hist = s[:t]; mu, sd = hist.mean(), hist.std() + 1e-6
-        if s[t] > mu + k * sd:
-            return t
-    return None
+        a = (s[t] - mu) / sd
+        if a > best:
+            best, bi = a, t
+    return best, bi
 
 
 def main():
@@ -156,6 +159,7 @@ def main():
     ap.add_argument("--actuator", choices=["reconsider", "steer"], default="reconsider")
     ap.add_argument("--alpha", type=float, default=6.0, help="steering strength")
     ap.add_argument("--data_jsonl", default=None, help="local jsonl with question/problem + answer")
+    ap.add_argument("--fpr", type=float, default=0.2, help="target fire rate on CORRECT solutions (conformal)")
     args = ap.parse_args()
 
     # data: --data_jsonl (local: {"question"|"problem", "answer"}), else openai/gsm8k, else builtin
@@ -191,54 +195,63 @@ def main():
             probs = (BUILTIN * (args.n // len(BUILTIN) + 1))[:args.n]
 
     S = Solver(args.model, args.layer)
-    rows = {kind: {"n": 0, "base_ok": 0, "after_ok": 0, "fired": 0,
-                   "conf_wrong": 0, "conf_fixed": 0} for kind in ["geom", "entropy"]}
-    nbase = 0
+    # ---- pass 1: baseline generate + per-solution anomaly scores (no intervention yet) ----
+    items = []
     for qi, (q, gold) in enumerate(probs):
-        prompt = S.prompt(q)
-        sol = S.generate(prompt, temp=args.temp)
-        base_ok = correct(extract_answer(sol), gold)
-        nbase += int(base_ok)
+        prompt = S.prompt(q); sol = S.generate(prompt, temp=args.temp)
+        ok = correct(extract_answer(sol), gold)
         res, en, sp = S.signals(prompt, sol)
         if len(res) < 3:
             continue
-        confident = (en.mean() < np.median(en)) if len(en) else False     # rough: low-entropy solution
-        for kind in ["geom", "entropy"]:
-            r = rows[kind]; r["n"] += 1; r["base_ok"] += int(base_ok)
-            cw = (not base_ok) and confident
-            r["conf_wrong"] += int(cw)
-            t = trigger_idx(res, en, kind)
-            if t is None:
-                r["after_ok"] += int(base_ok)                              # no intervention
-                continue
-            r["fired"] += 1
-            cut = sp[t][0]                                                 # truncate at trigger sentence
-            stem = prompt + sol[:cut]
+        gs, gi = sol_score(res, en, "geom"); es, ei = sol_score(res, en, "entropy")
+        conf = bool(en.mean() < np.median(en)) if len(en) else False
+        items.append(dict(prompt=prompt, sol=sol, gold=gold, ok=ok, sp=sp,
+                          gs=gs, gi=gi, es=es, ei=ei, conf=conf))
+        if (qi + 1) % 5 == 0:
+            print(f"  [{qi+1}/{len(probs)}] baseline pass {np.mean([it['ok'] for it in items]):.3f}")
+    nbase = float(np.mean([it["ok"] for it in items])) if items else 0.0
+
+    # ---- conformal calibration: threshold on CORRECT solutions to fire at ~FPR (precision-first) ----
+    cor = [it for it in items if it["ok"]]
+    thr = {}
+    for kind, sk in [("geom", "gs"), ("entropy", "es")]:
+        vals = np.array([it[sk] for it in cor]) if cor else np.array([np.inf])
+        thr[kind] = float(np.quantile(vals, 1 - args.fpr)) if len(vals) else np.inf
+
+    # ---- pass 2: intervene only where anomaly > calibrated threshold ----
+    rows = {k: dict(fired=0, fire_wrong=0, fire_correct=0, after_ok=0, conf_wrong=0, conf_fixed=0)
+            for k in ["geom", "entropy"]}
+    nn = max(len(items), 1)
+    for it in items:
+        for kind, sk, ik in [("geom", "gs", "gi"), ("entropy", "es", "ei")]:
+            r = rows[kind]; r["conf_wrong"] += int((not it["ok"]) and it["conf"])
+            if not (it[sk] > thr[kind] and it[ik] is not None):
+                r["after_ok"] += int(it["ok"]); continue                   # no fire -> keep baseline
+            r["fired"] += 1; r["fire_wrong"] += int(not it["ok"]); r["fire_correct"] += int(it["ok"])
+            cut = it["sp"][it[ik]][0]; stem = it["prompt"] + it["sol"][:cut]
             if args.actuator == "steer":
-                # re-anchor: steer toward the mean direction of the pre-trigger (healthy) sentences
-                # (placeholder direction; refine with a learned correct-vs-error contrast vector)
                 S.set_steer(np.ones(S.model.config.hidden_size), args.alpha)
                 new = S.generate(stem, temp=args.temp); S.clear_steer()
             else:
                 new = S.generate(stem + "\nWait, let me re-check this step carefully.\n", temp=max(args.temp, 0.9))
-            after_ok = correct(extract_answer(sol[:cut] + new), gold)
-            r["after_ok"] += int(after_ok)
-            if cw and after_ok:
+            aok = correct(extract_answer(it["sol"][:cut] + new), it["gold"])
+            r["after_ok"] += int(aok)
+            if (not it["ok"]) and it["conf"] and aok:
                 r["conf_fixed"] += 1
-        if (qi + 1) % 5 == 0:
-            print(f"  [{qi+1}/{len(probs)}] baseline pass {nbase/(qi+1):.3f}")
 
-    print(f"\nmodel {args.model} | layer {args.layer} | N {len(probs)} | actuator {args.actuator}")
-    print(f"baseline pass-rate: {nbase/max(len(probs),1):.3f}")
-    print(f"\n{'trigger':9s} {'fired':>6s} {'pass(base)':>11s} {'pass(after)':>12s} {'conf-wrong':>11s} {'conf-fixed':>11s}")
+    print(f"\nmodel {args.model} | layer {args.layer} | N {len(items)} | actuator {args.actuator} | FPR {args.fpr}")
+    print(f"baseline pass-rate: {nbase:.3f}")
+    print(f"\n{'trigger':9s} {'fired':>6s} {'on-wrong':>9s} {'on-correct':>11s} {'pass(after)':>12s} "
+          f"{'conf-wrong':>11s} {'conf-fixed':>11s}")
     for kind in ["geom", "entropy"]:
-        r = rows[kind]; nn = max(r["n"], 1)
-        print(f"{kind:9s} {r['fired']:>6d} {r['base_ok']/nn:>11.3f} {r['after_ok']/nn:>12.3f} "
-              f"{r['conf_wrong']:>11d} {r['conf_fixed']:>11d}")
-    print("\nread: pass(after) > pass(base) means the intervention helps. The headline is conf-fixed: "
-          "how many CONFIDENT (low-entropy) wrong solutions each trigger repaired. If geom fixes more "
-          "confident hallucinations than entropy at similar fire rate -> the geometric trigger covers "
-          "the blind spot. This is a first prototype: run small --n, expect to tune trigger k / actuator.")
+        r = rows[kind]
+        print(f"{kind:9s} {r['fired']:>6d} {r['fire_wrong']:>9d} {r['fire_correct']:>11d} "
+              f"{r['after_ok']/nn:>12.3f} {r['conf_wrong']:>11d} {r['conf_fixed']:>11d}")
+    print("\nread: threshold conformal-calibrated on CORRECT solutions to fire at ~FPR, so 'on-correct' "
+          "stays small. PRECISION = on-wrong/fired -> a good trigger fires mostly on wrong solutions. "
+          "pass(after) > baseline = intervention nets positive. conf-fixed = confident hallucinations "
+          "repaired (headline). USE A HARD benchmark (low baseline) so there are errors to fix -- GSM8K "
+          "(~0.75) breaks more corrects than it fixes. Compare geom vs entropy at the same FPR.")
 
 
 if __name__ == "__main__":
