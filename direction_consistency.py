@@ -1,29 +1,28 @@
-"""Deepen the 'directional consistency' axis.
+"""Deepen the 'directional consistency' axis beyond the resultant SCALAR.
 
-resultant is only the SCALAR concentration of the within-step mean direction. It throws away
-(i) the step DIRECTION VECTOR itself and (ii) the higher-order shape of the direction
-distribution. This script tests the UNEXPLORED cells, all magnitude-immune, in the stored JL
-space (JL approximately preserves cosines):
+resultant = ||sum_t w_t uhat_t|| is only the within-step CONCENTRATION of the mean direction.
+It throws away the step DIRECTION VECTOR itself -- and therefore WHAT that direction aligns
+with. Using the stored full-dim pooled step vectors (stepvec) and the question vector (qvec),
+we test the unexplored, magnitude-immune cells:
 
-  step direction        d_j = normalize( sum_t w_t * uhat_t )         (w = exp-pool, uhat=unit token)
-  -- (2) BETWEEN-step directional coherence (trajectory) --
-  coh_prev = cos(d_j, d_{j-1})                       turn from the previous step
-  coh_run  = cos(d_j, normalize(sum_{t<j} d_t))      consistency with the reasoning so far
-  -- (3) WITHIN-step directional higher-order shape (multimodality) --
-  dir_lam2 = lambda_2 / sum(lambda)  of  sum_t w_t uhat_t uhat_t^T    second-direction strength = split
-  dir_D    = exp(-sum p_i log p_i), p_i=lambda_i/sum                  directional effective rank
-  -- baseline recomputed in the SAME JL space --
-  res_jl   = || sum_t w_t uhat_t ||
+  step direction   d_j = normalize(stepvec[j])           question direction d_q = normalize(qvec)
+  -- external anchoring (the anchor, in representation space) --
+  anchor_q = cos(d_j, d_q)                  is the step still pointing at the problem?
+  -- trajectory directional coherence --
+  coh_prev = cos(d_j, d_{j-1})              turn from the previous step
+  coh_run  = cos(d_j, normalize(sum_{t<j} d_t))   consistency with the reasoning so far
 
-VERDICT per signal: (a) single AUROC pooled + length-bucket; (b) residualized-on-resultant
-AUROC (cross-fit on correct steps) -- does it survive removing the known signal; (c) GroupKFold
-logistic INCREMENT of [resultant] -> [resultant + signal] with chain-paired bootstrap CI.
-Position is included as a control feature in (c). If a signal survives (b) AND the increment CI
-clears 0, it is a NEW directional-consistency axis (write it up). If not, it collapses into
-resultant -- honest negative.
+Internal concentration (resultant) tells whether the tokens within a step agree; these tell
+whether the step points at the QUESTION (anchor_q) and stays consistent with the trajectory
+(coh_*). A step can be internally concentrated yet collectively drift off the question --
+resultant cannot see that.
 
-Needs npz with respcloud (--store_clouds) + stepcloud(resultant) + step_token_ranges +
-gold_error_step + cloud_store_layers.
+VERDICT per signal: single AUROC (pooled + length-bucket); residualized-on-resultant AUROC
+(cross-fit GBR on correct steps) -- survives removing the known signal; GroupKFold logistic
+INCREMENT over [resultant + position] with chain-paired bootstrap CI ('*' = CI clears 0 = a NEW
+axis). Position is a control because later steps naturally drift from the question.
+
+Needs npz from extract_features.py --store_step_vectors (stepvec + qvec) + stepcloud(resultant).
 """
 
 from __future__ import annotations
@@ -70,38 +69,8 @@ def bucket(s, y, nt, nb=5):
     return num / den if den else float("nan")
 
 
-def exp_w(n):
-    if n <= 1:
-        return np.ones(max(n, 1))
-    e = np.exp(np.arange(n) / (n - 1)); return e / e.sum()
-
-
-def step_dir_stats(tok):
-    """tok: (n,d) raw token vectors -> (d_unit, res_jl, dir_lam2, dir_D)."""
-    n = tok.shape[0]
-    nrm = np.linalg.norm(tok, axis=1)
-    ok = nrm > 1e-9
-    if ok.sum() < 2:
-        return None
-    u = tok[ok] / nrm[ok, None]; w = exp_w(u.shape[0])
-    pooled = (w[:, None] * u).sum(0); res = float(np.linalg.norm(pooled))
-    d = pooled / (res + 1e-12)
-    # nonzero eigenvalues of sum_t w_t u_t u_t^T via the (n x n) weighted Gram (cheap, same spectrum)
-    B = np.sqrt(w)[:, None] * u                       # (n,d)
-    G = B @ B.T                                        # (n,n), trace = sum w = 1
-    lam = np.linalg.eigvalsh(G); lam = np.clip(lam[::-1], 0, None); s = lam.sum()
-    if s <= 1e-12:
-        return None
-    p = lam / s; p = p[p > 1e-12]
-    dir_D = float(np.exp(-(p * np.log(p)).sum()))
-    lam2 = float(lam[1] / s) if len(lam) > 1 else 0.0
-    return d, res, lam2, dir_D
-
-
 def residualize_on(sig, base, correct, grp, folds):
-    """cross-fit GBR(sig ~ base) on CORRECT steps; return residual sig - pred (all steps)."""
-    out = np.full(len(sig), np.nan)
-    X = base.reshape(-1, 1)
+    out = np.full(len(sig), np.nan); X = base.reshape(-1, 1)
     for tr, te in GroupKFold(folds).split(X, np.zeros(len(X)), grp):
         ctr = tr[correct[tr]]
         if len(ctr) < 50:
@@ -122,7 +91,6 @@ def oof_logit(X, y, grp, folds):
 
 
 def boot_delta(sa, sb, y, grp, n=1000, seed=0):
-    """chain-paired bootstrap CI of AUROC(sb) - AUROC(sa)."""
     rng = np.random.default_rng(seed); chains = np.unique(grp)
     idx_by = {c: np.where(grp == c)[0] for c in chains}
     d0 = bdir(auroc(sb, y)) - bdir(auroc(sa, y)); ds = []
@@ -136,49 +104,44 @@ def boot_delta(sa, sb, y, grp, n=1000, seed=0):
     return d0, lo, hi
 
 
+def unit(v):
+    n = np.linalg.norm(v); return v / n if n > 1e-9 else None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("npz")
     ap.add_argument("--layer", type=int, default=14)
     ap.add_argument("--folds", type=int, default=5)
-    ap.add_argument("--min_tok", type=int, default=4)
     ap.add_argument("--boot", type=int, default=1000)
     args = ap.parse_args()
 
     z = np.load(args.npz, allow_pickle=True)
-    if "respcloud" not in z.files:
-        raise SystemExit("no respcloud; re-extract with --store_clouds")
-    csl = [int(x) for x in z["cloud_store_layers"]]; cli = csl.index(args.layer)
+    if not bool(z.get("step_vectors_stored", np.array(False))):
+        raise SystemExit("no step vectors; re-extract with --store_step_vectors --sv_layers ...")
+    svl = [int(x) for x in (z["sv_layers"] if "sv_layers" in z.files else z["layers_used"])]
+    if args.layer not in svl:
+        raise SystemExit(f"layer {args.layer} not in stored sv_layers {svl} -- pick one of these")
+    lisv = svl.index(args.layer)
     cnames = [str(x) for x in z["cloud_feature_names"]]
-    layers = [int(x) for x in z["layers_used"]]; li = layers.index(args.layer)
-    RC, SC, SR = z["respcloud"], z["stepcloud"], z["step_token_ranges"]
-    ges = z["gold_error_step"].astype(int)
+    lyu = [int(x) for x in z["layers_used"]]; lic = lyu.index(args.layer)
+    SV, QV, SC = z["stepvec"], z["qvec"], z["stepcloud"]
+    SR = z["step_token_ranges"]; ges = z["gold_error_step"].astype(int)
 
-    feats = {k: [] for k in ["coh_prev", "coh_run", "dir_lam2", "dir_D", "res_jl", "res_stored"]}
+    feats = {k: [] for k in ["anchor_q", "coh_prev", "coh_run", "res"]}
     Y, NT, POS, G = [], [], [], []
-    for i in range(len(RC)):
-        if RC[i] is None:
+    for i in range(len(SV)):
+        sv = np.asarray(SV[i], np.float32)
+        if sv.ndim != 3 or sv.shape[1] <= lisv:
             continue
-        rcl = np.asarray(RC[i], np.float32)[:, cli, :]; sc = np.asarray(SC[i], float)
-        rng = np.asarray(SR[i], int); k = int(ges[i]); correct = (k < 0)
-        a0 = int(rng[0, 0]); T = rng.shape[0]
-        res_seq = sc[:, li, cnames.index("resultant")] if "resultant" in cnames else np.full(T, np.nan)
+        Z = sv[:, lisv, :]                                          # (T, d) pooled step vectors
+        sc = np.asarray(SC[i], float); rng = np.asarray(SR[i], int)
+        k = int(ges[i]); correct = (k < 0); T = Z.shape[0]
+        q = unit(np.asarray(QV[i], np.float32)[lisv]) if QV[i] is not None else None
+        res_seq = sc[:, lic, cnames.index("resultant")] if "resultant" in cnames else np.full(T, np.nan)
+        dlist = [unit(Z[j]) for j in range(T)]
 
-        # pass 1: step directions + within-step shape for ALL steps (history needed for coh_run)
-        dlist = [None] * T; lam2 = np.full(T, np.nan); dirD = np.full(T, np.nan); rjl = np.full(T, np.nan)
-        for j in range(T):
-            lo = max(0, int(rng[j, 0]) - a0); hi = min(rcl.shape[0], int(rng[j, 1]) - a0 + 1)
-            if hi - lo < args.min_tok:
-                continue
-            st = step_dir_stats(rcl[lo:hi])
-            if st is None:
-                continue
-            dlist[j], rjl[j], lam2[j], dirD[j] = st
-
-        # pass 2: labeled steps -> between-step coherence + collect.
-        # coh_run uses the running mean of PRIOR step directions, so update run AFTER scoring j.
-        # post-error steps (j>k) come after all labeled steps -> never history -> safe to skip.
-        run = np.zeros(rcl.shape[1]); have_run = False
+        run = np.zeros(Z.shape[1]); have_run = False
         for j in range(T):
             dj = dlist[j]
             if correct or j < k:
@@ -187,17 +150,18 @@ def main():
                 y = 1
             else:
                 continue
-            cohp = cohr = np.nan
+            aq = cp = cr = np.nan
             if dj is not None:
+                if q is not None:
+                    aq = float(dj @ q)
                 if j >= 1 and dlist[j - 1] is not None:
-                    cohp = float(dj @ dlist[j - 1])
+                    cp = float(dj @ dlist[j - 1])
                 if have_run and np.linalg.norm(run) > 1e-9:
-                    rd = run / np.linalg.norm(run); cohr = float(dj @ rd)
-                run = run + dj; have_run = True              # add this step to history
+                    cr = float(dj @ (run / np.linalg.norm(run)))
+                run = run + dj; have_run = True
             ntok = int(rng[j, 1] - rng[j, 0] + 1)
-            feats["coh_prev"].append(cohp); feats["coh_run"].append(cohr)
-            feats["dir_lam2"].append(lam2[j]); feats["dir_D"].append(dirD[j])
-            feats["res_jl"].append(rjl[j]); feats["res_stored"].append(res_seq[j])
+            feats["anchor_q"].append(aq); feats["coh_prev"].append(cp); feats["coh_run"].append(cr)
+            feats["res"].append(res_seq[j])
             Y.append(y); NT.append(ntok); POS.append(j / max(1, T - 1)); G.append(i)
 
     for kk in feats:
@@ -205,33 +169,30 @@ def main():
         c[~np.isfinite(c)] = np.nanmean(c[np.isfinite(c)]) if np.isfinite(c).any() else 0.0
         feats[kk] = c
     Y = np.asarray(Y, int); NT = np.asarray(NT, float); POS = np.asarray(POS, float); G = np.asarray(G, int)
-    correct_step = Y == 0
-    res = feats["res_stored"]
+    correct_step = Y == 0; res = feats["res"]
 
-    print(f"file: {args.npz} | layer {args.layer} | labeled steps {len(Y)} | first-error {int(Y.sum())} "
-          f"| error-chains {len(np.unique(G[Y==1]))}")
-    print(f"baseline  resultant(stored) AUROC {bdir(auroc(res,Y)):.3f}  bucket {bucket(res,Y,NT):.3f} | "
-          f"res_jl {bdir(auroc(feats['res_jl'],Y)):.3f}  (corr res_jl,stored "
-          f"{np.corrcoef(feats['res_jl'],res)[0,1]:+.2f})")
+    print(f"file: {args.npz} | layer {args.layer} (sv_layers {svl}) | labeled steps {len(Y)} | "
+          f"first-error {int(Y.sum())} | error-chains {len(np.unique(G[Y==1]))}")
+    print(f"baseline resultant AUROC {bdir(auroc(res,Y)):.3f}  bucket {bucket(res,Y,NT):.3f}  "
+          f"| position AUROC {bdir(auroc(POS,Y)):.3f}")
 
-    base2 = np.c_[res, POS]                                  # resultant + position baseline
-    sa = oof_logit(base2, Y, G, args.folds)
+    base = np.c_[res, POS]; sa = oof_logit(base, Y, G, args.folds)
     print(f"\n{'signal':10s} {'AUROC':>7s} {'bucket':>7s} {'resid⊥res':>10s} {'Δ[+res,pos]':>12s} {'95% CI':>18s}")
-    for nm in ["coh_prev", "coh_run", "dir_lam2", "dir_D"]:
+    for nm in ["anchor_q", "coh_prev", "coh_run"]:
         sig = feats[nm]
         a = bdir(auroc(sig, Y)); bk = bucket(sig, Y, NT)
-        rsd = residualize_on(sig, res, correct_step, G, args.folds)
-        ar = bdir(auroc(rsd, Y))
+        rsd = residualize_on(sig, res, correct_step, G, args.folds); ar = bdir(auroc(rsd, Y))
         sb = oof_logit(np.c_[res, POS, sig], Y, G, args.folds)
         d0, lo, hi = boot_delta(sa, sb, Y, G, n=args.boot)
         flag = " *" if lo > 0 else ""
         print(f"{nm:10s} {a:7.3f} {bk:7.3f} {ar:10.3f} {d0:+12.3f} {f'[{lo:+.3f},{hi:+.3f}]':>18s}{flag}")
 
-    print("\nread: AUROC/bucket = single-feature (length-controlled). resid⊥res = AUROC after "
-          "regressing the signal on resultant (cross-fit on correct) -> survives if > ~0.55. "
-          "Δ[+res,pos] = logistic increment over [resultant+position] with chain-paired bootstrap "
-          "CI; '*' = CI clears 0 = a NEW directional-consistency axis. Otherwise it collapses into "
-          "resultant (honest negative).")
+    print("\nread: resid⊥res = AUROC after regressing the signal on resultant (cross-fit on "
+          "correct) -> survives if > ~0.55. Δ[+res,pos] = logistic increment over [resultant + "
+          "position] with chain-paired bootstrap CI; '*' = CI clears 0 = a NEW directional-"
+          "consistency axis (internal concentration + external/trajectory anchoring). Else it "
+          "collapses into resultant+position (honest negative). anchor_q controls position "
+          "because later steps naturally drift from the question.")
 
 
 if __name__ == "__main__":
