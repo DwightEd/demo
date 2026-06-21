@@ -148,6 +148,7 @@ def main():
         raise SystemExit(f"layer {args.layer} not in cloud_store_layers {csl}")
     cli = csl.index(args.layer)
     RC, SR = z["respcloud"], z["step_token_ranges"]; ges = z["gold_error_step"].astype(int)
+    UD = z["tok_U_D"] if "tok_U_D" in z.files else None     # per-token entropy -> per-step mean (control)
     # stored full-dim resultant baseline if available, else fall back to JL res
     cnames = [str(x) for x in z["cloud_feature_names"]] if "cloud_feature_names" in z.files else []
     lyu = [int(x) for x in z["layers_used"]] if "layers_used" in z.files else None
@@ -156,7 +157,7 @@ def main():
     lic = lyu.index(args.layer) if use_stored_res else None
 
     feats = {k: [] for k in ["coh_prev", "coh_run", "dir_lam2", "dir_D", "res"]}
-    rjl_all = []
+    rjl_all = []; UDcol = []
     Y, NT, POS, G = [], [], [], []
     for i in range(len(RC)):
         if RC[i] is None:
@@ -164,6 +165,7 @@ def main():
         rcl = np.asarray(RC[i], np.float32)[:, cli, :]; rng = np.asarray(SR[i], int)
         k = int(ges[i]); correct = (k < 0); a0 = int(rng[0, 0]); T = rng.shape[0]
         sc = np.asarray(SC[i], float) if use_stored_res else None
+        ud = np.asarray(UD[i], float) if UD is not None else None
 
         dlist = [None] * T; lam2 = np.full(T, np.nan); dirD = np.full(T, np.nan); rjl = np.full(T, np.nan)
         for j in range(T):
@@ -191,9 +193,11 @@ def main():
                     cr = float(dj @ (run / np.linalg.norm(run)))
                 run = run + dj; have_run = True
             res_v = (sc[j, lic, cnames.index("resultant")] if use_stored_res else rjl[j])
+            lo = max(0, int(rng[j, 0]) - a0); hi = min((len(ud) if ud is not None else 0), int(rng[j, 1]) - a0 + 1)
+            uv = np.nanmean(ud[lo:hi]) if (ud is not None and hi > lo) else np.nan
             feats["coh_prev"].append(cp); feats["coh_run"].append(cr)
             feats["dir_lam2"].append(lam2[j]); feats["dir_D"].append(dirD[j]); feats["res"].append(res_v)
-            rjl_all.append(rjl[j])
+            rjl_all.append(rjl[j]); UDcol.append(uv)
             Y.append(y); NT.append(int(rng[j, 1] - rng[j, 0] + 1)); POS.append(j / max(1, T - 1)); G.append(i)
 
     for kk in feats:
@@ -202,6 +206,12 @@ def main():
         feats[kk] = c
     Y = np.asarray(Y, int); NT = np.asarray(NT, float); POS = np.asarray(POS, float); G = np.asarray(G, int)
     rjl_all = np.asarray(rjl_all, float); correct_step = Y == 0; res = feats["res"]
+    UDcol = np.asarray(UDcol, float)
+    if np.isfinite(UDcol).any():
+        UDcol[~np.isfinite(UDcol)] = np.nanmean(UDcol[np.isfinite(UDcol)])
+    else:
+        UDcol[:] = 0.0
+    has_ud = UD is not None and np.std(UDcol) > 1e-9
 
     print(f"file: {args.npz} | layer {args.layer} (store {csl}) | labeled steps {len(Y)} | "
           f"first-error {int(Y.sum())} | error-chains {len(np.unique(G[Y==1]))}")
@@ -213,30 +223,33 @@ def main():
     # baselines: [res,pos] and the STRICT [res,pos,log n_tok] -- dir_D/dir_lam2 are rank-bounded
     # by n_tok, so an increment that survives the length control is real directional structure;
     # one that vanishes was just length resultant didn't fully absorb.
+    # decisive baselines: length-controlled, and length+uncertainty-controlled (kill the obvious
+    # remaining confounds for dir_lam2 -- rank=length, and hesitation=high-entropy spread).
     logNT = np.log(np.maximum(NT, 1.0))
-    base = np.c_[res, POS]; sa = oof_logit(base, Y, G, args.folds)
     base_len = np.c_[res, POS, logNT]; sa_len = oof_logit(base_len, Y, G, args.folds)
+    base_all = np.c_[res, POS, logNT, UDcol] if has_ud else base_len
+    sa_all = oof_logit(base_all, Y, G, args.folds)
+    udtag = "+res,pos,len,U_D" if has_ud else "+res,pos,len (no U_D)"
     print(f"\n{'signal':9s} {'AUROC':>6s} {'bucket':>6s} {'resid⊥res':>9s} | "
-          f"{'Δ[+res,pos]':>11s} {'CI':>16s} | {'Δ[+res,pos,len]':>15s} {'CI':>16s}")
+          f"{'Δ[+res,pos,len]':>15s} {'CI':>16s} | {('Δ['+udtag+']'):>20s} {'CI':>16s}")
     for nm in ["coh_prev", "coh_run", "dir_lam2", "dir_D"]:
         sig = feats[nm]
         a = bdir(auroc(sig, Y)); bk = bucket(sig, Y, NT)
         rsd = residualize_on(sig, res, correct_step, G, args.folds); ar = bdir(auroc(rsd, Y))
-        sb = oof_logit(np.c_[res, POS, sig], Y, G, args.folds)
-        d0, lo, hi = boot_delta(sa, sb, Y, G, n=args.boot)
-        sb2 = oof_logit(np.c_[res, POS, logNT, sig], Y, G, args.folds)
-        d1, lo1, hi1 = boot_delta(sa_len, sb2, Y, G, n=args.boot)
-        f0 = "*" if lo > 0 else " "; f1 = "*" if lo1 > 0 else " "
-        print(f"{nm:9s} {a:6.3f} {bk:6.3f} {ar:9.3f} | {d0:+11.3f} {f'[{lo:+.3f},{hi:+.3f}]':>16s}{f0} | "
-              f"{d1:+15.3f} {f'[{lo1:+.3f},{hi1:+.3f}]':>16s}{f1}")
+        sb1 = oof_logit(np.c_[res, POS, logNT, sig], Y, G, args.folds)
+        d1, lo1, hi1 = boot_delta(sa_len, sb1, Y, G, n=args.boot)
+        sb2 = oof_logit((np.c_[res, POS, logNT, UDcol, sig] if has_ud else np.c_[res, POS, logNT, sig]),
+                        Y, G, args.folds)
+        d2, lo2, hi2 = boot_delta(sa_all, sb2, Y, G, n=args.boot)
+        f1 = "*" if lo1 > 0 else " "; f2 = "*" if lo2 > 0 else " "
+        print(f"{nm:9s} {a:6.3f} {bk:6.3f} {ar:9.3f} | {d1:+15.3f} {f'[{lo1:+.3f},{hi1:+.3f}]':>16s}{f1} | "
+              f"{d2:+20.3f} {f'[{lo2:+.3f},{hi2:+.3f}]':>16s}{f2}")
 
-    print("\nread: resid⊥res = AUROC after regressing the signal on resultant (cross-fit on "
-          "correct), survives if > ~0.55. Δ[+res,pos] = increment over resultant+position; "
-          "Δ[+res,pos,len] ALSO controls log n_tok -- the decisive one, since dir_D/dir_lam2 are "
-          "rank-bounded by length. '*' = chain-paired bootstrap CI clears 0. A signal is a REAL "
-          "new directional axis only if the LENGTH-controlled increment still clears 0; if it "
-          "passes [+res,pos] but dies under [+res,pos,len], it was length. anchor_q (cos to "
-          "question) needs qvec -> re-extract with --store_step_vectors.")
+    print("\nread: Δ[+res,pos,len] controls resultant+position+length; the rightmost ALSO controls "
+          "per-step U_D (uncertainty). '*' = chain-paired bootstrap CI clears 0. A signal is a REAL "
+          "new directional axis only if it survives the RIGHTMOST (all known confounds). dir_lam2 = "
+          "second-direction strength (genuine within-step multimodality, not just rank); dir_D is "
+          "rank-bounded so it leaks length. anchor_q (cos to question) still needs qvec re-extract.")
 
 
 if __name__ == "__main__":
