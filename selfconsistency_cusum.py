@@ -117,15 +117,16 @@ def main():
     print(f"file: {args.npz} | layer {args.layer} | chains {len(chains)} "
           f"(correct {sum(c['correct'] for c in chains)}) | global AR a={a:.3f} | sd_floor {sd_floor:.4f}")
 
-    # per-step residuals + labels
-    RUN, AR, RAW, Y, NT = [], [], [], [], []
-    EOFF, ES = [], []                                   # event study: signed s_run vs offset
-    for c in chains:
+    # per-step residuals + labels (+ causal feature vector for the within-chain ceiling probe)
+    RUN, AR, RAW, Y, NT, G = [], [], [], [], [], []
+    FEATC = []                                          # leak-free CAUSAL features (uses only y[:t], y[t])
+    EOFF, ESr, ESa = [], [], []                         # event study: signed s_run AND s_ar vs offset
+    for ci, c in enumerate(chains):
         y = c["y"]; k = c["k"]; correct = c["correct"]; T = len(y)
         sr, sa = causal_resid(y, a, sd_floor)
         for j in range(T):
             if not correct:
-                EOFF.append(j - k); ES.append(sr[j])
+                EOFF.append(j - k); ESr.append(sr[j]); ESa.append(sa[j])
             if correct or j < k:
                 lab = 0
             elif j == k:
@@ -134,27 +135,52 @@ def main():
                 continue
             if not np.isfinite(sr[j]):          # j<2: no causal history -> fair same-step compare
                 continue
-            RUN.append(sr[j]); AR.append(sa[j]); RAW.append(y[j]); Y.append(lab); NT.append(c["nt"][j])
+            hist = y[:j]; mu = hist.mean()
+            RUN.append(sr[j]); AR.append(sa[j]); RAW.append(y[j]); Y.append(lab)
+            NT.append(c["nt"][j]); G.append(ci)
+            FEATC.append([sr[j], sa[j], y[j] - mu, y[j] - y[j - 1], j / max(1, T - 1), hist.std()])
     RUN = np.asarray(RUN); AR = np.asarray(AR); RAW = np.asarray(RAW)
-    Y = np.asarray(Y, int); NT = np.asarray(NT, float)
-    EOFF = np.asarray(EOFF, int); ES = np.asarray(ES, float)
+    Y = np.asarray(Y, int); NT = np.asarray(NT, float); G = np.asarray(G, int)
+    FEATC = np.asarray(FEATC, float)
+    EOFF = np.asarray(EOFF, int); ESr = np.asarray(ESr, float); ESa = np.asarray(ESa, float)
 
-    print(f"\n(a) step-level AUROC (pooled / length-bucket) -- causal within-chain vs raw")
-    for nm, v in [("raw resultant", RAW), ("-s_run (causal within-z)", -RUN), ("-s_ar (causal AR)", -AR)]:
-        print(f"  {nm:26s} {bdir(auroc(v, Y)):.3f} / {bucket(v, Y, NT):.3f}")
+    # within-chain causal CEILING: leak-free grouped logistic on causal features. tells whether
+    # running-stat's ~0.68 is the within-chain limit or just a weak predictor (interpretable, no
+    # black box). if ceiling ~ -s_run -> running-stat is enough; if >> -> more causal signal exists.
+    ceil = np.full(len(Y), np.nan)
+    try:
+        from sklearn.model_selection import GroupKFold
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.preprocessing import StandardScaler
+        for tr, te in GroupKFold(args.folds).split(FEATC, Y, G):
+            if len(np.unique(Y[tr])) < 2:
+                continue
+            sc = StandardScaler().fit(FEATC[tr])
+            lr = LogisticRegression(max_iter=1000, class_weight="balanced").fit(sc.transform(FEATC[tr]), Y[tr])
+            ceil[te] = lr.decision_function(sc.transform(FEATC[te]))
+    except Exception as e:
+        print(f"  [ceiling probe skipped: {e}]")
 
-    print(f"\n(b) event study: mean signed s_run by offset from first error (Δ=0)")
-    print(f"  {'Δ=j-k':>6s} {'n':>5s} {'mean s_run':>11s} {'SE':>7s}")
+    print(f"\n(a) step-level AUROC (pooled / length-bucket) -- causal within-chain vs raw & ceiling")
+    for nm, v in [("raw resultant (pooled)", RAW), ("-s_run (causal within-z)", -RUN),
+                  ("-s_ar (causal AR)", -AR), ("causal probe (WITHIN ceiling)", ceil)]:
+        print(f"  {nm:30s} {bdir(auroc(v, Y)):.3f} / {bucket(v, Y, NT):.3f}")
+
+    print(f"\n(b) event study: mean signed residual by offset from first error (Δ=0)")
+    print(f"  {'Δ=j-k':>6s} {'n':>5s} {'mean s_run':>11s} {'SE':>7s} {'mean s_ar':>11s}")
     for dd in range(-4, 4):
-        m = (EOFF == dd) & np.isfinite(ES)
+        m = (EOFF == dd) & np.isfinite(ESr)
         if m.sum() >= 5:
             star = " <-- error" if dd == 0 else ""
-            print(f"  {dd:>6d} {int(m.sum()):>5d} {ES[m].mean():>+11.3f} {ES[m].std()/np.sqrt(m.sum()):>7.3f}{star}")
-    pre = ES[(EOFF <= -3) & np.isfinite(ES)]; at0 = ES[(EOFF == 0) & np.isfinite(ES)]
-    if len(pre) >= 5 and len(at0) >= 5:
-        d = at0.mean() - pre.mean(); se = np.sqrt(at0.std()**2/len(at0) + pre.std()**2/len(pre))
-        shape = "SYNCHRONOUS dip at error" if abs(d) - 2*se > 0 else "no clear sync dip"
-        print(f"  drop s_run(0)-s_run(≤-3) = {d:+.3f} [{d-2*se:+.3f},{d+2*se:+.3f}] -> {shape}")
+            ar_m = ESa[(EOFF == dd) & np.isfinite(ESa)].mean()
+            print(f"  {dd:>6d} {int(m.sum()):>5d} {ESr[m].mean():>+11.3f} {ESr[m].std()/np.sqrt(m.sum()):>7.3f} "
+                  f"{ar_m:>+11.3f}{star}")
+    for tag, ES in [("s_run", ESr), ("s_ar", ESa)]:
+        pre = ES[(EOFF <= -3) & np.isfinite(ES)]; at0 = ES[(EOFF == 0) & np.isfinite(ES)]
+        if len(pre) >= 5 and len(at0) >= 5:
+            d = at0.mean() - pre.mean(); se = np.sqrt(at0.std()**2/len(at0) + pre.std()**2/len(pre))
+            shape = "SYNCHRONOUS dip" if abs(d) - 2*se > 0 else "no clear sync dip"
+            print(f"  drop {tag}(0)-{tag}(≤-3) = {d:+.3f} [{d-2*se:+.3f},{d+2*se:+.3f}] -> {shape}")
 
     # detectors (conformal threshold from held-out CORRECT chains): CUSUM (for sustained shifts)
     # vs MAX single-step -s_run (matched to a transient dip). The event study says the break is
