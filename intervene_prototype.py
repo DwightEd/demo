@@ -155,20 +155,40 @@ def main():
     ap.add_argument("--temp", type=float, default=0.7)
     ap.add_argument("--actuator", choices=["reconsider", "steer"], default="reconsider")
     ap.add_argument("--alpha", type=float, default=6.0, help="steering strength")
+    ap.add_argument("--data_jsonl", default=None, help="local jsonl with question/problem + answer")
     args = ap.parse_args()
 
-    # data: GSM8K test, fallback to a tiny hardcoded set so it always runs
-    try:
-        from datasets import load_dataset
-        ds = load_dataset("gsm8k", "main", split=f"test[:{args.n}]")
-        probs = [(d["question"], extract_answer(d["answer"])) for d in ds]
-    except Exception as e:
-        print(f"[datasets unavailable: {e}; using fallback problems]")
-        probs = [("Natalia sold clips to 48 friends in April, and half as many in May. "
-                  "How many clips did she sell altogether?", "72"),
-                 ("Weng earns $12 an hour for babysitting. Yesterday she babysat 50 minutes. "
-                  "How much did she earn?", "10")] * (args.n // 2 + 1)
+    # data: --data_jsonl (local: {"question"|"problem", "answer"}), else openai/gsm8k, else builtin
+    probs = None
+    if args.data_jsonl:
+        import json
+        probs = []
+        for line in open(args.data_jsonl, encoding="utf-8"):
+            d = json.loads(line); q = d.get("question") or d.get("problem")
+            probs.append((q, extract_answer(str(d["answer"]))))
         probs = probs[:args.n]
+    if probs is None:
+        try:
+            from datasets import load_dataset
+            ds = load_dataset("openai/gsm8k", "main", split=f"test[:{args.n}]")
+            probs = [(d["question"], extract_answer(d["answer"])) for d in ds]
+        except Exception as e:
+            print(f"[datasets unavailable: {e}; using builtin GSM8K problems]")
+            BUILTIN = [
+                ("Natalia sold clips to 48 friends in April, and half as many in May. How many clips did she sell altogether?", "72"),
+                ("Weng earns $12 an hour for babysitting. Yesterday she babysat 50 minutes. How much did she earn?", "10"),
+                ("Betty is saving for a $100 wallet. She has half of the money. Her parents give her $15 and her grandparents twice as much as her parents. How much more does she need?", "5"),
+                ("James writes a 3-page letter to 2 friends twice a week. How many pages does he write a year?", "624"),
+                ("A robe takes 2 bolts of blue fiber and half that of white fiber. How many bolts in total?", "3"),
+                ("Mark has a garden with 28 red flowers. There are 20% fewer yellow flowers. There are as many blue as red and yellow combined. How many flowers total?", "129"),
+                ("Albert buys 2 large pizzas (16 slices each) and 2 small pizzas (8 slices each). If he eats it all, how many slices does he eat?", "48"),
+                ("Ken created a care package. He put 2 pounds of jelly beans, then added enough brownies to triple the weight, then 2 more pounds of jelly beans, then doubled it. Final weight in pounds?", "16"),
+                ("Alexis bought items spending 30+46+38+11+18 and had $16 left, plus shoes whose price she forgot. She started with $200. How much were the shoes?", "41"),
+                ("Tina makes $18.00 per hour. Over 8 hours she gets paid normally; beyond 8 she gets 1.5x. If she works 10 hours a day for 5 days, how much does she make?", "990"),
+                ("A deep-sea monster eats ships every 100 years. Over 300 years it ate 847 people. Each new ship had twice as many people as the last. How many were on the first ship?", "121"),
+                ("Marcus has 210 baseball cards. He has 58 more than Carter. How many cards do Marcus and Carter have together?", "362"),
+            ]
+            probs = (BUILTIN * (args.n // len(BUILTIN) + 1))[:args.n]
 
     S = Solver(args.model, args.layer)
     rows = {kind: {"n": 0, "base_ok": 0, "after_ok": 0, "fired": 0,
