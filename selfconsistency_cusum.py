@@ -156,31 +156,41 @@ def main():
         shape = "SYNCHRONOUS dip at error" if abs(d) - 2*se > 0 else "no clear sync dip"
         print(f"  drop s_run(0)-s_run(≤-3) = {d:+.3f} [{d-2*se:+.3f},{d+2*se:+.3f}] -> {shape}")
 
-    # detector: reset CUSUM on score=-s_run, conformal threshold from held-out CORRECT chains
+    # detectors (conformal threshold from held-out CORRECT chains): CUSUM (for sustained shifts)
+    # vs MAX single-step -s_run (matched to a transient dip). The event study says the break is
+    # transient -> the max detector should beat CUSUM at the same guaranteed FPR.
     from sklearn.model_selection import GroupKFold
     idx = np.arange(len(chains)); grp = idx
-    rec = fpr = dly = 0.0; nerr = ncorr = ndly = 0
+    R = {"cusum": dict(rec=0., fpr=0., dly=0., nd=0), "max": dict(rec=0., fpr=0., dly=0., nd=0)}
+    nerr = ncorr = 0
     for tr, te in GroupKFold(args.folds).split(idx, idx, grp):
         cal = [t for t in tr if chains[t]["correct"]]
         if len(cal) < 20:
             continue
-        maxW_cal = []
+        statc, stats = [], []
         for t in cal:
             sr, _ = causal_resid(chains[t]["y"], a, sd_floor)
-            maxW_cal.append(cusum(-sr, args.kref).max())
-        h = np.quantile(maxW_cal, 1 - args.alpha)
+            statc.append(cusum(-sr, args.kref).max()); stats.append(np.nanmax(-sr))
+        hc = np.quantile(statc, 1 - args.alpha); hs = np.quantile(stats, 1 - args.alpha)
         for t in te:
             c = chains[t]; sr, _ = causal_resid(c["y"], a, sd_floor); W = cusum(-sr, args.kref)
-            flagged = W.max() >= h
+            ms = -sr.copy(); ms[~np.isfinite(ms)] = -np.inf
+            fc = W.max() >= hc; fs = np.nanmax(-sr) >= hs
             if c["correct"]:
-                ncorr += 1; fpr += int(flagged)
+                ncorr += 1; R["cusum"]["fpr"] += int(fc); R["max"]["fpr"] += int(fs)
             else:
-                nerr += 1; rec += int(flagged)
-                if flagged:
-                    tflag = int(np.argmax(W >= h)); ndly += 1; dly += (tflag - c["k"])
-    print(f"\n(detector) reset CUSUM(-s_run, k={args.kref}) + conformal h @ FPR≤{args.alpha}:")
-    print(f"  recall {rec/max(nerr,1):.3f} ({int(rec)}/{nerr})  |  empirical FPR {fpr/max(ncorr,1):.3f} "
-          f"({int(fpr)}/{ncorr})  |  mean delay {dly/max(ndly,1):+.2f} steps from first error")
+                nerr += 1
+                if fc:
+                    R["cusum"]["rec"] += 1; R["cusum"]["nd"] += 1
+                    R["cusum"]["dly"] += int(np.argmax(W >= hc)) - c["k"]
+                if fs:
+                    R["max"]["rec"] += 1; R["max"]["nd"] += 1
+                    R["max"]["dly"] += int(np.argmax(ms >= hs)) - c["k"]
+    print(f"\n(detectors) conformal threshold @ FPR≤{args.alpha}  (error chains {nerr}, correct {ncorr}):")
+    for nm, lab in [("cusum", f"reset CUSUM(-s_run,k={args.kref})"), ("max", "max single-step -s_run")]:
+        d = R[nm]
+        print(f"  {lab:30s} recall {d['rec']/max(nerr,1):.3f}  FPR {d['fpr']/max(ncorr,1):.3f}  "
+              f"delay {d['dly']/max(d['nd'],1):+.2f}")
     print("\nread: (a) -s_run ~ within-chain ceiling (expect ~0.6-0.7, below pooled raw which keeps "
           "between-chain difficulty/mode). (b) SYNCHRONOUS dip vs precursor tells whether off-track "
           "is detectable the same way across configs -- run all 4 and compare shapes; difficulty-"
