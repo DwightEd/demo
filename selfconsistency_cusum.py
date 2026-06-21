@@ -56,13 +56,15 @@ def bucket(s, y, nt, nb=5):
     return num / den if den else float("nan")
 
 
-def causal_resid(y, a, eps=1e-6):
-    """signed causal residuals (nan for t<2). returns s_run, s_ar."""
+def causal_resid(y, a, sd_floor, clip=5.0, eps=1e-6):
+    """signed causal residuals (nan for t<2). std floored at sd_floor and residual winsorized
+    to +/-clip -- early steps estimate std from 2-3 points and a near-zero std blows the residual
+    up (the event-study SEs of 4-21 came from exactly this). returns s_run, s_ar."""
     T = len(y); s_run = np.full(T, np.nan); s_ar = np.full(T, np.nan)
     for t in range(2, T):
-        hist = y[:t]; mu = hist.mean(); sd = hist.std() + eps
-        s_run[t] = (y[t] - mu) / sd
-        s_ar[t] = (y[t] - (mu + a * (y[t - 1] - mu))) / sd
+        hist = y[:t]; mu = hist.mean(); sd = max(hist.std(), sd_floor) + eps
+        s_run[t] = np.clip((y[t] - mu) / sd, -clip, clip)
+        s_ar[t] = np.clip((y[t] - (mu + a * (y[t - 1] - mu))) / sd, -clip, clip)
     return s_run, s_ar
 
 
@@ -109,15 +111,18 @@ def main():
         if np.isfinite(y).all() and T >= 3 and len(nt) == T:
             chains.append({"y": y, "k": k, "nt": nt, "correct": k < 0})
     a = est_ar([c["y"] for c in chains if c["correct"]])
+    # std floor = half the typical within-chain std (median over correct chains) -> stops the
+    # early-step near-zero-std residual explosion that wrecked the event study.
+    sd_floor = 0.5 * float(np.median([c["y"].std() for c in chains if c["correct"] and len(c["y"]) >= 2]))
     print(f"file: {args.npz} | layer {args.layer} | chains {len(chains)} "
-          f"(correct {sum(c['correct'] for c in chains)}) | global AR a={a:.3f}")
+          f"(correct {sum(c['correct'] for c in chains)}) | global AR a={a:.3f} | sd_floor {sd_floor:.4f}")
 
     # per-step residuals + labels
     RUN, AR, RAW, Y, NT = [], [], [], [], []
     EOFF, ES = [], []                                   # event study: signed s_run vs offset
     for c in chains:
         y = c["y"]; k = c["k"]; correct = c["correct"]; T = len(y)
-        sr, sa = causal_resid(y, a)
+        sr, sa = causal_resid(y, a, sd_floor)
         for j in range(T):
             if not correct:
                 EOFF.append(j - k); ES.append(sr[j])
@@ -161,11 +166,11 @@ def main():
             continue
         maxW_cal = []
         for t in cal:
-            sr, _ = causal_resid(chains[t]["y"], a)
+            sr, _ = causal_resid(chains[t]["y"], a, sd_floor)
             maxW_cal.append(cusum(-sr, args.kref).max())
         h = np.quantile(maxW_cal, 1 - args.alpha)
         for t in te:
-            c = chains[t]; sr, _ = causal_resid(c["y"], a); W = cusum(-sr, args.kref)
+            c = chains[t]; sr, _ = causal_resid(c["y"], a, sd_floor); W = cusum(-sr, args.kref)
             flagged = W.max() >= h
             if c["correct"]:
                 ncorr += 1; fpr += int(flagged)
