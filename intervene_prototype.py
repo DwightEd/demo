@@ -160,6 +160,20 @@ class Solver:
                 res.append(resultant(H[tok_idx])); en.append(float(ent[tok_idx].mean())); sp.append((cs, ce))
         return np.array(res), np.array(en), sp
 
+    @torch.no_grad()
+    def compress_reset(self, q, partial, temp):
+        """Halo-style actuator: semantic compression of verified progress + history reset, then
+        regenerate. Returns the regenerated solution (its \\boxed answer is the new final answer)."""
+        cmsg = [{"role": "user", "content":
+                 f"Problem: {q}\n\nReasoning so far (may contain mistakes):\n{partial}\n\n"
+                 "List ONLY the conclusions that are correct and verified, as short bullets. "
+                 "Discard any wrong, uncertain, or circular steps."}]
+        cprompt = self.tok.apply_chat_template(cmsg, tokenize=False, add_generation_prompt=True)
+        summary = self.generate(cprompt, max_new=200, temp=0.0)
+        nprompt = self.prompt(q + f"\n\nVerified progress so far:\n{summary}\n\n"
+                              "Continue ONLY from the verified progress; do not repeat mistakes.")
+        return self.generate(nprompt, temp=temp)
+
     def set_steer(self, vec, alpha):
         """register a hook that adds alpha*vec to the mid-layer residual output (latent steering)."""
         self.clear_steer()
@@ -199,7 +213,7 @@ def main():
     ap.add_argument("--layer", type=int, default=14)
     ap.add_argument("--n", type=int, default=20)
     ap.add_argument("--temp", type=float, default=0.7)
-    ap.add_argument("--actuator", choices=["reconsider", "steer"], default="reconsider")
+    ap.add_argument("--actuator", choices=["compress", "reconsider", "steer"], default="compress")
     ap.add_argument("--alpha", type=float, default=6.0, help="steering strength")
     ap.add_argument("--data_jsonl", default=None, help="local jsonl with question/problem + answer")
     ap.add_argument("--fpr", type=float, default=0.2, help="target fire rate on CORRECT solutions (conformal)")
@@ -248,7 +262,7 @@ def main():
             continue
         gs, gi = sol_score(res, en, "geom"); es, ei = sol_score(res, en, "entropy")
         conf = bool(en.mean() < np.median(en)) if len(en) else False
-        items.append(dict(prompt=prompt, sol=sol, gold=gold, ok=ok, sp=sp,
+        items.append(dict(q=q, prompt=prompt, sol=sol, gold=gold, ok=ok, sp=sp,
                           gs=gs, gi=gi, es=es, ei=ei, conf=conf))
         if (qi + 1) % 5 == 0:
             print(f"  [{qi+1}/{len(probs)}] baseline pass {np.mean([it['ok'] for it in items]):.3f}")
@@ -272,12 +286,16 @@ def main():
                 r["after_ok"] += int(it["ok"]); continue                   # no fire -> keep baseline
             r["fired"] += 1; r["fire_wrong"] += int(not it["ok"]); r["fire_correct"] += int(it["ok"])
             cut = it["sp"][it[ik]][0]; stem = it["prompt"] + it["sol"][:cut]
-            if args.actuator == "steer":
+            if args.actuator == "compress":                 # Halo-style: compress verified + reset
+                regen = S.compress_reset(it["q"], it["sol"][:cut], args.temp)
+                aok = correct(extract_answer(regen), it["gold"])
+            elif args.actuator == "steer":
                 S.set_steer(np.ones(S.model.config.hidden_size), args.alpha)
                 new = S.generate(stem, temp=args.temp); S.clear_steer()
-            else:
+                aok = correct(extract_answer(it["sol"][:cut] + new), it["gold"])
+            else:                                            # reconsider (weak; semantic feedback)
                 new = S.generate(stem + "\nWait, let me re-check this step carefully.\n", temp=max(args.temp, 0.9))
-            aok = correct(extract_answer(it["sol"][:cut] + new), it["gold"])
+                aok = correct(extract_answer(it["sol"][:cut] + new), it["gold"])
             r["after_ok"] += int(aok)
             if (not it["ok"]) and it["conf"] and aok:
                 r["conf_fixed"] += 1
