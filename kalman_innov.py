@@ -141,20 +141,25 @@ def em_ssm(chains, k, n_iter=30, reg=1e-4, seed=0):
 
 
 def innovations(Y, A, C, Q, R, d, mu0, P0, reg=1e-4):
-    """per-step Mahalanobis innovation z2_t = nu^T S^-1 nu (nan at t=0)."""
+    """per-step Mahalanobis innov z2_t = nu^T S^-1 nu AND raw innovation vector nu_t.
+
+    Returns (z2 [T], NU [T,m]); both nan at t=0. NU keeps the signed/directional info that
+    the scalar z2 squares away -- so a supervised probe on NU can tell whether the filter
+    PRESERVES the signal (probe-on-nu ~ probe-on-raw) or the low z2 is just the squaring.
+    """
     T, m = Y.shape; k = A.shape[0]
-    z2 = np.full(T, np.nan)
+    z2 = np.full(T, np.nan); NU = np.full((T, m), np.nan)
     xpre, Ppre = mu0.copy(), P0.copy()
     for t in range(T):
         nu = (Y[t] - d) - C @ xpre
         S_ = C @ Ppre @ C.T + R
         Sinv = np.linalg.inv(S_ + reg * np.eye(m))
         if t >= 1:
-            z2[t] = float(nu @ Sinv @ nu)
+            z2[t] = float(nu @ Sinv @ nu); NU[t] = nu
         K = Ppre @ C.T @ Sinv
         xf = xpre + K @ nu; Pf = (np.eye(k) - K @ C) @ Ppre
         xpre = A @ xf; Ppre = A @ Pf @ A.T + Q
-    return z2
+    return z2, NU
 
 
 # ----------------------------- data loading -----------------------------
@@ -199,7 +204,7 @@ def load_chains(npz_path, layers_sel, metrics_sel):
 
 
 # ----------------------------- main -----------------------------
-def run(chains, k_latent, folds, seed=0):
+def run(chains, k_latent, folds, seed=0, resultant_idx=None):
     from sklearn.model_selection import GroupKFold
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
@@ -215,16 +220,16 @@ def run(chains, k_latent, folds, seed=0):
         for t in te:
             Zall[t] = innovations(chains[t]["Y"], *params)
 
-    # assemble labeled steps (j<k or correct -> 0; j==k -> 1; j>k skipped)
-    RAWnorm, Z2, CUM, Y, NT, FEAT = [], [], [], [], [], []
+    # assemble labeled steps (j<k or correct -> 0; j==k -> 1; j>k skipped); GRP=chain id
+    RAWnorm, Z2, CUM, Y, NT, FEAT, NUF, GRP = [], [], [], [], [], [], [], []
     EOFF, EZ2 = [], []
     for t in idx:
-        z2 = Zall[t]
-        if z2 is None:
+        if Zall[t] is None:
             continue
+        z2, NU = Zall[t]
         c = chains[t]; kk = c["k"]; correct = c["correct"]; T = c["Y"].shape[0]
         cum = 0.0
-        rawmag = np.linalg.norm(c["Y"], axis=1)              # raw obs magnitude baseline
+        rawmag = np.linalg.norm(c["Y"], axis=1)              # raw obs magnitude (broken baseline)
         for j in range(T):
             if j >= 1 and np.isfinite(z2[j]):
                 cum += z2[j]
@@ -240,43 +245,46 @@ def run(chains, k_latent, folds, seed=0):
                 continue
             RAWnorm.append(rawmag[j]); Z2.append(z2[j]); CUM.append(cum)
             Y.append(lab); NT.append(c["nt"][j]); FEAT.append(c["Y"][j])
+            NUF.append(NU[j]); GRP.append(t)
     RAWnorm = np.asarray(RAWnorm); Z2 = np.asarray(Z2); CUM = np.asarray(CUM)
     Y = np.asarray(Y, int); NT = np.asarray(NT, float); FEAT = np.asarray(FEAT)
+    NUF = np.asarray(NUF); GRP = np.asarray(GRP)
     EOFF = np.asarray(EOFF, int); EZ2 = np.asarray(EZ2, float)
 
-    # supervised ceiling: probe on raw features, grouped CV (leak-free)
-    probe_scores = np.full(len(Y), np.nan)
-    # map each labeled step back to its chain for grouping
-    grp = []
-    pos = 0
-    for t in idx:
-        if Zall[t] is None:
-            continue
-        c = chains[t]; kk = c["k"]; correct = c["correct"]; T = c["Y"].shape[0]
-        for j in range(1, T):
-            if correct or j < kk or j == kk:
-                if not (correct or j < kk) and j != kk:
-                    continue
-                grp.append(t)
-    grp = np.asarray(grp)
-    if len(np.unique(grp)) >= folds:
-        gkf2 = GroupKFold(folds)
-        for tr, te in gkf2.split(FEAT, Y, grp):
+    # signed directional innovation: mean SIGNED nu over resultant channels (unsquared) --
+    # the multivariate analog of the 1-D signed innovation that DID spike at the error.
+    if not resultant_idx:
+        resultant_idx = list(range(NUF.shape[1]))
+    SIGNED = NUF[:, resultant_idx].mean(axis=1)
+
+    # supervised probes (grouped CV, leak-free): on RAW features (static ceiling) and on the
+    # innovation vector NU. probe-on-nu ~ probe-on-raw => filter preserves info (z2 squaring is
+    # the culprit). probe-on-nu << probe-on-raw => innovation removed the between-chain signal.
+    def probe(X):
+        out = np.full(len(Y), np.nan)
+        if len(np.unique(GRP)) < folds:
+            return out
+        for tr, te in GroupKFold(folds).split(X, Y, GRP):
             if Y[tr].sum() < 3 or (Y[tr] == 0).sum() < 3:
                 continue
-            sc = StandardScaler().fit(FEAT[tr])
+            sc = StandardScaler().fit(X[tr])
             lr = LogisticRegression(max_iter=1000, class_weight="balanced")
-            lr.fit(sc.transform(FEAT[tr]), Y[tr])
-            probe_scores[te] = lr.decision_function(sc.transform(FEAT[te]))
+            lr.fit(sc.transform(X[tr]), Y[tr])
+            out[te] = lr.decision_function(sc.transform(X[te]))
+        return out
+    probe_raw = probe(FEAT)
+    probe_nu = probe(NUF)
 
     print(f"\n=== AUROC (pooled / length-bucket) — k_latent={k_latent} ===")
-    print(f"  {'feature':28s} {'pooled':>8s} {'bucket':>8s}")
-    rows = [("raw obs ||y|| (baseline)", RAWnorm),
+    print(f"  {'feature':30s} {'pooled':>8s} {'bucket':>8s}")
+    rows = [("raw obs ||y|| (broken baseline)", RAWnorm),
             ("z2 (Mahalanobis innov)", Z2),
+            ("signed innov (resultant dir)", SIGNED),
             ("cumulative z2", CUM),
-            ("supervised probe (ceiling)", probe_scores)]
+            ("probe on RAW feats (ceiling)", probe_raw),
+            ("probe on innovation nu", probe_nu)]
     for nm, v in rows:
-        print(f"  {nm:28s} {bdir(auroc(v, Y)):8.3f} {bucket(v, Y, NT):8.3f}")
+        print(f"  {nm:30s} {bdir(auroc(v, Y)):8.3f} {bucket(v, Y, NT):8.3f}")
 
     print(f"\n=== event study: mean z2 by offset from first error (Δ=0) ===")
     print(f"  {'Δ=j-k':>6s} {'n':>5s} {'mean z2':>10s} {'SE':>8s}")
@@ -293,21 +301,25 @@ def run(chains, k_latent, folds, seed=0):
         sig = "SIGNIFICANT" if abs(jump) - 2 * se > 0 else "ns"
         print(f"  jump z2(0) − z2(≤-3) = {jump:+.3f} [{jump-2*se:+.3f},{jump+2*se:+.3f}] {sig}")
 
-    # interpretation guard
-    a_raw = bdir(auroc(RAWnorm, Y)); a_z2 = bdir(auroc(Z2, Y))
-    a_probe = bdir(auroc(probe_scores, Y))
+    # interpretation: separate "filter destroys info" from "innovation removes difficulty (by design)"
+    a_pr = bdir(auroc(probe_raw, Y)); a_pn = bdir(auroc(probe_nu, Y))
+    a_sg = bdir(auroc(SIGNED, Y)); a_z2 = bdir(auroc(Z2, Y))
     print("\n=== DIAGNOSIS ===")
-    if not np.isfinite(a_probe):
-        print("  probe undefined (too few samples).")
-    elif a_z2 > a_raw + 0.02:
-        print(f"  innovation ({a_z2:.3f}) BEATS raw ({a_raw:.3f}) -> filtering helps. Pursue.")
-    elif a_probe > a_raw + 0.05 and a_z2 <= a_raw + 0.02:
-        print(f"  probe ({a_probe:.3f}) sees signal raw/innov miss -> signal EXISTS but the\n"
-              f"  linear-Gaussian filter is too weak to extract it. Try higher k_latent,\n"
-              f"  richer channels, or a nonlinear state model before abandoning the claim.")
-    else:
-        print(f"  neither innovation ({a_z2:.3f}) nor probe ({a_probe:.3f}) beats raw ({a_raw:.3f})\n"
-              f"  by a margin -> within these features, the observability claim has little support.")
+    print(f"  static ceiling (probe on raw)  = {a_pr:.3f}")
+    print(f"  probe on innovation nu         = {a_pn:.3f}")
+    print(f"  signed directional innov       = {a_sg:.3f}   (Mahalanobis z2 = {a_z2:.3f})")
+    if np.isfinite(a_sg) and np.isfinite(a_z2) and a_sg > a_z2 + 0.05:
+        print(f"  -> SIGNED ({a_sg:.3f}) >> z2 ({a_z2:.3f}): the error is a DIRECTIONAL drop; the\n"
+              f"     Mahalanobis squaring/whitening discards the sign. Use the signed innovation.")
+    if np.isfinite(a_pn) and np.isfinite(a_pr):
+        if a_pn >= a_pr - 0.03:
+            print(f"  -> filter PRESERVES the information (probe-on-nu {a_pn:.3f} ~ probe-on-raw {a_pr:.3f}):\n"
+                  f"     the low z2 is the scalar readout, NOT a weak filter. Nonlinear won't help the readout.")
+        else:
+            print(f"  -> innovation drops the ceiling by {a_pr - a_pn:.3f}: the filter removed the\n"
+                  f"     BETWEEN-chain (difficulty/absolute-level) component. The remainder is the\n"
+                  f"     within-chain signal. A nonlinear filter is STILL within-chain -> won't recover\n"
+                  f"     the between-chain signal. The signal is static/absolute, not dynamical.")
 
 
 def make_synthetic(n=200, seed=0):
@@ -353,11 +365,14 @@ def main():
     layers_sel = [int(x) for x in args.layers.split(",")]
     metrics_sel = [x.strip() for x in args.metrics.split(",")]
     chains = load_chains(args.npz, layers_sel, metrics_sel)
+    # channel order is (for lyr in layers_sel: for mt in metrics_sel) -> resultant channel indices
+    ri = [li * len(metrics_sel) + mi for li in range(len(layers_sel))
+          for mi, mt in enumerate(metrics_sel) if mt == "resultant"]
     print(f"file: {args.npz}")
     print(f"layers={layers_sel} metrics={metrics_sel} -> obs dim m={len(layers_sel)*len(metrics_sel)}")
     print(f"chains={len(chains)} correct={sum(c['correct'] for c in chains)} "
           f"error={sum(not c['correct'] for c in chains)}")
-    run(chains, args.k_latent, args.folds)
+    run(chains, args.k_latent, args.folds, resultant_idx=ri)
 
 
 if __name__ == "__main__":
