@@ -152,13 +152,19 @@ class Solver:
         logits = out.logits[0].float()                                      # (seq, vocab)
         ent = (-(torch.softmax(logits, -1) * torch.log_softmax(logits, -1)).sum(-1)).cpu().numpy()
         base = len(prompt)
-        res, en, sp = [], [], []
+        res, en, sp, vecs = [], [], [], []
         for (cs, ce) in step_spans(solution):              # STEP granularity (matches validation)
             a, b = cs + base, ce + base
             tok_idx = [i for i, (o0, o1) in enumerate(offsets) if o0 >= a and o1 <= b and o1 > o0]
             if len(tok_idx) >= 2:
-                res.append(resultant(H[tok_idx])); en.append(float(ent[tok_idx].mean())); sp.append((cs, ce))
-        return np.array(res), np.array(en), sp
+                Hs = H[tok_idx]; res.append(resultant(Hs)); en.append(float(ent[tok_idx].mean())); sp.append((cs, ce))
+                nrm = np.linalg.norm(Hs, axis=1); ok = nrm > 1e-9        # full-dim pooled direction (re-anchor)
+                if ok.sum() >= 2:
+                    u = Hs[ok] / nrm[ok, None]; w = np.exp(np.arange(u.shape[0]) / max(u.shape[0] - 1, 1)); w /= w.sum()
+                    p = (w[:, None] * u).sum(0); vecs.append(p / (np.linalg.norm(p) + 1e-9))
+                else:
+                    vecs.append(np.zeros(H.shape[1], np.float32))
+        return np.array(res), np.array(en), sp, vecs
 
     @torch.no_grad()
     def compress_reset(self, q, partial, temp):
@@ -257,13 +263,12 @@ def main():
     for qi, (q, gold) in enumerate(probs):
         prompt = S.prompt(q); sol = S.generate(prompt, temp=args.temp)
         ok = correct(extract_answer(sol), gold)
-        res, en, sp = S.signals(prompt, sol)
+        res, en, sp, vecs = S.signals(prompt, sol)
         if len(res) < 3:
             continue
         gs, gi = sol_score(res, en, "geom"); es, ei = sol_score(res, en, "entropy")
-        conf = bool(en.mean() < np.median(en)) if len(en) else False
-        items.append(dict(q=q, prompt=prompt, sol=sol, gold=gold, ok=ok, sp=sp,
-                          gs=gs, gi=gi, es=es, ei=ei, conf=conf))
+        items.append(dict(q=q, prompt=prompt, sol=sol, gold=gold, ok=ok, sp=sp, vecs=vecs,
+                          gs=gs, gi=gi, es=es, ei=ei))
         if (qi + 1) % 5 == 0:
             print(f"  [{qi+1}/{len(probs)}] baseline pass {np.mean([it['ok'] for it in items]):.3f}")
     nbase = float(np.mean([it["ok"] for it in items])) if items else 0.0
@@ -281,44 +286,54 @@ def main():
         v = np.array([it[zk] for it in cor]) if cor else np.array([np.inf])
         thr[kind] = float(np.quantile(v, 1 - args.fpr))
 
+    def intervene(it, ik):
+        """apply the chosen actuator at trigger step it[ik]; return final-answer-correct bool."""
+        cut = it["sp"][it[ik]][0]; stem = it["prompt"] + it["sol"][:cut]
+        if args.actuator == "compress":
+            regen = S.compress_reset(it["q"], it["sol"][:cut], args.temp)
+            return correct(extract_answer(regen), it["gold"])
+        if args.actuator == "steer":                       # mechanism-derived re-anchor (NOT np.ones)
+            ti = it[ik]; pre = [it["vecs"][j] for j in range(ti) if np.linalg.norm(it["vecs"][j]) > 0]
+            if not pre:
+                return it["ok"]
+            S.set_steer(np.mean(pre, 0), args.alpha)        # push residual toward healthy-step mean direction
+            new = S.generate(stem, temp=args.temp); S.clear_steer()
+            return correct(extract_answer(it["sol"][:cut] + new), it["gold"])
+        new = S.generate(stem + "\nWait, let me re-check this step carefully.\n", temp=max(args.temp, 0.9))
+        return correct(extract_answer(it["sol"][:cut] + new), it["gold"])
+
     # ---- pass 2: 3 triggers (entropy=Halo, geom, fused=ours), SAME actuator, matched FPR ----
+    # blind spot defined NON-circularly by entropy's actual non-firing (not a mean-entropy proxy):
+    # bs_caught = wrong solutions this trigger fires on that the ENTROPY trigger MISSED; bs_fixed = of those, repaired.
     TRIG = [("entropy", "ze", "ei"), ("geom", "zg", "gi"), ("fused", "zc", "ci")]
-    rows = {k: dict(fired=0, fire_wrong=0, fire_correct=0, after_ok=0, conf_wrong=0, conf_fixed=0)
+    rows = {k: dict(fired=0, fire_wrong=0, fire_correct=0, after_ok=0, bs_caught=0, bs_fixed=0)
             for k, _, _ in TRIG}
     nn = max(len(items), 1)
     for it in items:
+        ent_miss = it["ze"] <= thr["entropy"]              # entropy trigger does NOT fire here
         for kind, zk, ik in TRIG:
-            r = rows[kind]; r["conf_wrong"] += int((not it["ok"]) and it["conf"])
+            r = rows[kind]
             if not (it[zk] > thr[kind] and it[ik] is not None):
-                r["after_ok"] += int(it["ok"]); continue                   # no fire -> keep baseline
+                r["after_ok"] += int(it["ok"]); continue   # no fire -> keep baseline
             r["fired"] += 1; r["fire_wrong"] += int(not it["ok"]); r["fire_correct"] += int(it["ok"])
-            cut = it["sp"][it[ik]][0]; stem = it["prompt"] + it["sol"][:cut]
-            if args.actuator == "compress":
-                regen = S.compress_reset(it["q"], it["sol"][:cut], args.temp)
-                aok = correct(extract_answer(regen), it["gold"])
-            elif args.actuator == "steer":
-                S.set_steer(np.ones(S.model.config.hidden_size), args.alpha)
-                new = S.generate(stem, temp=args.temp); S.clear_steer()
-                aok = correct(extract_answer(it["sol"][:cut] + new), it["gold"])
-            else:
-                new = S.generate(stem + "\nWait, let me re-check this step carefully.\n", temp=max(args.temp, 0.9))
-                aok = correct(extract_answer(it["sol"][:cut] + new), it["gold"])
-            r["after_ok"] += int(aok)
-            if (not it["ok"]) and it["conf"] and aok:
-                r["conf_fixed"] += 1
+            aok = intervene(it, ik); r["after_ok"] += int(aok)
+            if (not it["ok"]) and ent_miss:                # BLIND SPOT: wrong + entropy missed it
+                r["bs_caught"] += 1; r["bs_fixed"] += int(aok)
 
+    nwrong = sum(1 for it in items if not it["ok"])
     print(f"\nmodel {args.model} | layer {args.layer} | N {len(items)} | actuator {args.actuator} | FPR {args.fpr}")
-    print(f"baseline pass-rate: {nbase:.3f}   (entropy = Halo's trigger; fused = ours)")
+    print(f"baseline pass-rate: {nbase:.3f}   (entropy = Halo trigger; fused = ours)   wrong solutions: {nwrong}")
     print(f"\n{'trigger':9s} {'fired':>6s} {'on-wrong':>9s} {'on-correct':>11s} {'pass(after)':>12s} "
-          f"{'conf-wrong':>11s} {'conf-fixed':>11s}")
+          f"{'bs-caught':>10s} {'bs-fixed':>9s}")
     for kind, _, _ in TRIG:
         r = rows[kind]
         print(f"{kind:9s} {r['fired']:>6d} {r['fire_wrong']:>9d} {r['fire_correct']:>11d} "
-              f"{r['after_ok']/nn:>12.3f} {r['conf_wrong']:>11d} {r['conf_fixed']:>11d}")
-    print("\nread: all triggers matched at ~FPR on correct solutions. WIN CONDITION = fused (ours) "
-          "pass(after) > entropy (Halo) pass(after): geometry ADDS coverage of confident errors entropy "
-          "misses. Also watch fused on-wrong > entropy on-wrong (more errors caught at same FPR). Use a "
-          "STRONG actuator (--actuator compress); reconsider nets negative. Hard benchmark needed (low baseline).")
+              f"{r['after_ok']/nn:>12.3f} {r['bs_caught']:>10d} {r['bs_fixed']:>9d}")
+    print("\nread: WIN = fused pass(after) > entropy pass(after) (we beat Halo's trigger at matched FPR/actuator). "
+          "BLIND SPOT (the real claim, non-circular) = geom/fused 'bs-caught' (wrong solutions the entropy "
+          "trigger MISSED but ours fired on) and 'bs-fixed' (of those, repaired): entropy's bs-caught is ~0 "
+          "by construction; if geom/fused bs-caught > 0 with bs-fixed > 0, geometry fills a blind spot Halo "
+          "structurally cannot. Scale to MATH-500 full (--n 500); GSM8K is only the Tier-1 do-no-harm control.")
 
 
 if __name__ == "__main__":
