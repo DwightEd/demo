@@ -43,13 +43,26 @@ def resultant(H):
 
 
 def sent_spans(text):
-    """split into sentences -> list of (start_char, end_char). simple boundary on . ? ! newline."""
-    spans = []; start = 0
+    """fallback: split into sentences -> list of (start_char, end_char)."""
+    spans = []
     for m in re.finditer(r"[^.!?\n]*[.!?\n]+|\S[^.!?\n]*$", text):
         s, e = m.start(), m.end()
         if text[s:e].strip():
             spans.append((s, e))
     return spans or [(0, len(text))]
+
+
+def step_spans(text):
+    """STEP-granularity segmentation to MATCH the validation granularity (not sentences).
+    Prefer 'Step N:' markers; else blank-line paragraphs; else sentences."""
+    marks = [m.start() for m in re.finditer(r"(?im)^\s*step\s*\d+\s*[:.\)]", text)]
+    if len(marks) >= 2:
+        marks.append(len(text))
+        return [(marks[i], marks[i + 1]) for i in range(len(marks) - 1)]
+    paras = [m for m in re.finditer(r"\S[^\n]*(?:\n(?!\s*\n)[^\n]*)*", text)]
+    if len(paras) >= 2:
+        return [(p.start(), p.end()) for p in paras]
+    return sent_spans(text)
 
 
 def extract_boxed(text):
@@ -114,7 +127,8 @@ class Solver:
         self.steer_vec = None; self._hook = None
 
     def prompt(self, q):
-        msg = [{"role": "user", "content": q + "\nSolve step by step. End with \\boxed{answer}."}]
+        msg = [{"role": "user", "content": q + "\nSolve step by step. Begin EACH step with "
+                "'Step N:' (Step 1:, Step 2:, ...). End with the final answer in \\boxed{}."}]
         return self.tok.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
 
     @torch.no_grad()
@@ -139,7 +153,7 @@ class Solver:
         ent = (-(torch.softmax(logits, -1) * torch.log_softmax(logits, -1)).sum(-1)).cpu().numpy()
         base = len(prompt)
         res, en, sp = [], [], []
-        for (cs, ce) in sent_spans(solution):
+        for (cs, ce) in step_spans(solution):              # STEP granularity (matches validation)
             a, b = cs + base, ce + base
             tok_idx = [i for i, (o0, o1) in enumerate(offsets) if o0 >= a and o1 <= b and o1 > o0]
             if len(tok_idx) >= 2:
