@@ -52,27 +52,56 @@ def sent_spans(text):
     return spans or [(0, len(text))]
 
 
+def extract_boxed(text):
+    """content of the LAST \\boxed{...} with balanced braces."""
+    i = text.rfind("\\boxed")
+    if i < 0:
+        return None
+    j = text.find("{", i)
+    if j < 0:
+        return None
+    depth = 0
+    for k in range(j, len(text)):
+        if text[k] == "{":
+            depth += 1
+        elif text[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[j + 1:k]
+    return None
+
+
 def extract_answer(text):
-    """GSM8K-style: prefer \\boxed{}, then #### , then last number."""
-    m = re.search(r"\\boxed\{([^}]*)\}", text)
-    if m:
-        nums = re.findall(r"-?\d[\d,]*\.?\d*", m.group(1))
-        if nums:
-            return nums[-1].replace(",", "")
-    m = re.search(r"####\s*(-?\d[\d,]*\.?\d*)", text)
+    """answer from a generated SOLUTION: prefer \\boxed content, then ####, then last number."""
+    b = extract_boxed(text)
+    if b is not None:
+        return b.strip()
+    m = re.search(r"####\s*(-?[\d,]+\.?\d*)", text)
     if m:
         return m.group(1).replace(",", "")
     nums = re.findall(r"-?\d[\d,]*\.?\d*", text)
     return nums[-1].replace(",", "") if nums else None
 
 
+def _norm(s):
+    s = str(s).strip()
+    for a, b in [("\\left", ""), ("\\right", ""), (" ", ""), ("$", ""), ("\\!", ""), ("\\,", ""),
+                 ("\\dfrac", "\\frac"), ("\\tfrac", "\\frac"), ("\\\\", "\\"), ("{}", "")]:
+        s = s.replace(a, b)
+    return s.rstrip(".")
+
+
 def correct(pred, gold):
-    if pred is None:
+    """robust-ish MATH/GSM8K equality: normalized string match OR numeric match."""
+    if pred is None or gold is None:
         return False
+    p, g = _norm(pred), _norm(gold)
+    if p == g:
+        return True
     try:
-        return abs(float(pred) - float(gold)) < 1e-4
+        return abs(float(p) - float(g)) < 1e-4
     except ValueError:
-        return str(pred).strip() == str(gold).strip()
+        return False
 
 
 # ----------------------------- generation + signals -----------------------------
@@ -169,7 +198,7 @@ def main():
         probs = []
         for line in open(args.data_jsonl, encoding="utf-8"):
             d = json.loads(line); q = d.get("question") or d.get("problem")
-            probs.append((q, extract_answer(str(d["answer"]))))
+            probs.append((q, str(d["answer"]).strip()))      # gold answer AS-IS (already clean)
         probs = probs[:args.n]
     if probs is None:
         try:
