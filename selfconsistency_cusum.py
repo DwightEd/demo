@@ -56,16 +56,23 @@ def bucket(s, y, nt, nb=5):
     return num / den if den else float("nan")
 
 
-def causal_resid(y, a, sd_floor, clip=5.0, eps=1e-6):
-    """signed causal residuals (nan for t<2). std floored at sd_floor and residual winsorized
-    to +/-clip -- early steps estimate std from 2-3 points and a near-zero std blows the residual
-    up (the event-study SEs of 4-21 came from exactly this). returns s_run, s_ar."""
-    T = len(y); s_run = np.full(T, np.nan); s_ar = np.full(T, np.nan)
+def causal_resid(y, a, sd_floor, base_scale, clip=5.0, eps=1e-6):
+    """signed causal residuals (nan for t<2). returns s_run, s_ar, s_fix.
+
+    s_run/s_ar use an ADAPTIVE baseline (running mean up to t) -> any slow drift is absorbed
+    into the baseline, leaving only the error-step jump. s_fix uses a FIXED baseline (mean of
+    the first 2 steps, never updated) scaled by a fixed base_scale -> slow drift ACCUMULATES
+    and shows as a pre-error ramp if a precursor exists. Comparing the two event studies tests
+    whether 'precursor' is frame-dependent (visible vs a fixed baseline, absorbed by adaptive).
+    std floored / winsorized to kill the early-step near-zero-std explosion."""
+    T = len(y); s_run = np.full(T, np.nan); s_ar = np.full(T, np.nan); s_fix = np.full(T, np.nan)
+    base = y[:2].mean()                                    # fixed anchor = chain's first 2 steps
     for t in range(2, T):
         hist = y[:t]; mu = hist.mean(); sd = max(hist.std(), sd_floor) + eps
         s_run[t] = np.clip((y[t] - mu) / sd, -clip, clip)
         s_ar[t] = np.clip((y[t] - (mu + a * (y[t - 1] - mu))) / sd, -clip, clip)
-    return s_run, s_ar
+        s_fix[t] = np.clip((y[t] - base) / base_scale, -clip, clip)
+    return s_run, s_ar, s_fix
 
 
 def cusum(score, kref):
@@ -114,19 +121,20 @@ def main():
     # std floor = half the typical within-chain std (median over correct chains) -> stops the
     # early-step near-zero-std residual explosion that wrecked the event study.
     sd_floor = 0.5 * float(np.median([c["y"].std() for c in chains if c["correct"] and len(c["y"]) >= 2]))
+    base_scale = 2 * sd_floor                              # fixed scale for s_fix (~median chain std)
     print(f"file: {args.npz} | layer {args.layer} | chains {len(chains)} "
           f"(correct {sum(c['correct'] for c in chains)}) | global AR a={a:.3f} | sd_floor {sd_floor:.4f}")
 
     # per-step residuals + labels (+ causal feature vector for the within-chain ceiling probe)
     RUN, AR, RAW, Y, NT, G = [], [], [], [], [], []
     FEATC = []                                          # leak-free CAUSAL features (uses only y[:t], y[t])
-    EOFF, ESr, ESa = [], [], []                         # event study: signed s_run AND s_ar vs offset
+    EOFF, ESr, ESa, ESf = [], [], [], []                # event study: s_run, s_ar, s_fix vs offset
     for ci, c in enumerate(chains):
         y = c["y"]; k = c["k"]; correct = c["correct"]; T = len(y)
-        sr, sa = causal_resid(y, a, sd_floor)
+        sr, sa, sf = causal_resid(y, a, sd_floor, base_scale)
         for j in range(T):
             if not correct:
-                EOFF.append(j - k); ESr.append(sr[j]); ESa.append(sa[j])
+                EOFF.append(j - k); ESr.append(sr[j]); ESa.append(sa[j]); ESf.append(sf[j])
             if correct or j < k:
                 lab = 0
             elif j == k:
@@ -143,6 +151,7 @@ def main():
     Y = np.asarray(Y, int); NT = np.asarray(NT, float); G = np.asarray(G, int)
     FEATC = np.asarray(FEATC, float)
     EOFF = np.asarray(EOFF, int); ESr = np.asarray(ESr, float); ESa = np.asarray(ESa, float)
+    ESf = np.asarray(ESf, float)
 
     # within-chain causal CEILING: leak-free grouped logistic on causal features. tells whether
     # running-stat's ~0.68 is the within-chain limit or just a weak predictor (interpretable, no
@@ -166,21 +175,26 @@ def main():
                   ("-s_ar (causal AR)", -AR), ("causal probe (WITHIN ceiling)", ceil)]:
         print(f"  {nm:30s} {bdir(auroc(v, Y)):.3f} / {bucket(v, Y, NT):.3f}")
 
-    print(f"\n(b) event study: mean signed residual by offset from first error (Δ=0)")
-    print(f"  {'Δ=j-k':>6s} {'n':>5s} {'mean s_run':>11s} {'SE':>7s} {'mean s_ar':>11s}")
+    print(f"\n(b) event study: mean signed residual by offset (Δ=0) -- ADAPTIVE (s_run) vs FIXED (s_fix) baseline")
+    print(f"  {'Δ=j-k':>6s} {'n':>5s} {'s_run(adapt)':>13s} {'SE':>7s} {'s_fix(fixed)':>13s} {'SE':>7s}")
     for dd in range(-4, 4):
-        m = (EOFF == dd) & np.isfinite(ESr)
+        m = (EOFF == dd) & np.isfinite(ESr); mf = (EOFF == dd) & np.isfinite(ESf)
         if m.sum() >= 5:
             star = " <-- error" if dd == 0 else ""
-            ar_m = ESa[(EOFF == dd) & np.isfinite(ESa)].mean()
-            print(f"  {dd:>6d} {int(m.sum()):>5d} {ESr[m].mean():>+11.3f} {ESr[m].std()/np.sqrt(m.sum()):>7.3f} "
-                  f"{ar_m:>+11.3f}{star}")
-    for tag, ES in [("s_run", ESr), ("s_ar", ESa)]:
+            print(f"  {dd:>6d} {int(m.sum()):>5d} {ESr[m].mean():>+13.3f} {ESr[m].std()/np.sqrt(m.sum()):>7.3f} "
+                  f"{ESf[mf].mean():>+13.3f} {ESf[mf].std()/np.sqrt(max(mf.sum(),1)):>7.3f}{star}")
+    # synchronous dip (drop at 0 vs >=3 before) for each; precursor (already drifting at -1,-2 vs <=-4)
+    for tag, ES in [("s_run", ESr), ("s_ar", ESa), ("s_fix", ESf)]:
         pre = ES[(EOFF <= -3) & np.isfinite(ES)]; at0 = ES[(EOFF == 0) & np.isfinite(ES)]
         if len(pre) >= 5 and len(at0) >= 5:
             d = at0.mean() - pre.mean(); se = np.sqrt(at0.std()**2/len(at0) + pre.std()**2/len(pre))
             shape = "SYNCHRONOUS dip" if abs(d) - 2*se > 0 else "no clear sync dip"
             print(f"  drop {tag}(0)-{tag}(≤-3) = {d:+.3f} [{d-2*se:+.3f},{d+2*se:+.3f}] -> {shape}")
+    near = ESf[((EOFF == -1) | (EOFF == -2)) & np.isfinite(ESf)]; far = ESf[(EOFF <= -4) & np.isfinite(ESf)]
+    if len(near) >= 5 and len(far) >= 5:
+        d = near.mean() - far.mean(); se = np.sqrt(near.std()**2/len(near) + far.std()**2/len(far))
+        pc = "PRECURSOR drift (fixed baseline)" if abs(d) - 2*se > 0 else "no precursor"
+        print(f"  s_fix precursor: s_fix(-1,-2)-s_fix(≤-4) = {d:+.3f} [{d-2*se:+.3f},{d+2*se:+.3f}] -> {pc}")
 
     # detectors (conformal threshold from held-out CORRECT chains): CUSUM (for sustained shifts)
     # vs MAX single-step -s_run (matched to a transient dip). The event study says the break is
@@ -195,11 +209,11 @@ def main():
             continue
         statc, stats = [], []
         for t in cal:
-            sr, _ = causal_resid(chains[t]["y"], a, sd_floor)
+            sr, _, _ = causal_resid(chains[t]["y"], a, sd_floor, base_scale)
             statc.append(cusum(-sr, args.kref).max()); stats.append(np.nanmax(-sr))
         hc = np.quantile(statc, 1 - args.alpha); hs = np.quantile(stats, 1 - args.alpha)
         for t in te:
-            c = chains[t]; sr, _ = causal_resid(c["y"], a, sd_floor); W = cusum(-sr, args.kref)
+            c = chains[t]; sr, _, _ = causal_resid(c["y"], a, sd_floor, base_scale); W = cusum(-sr, args.kref)
             ms = -sr.copy(); ms[~np.isfinite(ms)] = -np.inf
             fc = W.max() >= hc; fs = np.nanmax(-sr) >= hs
             if c["correct"]:
