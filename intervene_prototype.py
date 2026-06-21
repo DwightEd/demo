@@ -268,32 +268,39 @@ def main():
             print(f"  [{qi+1}/{len(probs)}] baseline pass {np.mean([it['ok'] for it in items]):.3f}")
     nbase = float(np.mean([it["ok"] for it in items])) if items else 0.0
 
-    # ---- conformal calibration: threshold on CORRECT solutions to fire at ~FPR (precision-first) ----
+    # ---- z-standardize each signal on CORRECT solutions; fused = max(z_geom, z_entropy) ----
     cor = [it for it in items if it["ok"]]
+    def zp(sk):
+        v = np.array([it[sk] for it in cor]) if cor else np.array([0.0]); return float(v.mean()), float(v.std() + 1e-9)
+    mg, sg = zp("gs"); me, se = zp("es")
+    for it in items:
+        it["zg"] = (it["gs"] - mg) / sg; it["ze"] = (it["es"] - me) / se
+        it["zc"] = max(it["zg"], it["ze"]); it["ci"] = it["gi"] if it["zg"] >= it["ze"] else it["ei"]
     thr = {}
-    for kind, sk in [("geom", "gs"), ("entropy", "es")]:
-        vals = np.array([it[sk] for it in cor]) if cor else np.array([np.inf])
-        thr[kind] = float(np.quantile(vals, 1 - args.fpr)) if len(vals) else np.inf
+    for kind, zk in [("entropy", "ze"), ("geom", "zg"), ("fused", "zc")]:
+        v = np.array([it[zk] for it in cor]) if cor else np.array([np.inf])
+        thr[kind] = float(np.quantile(v, 1 - args.fpr))
 
-    # ---- pass 2: intervene only where anomaly > calibrated threshold ----
+    # ---- pass 2: 3 triggers (entropy=Halo, geom, fused=ours), SAME actuator, matched FPR ----
+    TRIG = [("entropy", "ze", "ei"), ("geom", "zg", "gi"), ("fused", "zc", "ci")]
     rows = {k: dict(fired=0, fire_wrong=0, fire_correct=0, after_ok=0, conf_wrong=0, conf_fixed=0)
-            for k in ["geom", "entropy"]}
+            for k, _, _ in TRIG}
     nn = max(len(items), 1)
     for it in items:
-        for kind, sk, ik in [("geom", "gs", "gi"), ("entropy", "es", "ei")]:
+        for kind, zk, ik in TRIG:
             r = rows[kind]; r["conf_wrong"] += int((not it["ok"]) and it["conf"])
-            if not (it[sk] > thr[kind] and it[ik] is not None):
+            if not (it[zk] > thr[kind] and it[ik] is not None):
                 r["after_ok"] += int(it["ok"]); continue                   # no fire -> keep baseline
             r["fired"] += 1; r["fire_wrong"] += int(not it["ok"]); r["fire_correct"] += int(it["ok"])
             cut = it["sp"][it[ik]][0]; stem = it["prompt"] + it["sol"][:cut]
-            if args.actuator == "compress":                 # Halo-style: compress verified + reset
+            if args.actuator == "compress":
                 regen = S.compress_reset(it["q"], it["sol"][:cut], args.temp)
                 aok = correct(extract_answer(regen), it["gold"])
             elif args.actuator == "steer":
                 S.set_steer(np.ones(S.model.config.hidden_size), args.alpha)
                 new = S.generate(stem, temp=args.temp); S.clear_steer()
                 aok = correct(extract_answer(it["sol"][:cut] + new), it["gold"])
-            else:                                            # reconsider (weak; semantic feedback)
+            else:
                 new = S.generate(stem + "\nWait, let me re-check this step carefully.\n", temp=max(args.temp, 0.9))
                 aok = correct(extract_answer(it["sol"][:cut] + new), it["gold"])
             r["after_ok"] += int(aok)
@@ -301,18 +308,17 @@ def main():
                 r["conf_fixed"] += 1
 
     print(f"\nmodel {args.model} | layer {args.layer} | N {len(items)} | actuator {args.actuator} | FPR {args.fpr}")
-    print(f"baseline pass-rate: {nbase:.3f}")
+    print(f"baseline pass-rate: {nbase:.3f}   (entropy = Halo's trigger; fused = ours)")
     print(f"\n{'trigger':9s} {'fired':>6s} {'on-wrong':>9s} {'on-correct':>11s} {'pass(after)':>12s} "
           f"{'conf-wrong':>11s} {'conf-fixed':>11s}")
-    for kind in ["geom", "entropy"]:
+    for kind, _, _ in TRIG:
         r = rows[kind]
         print(f"{kind:9s} {r['fired']:>6d} {r['fire_wrong']:>9d} {r['fire_correct']:>11d} "
               f"{r['after_ok']/nn:>12.3f} {r['conf_wrong']:>11d} {r['conf_fixed']:>11d}")
-    print("\nread: threshold conformal-calibrated on CORRECT solutions to fire at ~FPR, so 'on-correct' "
-          "stays small. PRECISION = on-wrong/fired -> a good trigger fires mostly on wrong solutions. "
-          "pass(after) > baseline = intervention nets positive. conf-fixed = confident hallucinations "
-          "repaired (headline). USE A HARD benchmark (low baseline) so there are errors to fix -- GSM8K "
-          "(~0.75) breaks more corrects than it fixes. Compare geom vs entropy at the same FPR.")
+    print("\nread: all triggers matched at ~FPR on correct solutions. WIN CONDITION = fused (ours) "
+          "pass(after) > entropy (Halo) pass(after): geometry ADDS coverage of confident errors entropy "
+          "misses. Also watch fused on-wrong > entropy on-wrong (more errors caught at same FPR). Use a "
+          "STRONG actuator (--actuator compress); reconsider nets negative. Hard benchmark needed (low baseline).")
 
 
 if __name__ == "__main__":
