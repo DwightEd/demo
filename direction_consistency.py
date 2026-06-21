@@ -210,22 +210,33 @@ def main():
     print(f"baseline resultant({rtag}) AUROC {bdir(auroc(res,Y)):.3f}  bucket {bucket(res,Y,NT):.3f}  "
           f"| position AUROC {bdir(auroc(POS,Y)):.3f}  | corr(res,res_jl) {cc:+.2f}")
 
+    # baselines: [res,pos] and the STRICT [res,pos,log n_tok] -- dir_D/dir_lam2 are rank-bounded
+    # by n_tok, so an increment that survives the length control is real directional structure;
+    # one that vanishes was just length resultant didn't fully absorb.
+    logNT = np.log(np.maximum(NT, 1.0))
     base = np.c_[res, POS]; sa = oof_logit(base, Y, G, args.folds)
-    print(f"\n{'signal':10s} {'AUROC':>7s} {'bucket':>7s} {'resid⊥res':>10s} {'Δ[+res,pos]':>12s} {'95% CI':>18s}")
+    base_len = np.c_[res, POS, logNT]; sa_len = oof_logit(base_len, Y, G, args.folds)
+    print(f"\n{'signal':9s} {'AUROC':>6s} {'bucket':>6s} {'resid⊥res':>9s} | "
+          f"{'Δ[+res,pos]':>11s} {'CI':>16s} | {'Δ[+res,pos,len]':>15s} {'CI':>16s}")
     for nm in ["coh_prev", "coh_run", "dir_lam2", "dir_D"]:
         sig = feats[nm]
         a = bdir(auroc(sig, Y)); bk = bucket(sig, Y, NT)
         rsd = residualize_on(sig, res, correct_step, G, args.folds); ar = bdir(auroc(rsd, Y))
         sb = oof_logit(np.c_[res, POS, sig], Y, G, args.folds)
         d0, lo, hi = boot_delta(sa, sb, Y, G, n=args.boot)
-        flag = " *" if lo > 0 else ""
-        print(f"{nm:10s} {a:7.3f} {bk:7.3f} {ar:10.3f} {d0:+12.3f} {f'[{lo:+.3f},{hi:+.3f}]':>18s}{flag}")
+        sb2 = oof_logit(np.c_[res, POS, logNT, sig], Y, G, args.folds)
+        d1, lo1, hi1 = boot_delta(sa_len, sb2, Y, G, n=args.boot)
+        f0 = "*" if lo > 0 else " "; f1 = "*" if lo1 > 0 else " "
+        print(f"{nm:9s} {a:6.3f} {bk:6.3f} {ar:9.3f} | {d0:+11.3f} {f'[{lo:+.3f},{hi:+.3f}]':>16s}{f0} | "
+              f"{d1:+15.3f} {f'[{lo1:+.3f},{hi1:+.3f}]':>16s}{f1}")
 
     print("\nread: resid⊥res = AUROC after regressing the signal on resultant (cross-fit on "
-          "correct) -> survives if > ~0.55. Δ[+res,pos] = logistic increment over [resultant + "
-          "position] with chain-paired bootstrap CI; '*' = CI clears 0 = a NEW directional axis. "
-          "Else it collapses into resultant (honest negative). anchor_q (cos to question) needs "
-          "qvec -> re-extract with --store_step_vectors to test the most promising cell.")
+          "correct), survives if > ~0.55. Δ[+res,pos] = increment over resultant+position; "
+          "Δ[+res,pos,len] ALSO controls log n_tok -- the decisive one, since dir_D/dir_lam2 are "
+          "rank-bounded by length. '*' = chain-paired bootstrap CI clears 0. A signal is a REAL "
+          "new directional axis only if the LENGTH-controlled increment still clears 0; if it "
+          "passes [+res,pos] but dies under [+res,pos,len], it was length. anchor_q (cos to "
+          "question) needs qvec -> re-extract with --store_step_vectors.")
 
 
 if __name__ == "__main__":
