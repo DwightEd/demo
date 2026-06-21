@@ -82,6 +82,7 @@ def boot_ci(s, y, n=1000, seed=0):
 FEAT_NAMES = ["res_mean", "res_std", "res_min", "res_max", "res_first", "res_last", "res_slope",
               "res_q10", "res_q25", "res_q50", "res_q75", "res_q90",
               "srun_min", "srun_mean", "srun_fracdip", "cusum_max",
+              "cum_drop", "cum_drop_norm", "net_drift", "frac_down",
               "n_steps", "log_tot_tok", "ud_mean", "ud_max"]
 
 
@@ -92,6 +93,10 @@ def chain_features(y, sr, ud, nt):
     srf = sr[np.isfinite(sr)]
     f += ([srf.min(), srf.mean(), float((srf < -1).mean())] if len(srf) else [0.0, 0.0, 0.0])
     f += [cusum_max(-sr)]
+    # cumulative step-to-step diffusion (drop = resultant fell vs previous step)
+    d = np.diff(y)
+    cum_drop = float(np.sum(np.maximum(0.0, -d)))
+    f += [cum_drop, cum_drop / max(len(d), 1), float(y[0] - y[-1]), float((d < 0).mean()) if len(d) else 0.0]
     f += [float(len(y)), float(np.log(max(nt.sum(), 1)))]
     f += ([np.nanmean(ud), np.nanmax(ud)] if (ud is not None and np.isfinite(ud).any()) else [0.0, 0.0])
     return f
@@ -197,10 +202,13 @@ def main():
 
     li_ = FEAT_NAMES.index("n_steps"); lt_ = FEAT_NAMES.index("log_tot_tok")
     rm_ = FEAT_NAMES.index("res_min"); sd_ = FEAT_NAMES.index("srun_min")
+    cd_ = FEAT_NAMES.index("cum_drop_norm"); nd_ = FEAT_NAMES.index("net_drift")
     print(f"\n{'predictor':34s} {'AUROC':>7s} {'95% CI':>17s}")
     for nm, col in [("length only (n_steps,log_tok)", [li_, lt_]),
                     ("res_min only (worst step)", [rm_]),
-                    ("srun_min only (deepest dip)", [sd_])]:
+                    ("srun_min only (deepest dip)", [sd_]),
+                    ("cum_drop_norm (total diffusion)", [cd_]),
+                    ("net_drift (first-last)", [nd_])]:
         s = oof(lg, X[:, col], Y, G, args.folds)
         a, lo, hi = boot_ci(s, Y)
         print(f"  {nm:32s} {a:7.3f} {f'[{lo:.3f},{hi:.3f}]':>17s}")
