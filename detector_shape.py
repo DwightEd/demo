@@ -1,15 +1,19 @@
-"""Does the centered-covariance spectral SHAPE (PR/top1) add to the FULL detector (geometry+entropy),
-not just over resultant alone? Joins respcloud (_cloud.npz -> shape) with tok_U_D (_coh.npz -> our
-entropy battery) for the SAME responses, and compares OURS vs OURS+shape.
+"""Rigorous ceiling probe: does centered-covariance spectral SHAPE (PR/top1) add a REAL increment
+after controlling for EDIS (is PR an entropy-dynamics shadow?) and step length (is PR just token
+count?). Joins respcloud (_cloud.npz shape) with tok_U_D (_coh.npz entropy/EDIS) for the same
+responses.
 
-Motivated by spectral_shape.py: on the HARD config (omnimath) error steps disperse ISOTROPICALLY
-(high PR on the centered unit-vector covariance) -> shape gives +0.055 over resultant. Here we check
-the net increment on top of the full OURS detector (pooled_norm + our uncertainty battery), per config.
+Two controls that the earlier spectral_shape.py +0.055 did NOT do:
+  (1) EDIS in the baseline -- PR measures isotropic dispersion, which may overlap entropy instability.
+      The decisive test is the increment of shape over [resultant + EDIS], not over resultant alone.
+  (2) step length in the baseline -- PR = (Sum l)^2/Sum l^2 is scale-invariant but NOT dimension-
+      invariant; PR ~ 25-33 tracks token count. Put NT in the baseline (and report PR/n) so the
+      increment is length-clean.
 
-Pass BOTH files for one config: --cloud pb_X_cloud.npz --coh pb_X_coh.npz. Alignment is by response
-index; gold_error_step is verified to match between files (responses skipped on mismatch).
+Reports |corr| of PR with resultant / EDIS / length (the shadow diagnostics) and a ladder of
+increment tests: shape over {resultant} / {resultant+EDIS} / {resultant+EDIS+len} / OURS / OURS+EDIS+len.
 
-Needs: _cloud.npz (respcloud + cloud_store_layers) and _coh.npz (stepgeom norm + tok_U_D), same run.
+Pass BOTH files for one config: --cloud pb_X_cloud.npz --coh pb_X_coh.npz.
 """
 
 from __future__ import annotations
@@ -43,18 +47,25 @@ def bdir(a):
     return max(a, 1 - a) if np.isfinite(a) else a
 
 
-def bucket(s, y, nt, nb=5):
-    m = np.isfinite(s) & np.isfinite(nt); s, y, nt = s[m], y[m], nt[m]
-    if len(s) < 10:
+def abscorr(a, b):
+    m = np.isfinite(a) & np.isfinite(b)
+    if m.sum() < 5 or a[m].std() < 1e-12 or b[m].std() < 1e-12:
         return float("nan")
-    e = np.quantile(nt, np.linspace(0, 1, nb + 1)); e[-1] += 1
-    b = np.clip(np.digitize(nt, e[1:-1]), 0, nb - 1)
-    num = den = 0.0
-    for bb in range(nb):
-        mm = b == bb; a = bdir(auroc(s[mm], y[mm])); ne, ng = int(y[mm].sum()), int((y[mm] == 0).sum())
-        if np.isfinite(a) and ne and ng:
-            num += a * ne * ng; den += ne * ng
-    return num / den if den else float("nan")
+    return abs(float(np.corrcoef(a[m], b[m])[0, 1]))
+
+
+def edis(H, w=8, tb=1.36, tr=1.33):
+    H = np.asarray(H, float); H = H[np.isfinite(H)]
+    if len(H) < 3:
+        return 0.0
+    ww = min(w, max(2, len(H) // 2))
+    burst = sum(1 for t in range(len(H) - ww) if H[t + ww] - H[t] > tb) if len(H) > ww else 0
+    rebound = 0; rmin = H[0]
+    for t in range(1, len(H)):
+        if H[t] - rmin > tr:
+            rebound += 1
+        rmin = min(rmin, H[t])
+    return 0.5 * (burst + rebound) * (1.0 + float(H.var()))
 
 
 def unc_feats(e):
@@ -75,17 +86,17 @@ def shape_feats(H):
     if tot <= 1e-12:
         return None
     PR = float(tot * tot / (np.square(lam).sum() + 1e-18)); top1 = float(lam[0] / tot)
-    return PR, top1
+    return PR, PR / n, top1                                        # PR, PR/n (length-normalized), top1
 
 
-def oof(X, y, grp, folds=5):
-    s = np.full(len(y), np.nan)
+def oof(cols, y, grp, folds=5):
+    X = np.column_stack(cols); s = np.full(len(y), np.nan)
     for tr, te in GroupKFold(folds).split(X, y, grp):
         if len(np.unique(y[tr])) < 2:
             continue
         clf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000, class_weight="balanced"))
         clf.fit(X[tr], y[tr]); s[te] = clf.predict_proba(X[te])[:, 1]
-    return s
+    return bdir(auroc(s, y))
 
 
 def main():
@@ -104,11 +115,9 @@ def main():
     SC = zh["stepcloud"]; SG = zh["stepgeom"] if "stepgeom" in zh.files else None
     SRh = zh["step_token_ranges"]; gesh = zh["gold_error_step"].astype(int)
     UD = zh["tok_U_D"]; fi = cn.index("resultant"); ngi = gn.index("norm") if "norm" in gn else None
-    if len(RC) != len(SC):
-        print(f"[warn] response count differs: cloud {len(RC)} vs coh {len(SC)}")
     nmatch = min(len(RC), len(SC))
 
-    GEO, UNC, PR, T1, Y, NT, G = [], [], [], [], [], [], []
+    GEO, RES, PR, PRN, T1, EDS, LEN, UNC, Y, G = [], [], [], [], [], [], [], [], [], []
     skip = 0
     for i in range(nmatch):
         if RC[i] is None or int(gesc[i]) != int(gesh[i]):
@@ -116,10 +125,10 @@ def main():
         rcl = np.asarray(RC[i], np.float32)[:, cli, :]
         sc = np.asarray(SC[i], float); sg = np.asarray(SG[i], float) if SG is not None else None
         rng = np.asarray(SRh[i], int); rngc = np.asarray(SRc[i], int)
-        k = int(gesh[i]); correct = (k < 0); T = rng.shape[0]; a0 = int(rng[0, 0]); a0c = int(rngc[0, 0])
-        ud = np.asarray(UD[i], float)
         if rng.shape[0] != rngc.shape[0]:
             skip += 1; continue
+        k = int(gesh[i]); correct = (k < 0); T = rng.shape[0]; a0 = int(rng[0, 0]); a0c = int(rngc[0, 0])
+        ud = np.asarray(UD[i], float)
         for j in range(T):
             if correct or j < k:
                 lab = 0
@@ -135,27 +144,37 @@ def main():
             if sf is None:
                 continue
             geo = sg[j, li, ngi] if (sg is not None and ngi is not None) else sc[j, li, fi]
-            GEO.append(geo); UNC.append(unc_feats(ud[lo:hi])); PR.append(sf[0]); T1.append(sf[1])
-            Y.append(lab); NT.append(int(rng[j, 1] - rng[j, 0] + 1)); G.append(i)
-    GEO = np.asarray(GEO); UNC = np.asarray(UNC, float); PR = np.asarray(PR); T1 = np.asarray(T1)
-    Y = np.asarray(Y, int); NT = np.asarray(NT, float); G = np.asarray(G, int)
+            GEO.append(geo); RES.append(sc[j, li, fi]); PR.append(sf[0]); PRN.append(sf[1]); T1.append(sf[2])
+            EDS.append(edis(ud[lo:hi])); LEN.append(float(hi - lo)); UNC.append(unc_feats(ud[lo:hi]))
+            Y.append(lab); G.append(i)
+    GEO = np.asarray(GEO); RES = np.asarray(RES); PR = np.asarray(PR); PRN = np.asarray(PRN)
+    T1 = np.asarray(T1); EDS = np.asarray(EDS); LEN = np.asarray(LEN); UNC = np.asarray(UNC, float)
+    Y = np.asarray(Y, int); G = np.asarray(G, int)
+    gR, gG = -RES, -GEO; shape = [PR, T1]; ucols = [UNC[:, c] for c in range(UNC.shape[1])]
 
-    print(f"cloud={args.cloud} coh={args.coh} | layer {args.layer} | matched steps {len(Y)} "
-          f"first-error {int(Y.sum())} | skipped responses {skip}")
-    ours = oof(np.c_[-GEO, UNC], Y, G)
-    ours_shape = oof(np.c_[-GEO, UNC, PR, T1], Y, G)
-    geo_only = oof((-GEO).reshape(-1, 1), Y, G)
-    geo_shape = oof(np.c_[-GEO, PR, T1], Y, G)
-    print(f"\n{'method':30s} {'AUROC':>7s} {'bucket':>7s}")
-    for nm, v in [("geometry (pooled-norm)", geo_only), ("geometry + shape", geo_shape),
-                  ("OURS (geom + our entropy)", ours), ("OURS + shape", ours_shape)]:
-        print(f"  {nm:30s} {bdir(auroc(v, Y)):7.3f} {bucket(v, Y, NT):7.3f}")
-    print(f"\n  geo+shape - geo = {bdir(auroc(geo_shape, Y)) - bdir(auroc(geo_only, Y)):+.3f}   "
-          f"OURS+shape - OURS = {bdir(auroc(ours_shape, Y)) - bdir(auroc(ours, Y)):+.3f}")
-    print("\nread: the decisive number is OURS+shape - OURS. If > 0 (esp. on the hard config), the centered-"
-          "covariance spectral shape adds a real increment ON TOP OF the full geometry+entropy detector -- a "
-          "second within-step geometric axis (isotropy of the dispersion) that fires where total concentration "
-          "saturates. If ~0, shape is already covered by geometry+entropy jointly. Run gsm8k and omnimath.")
+    print(f"cloud={args.cloud} | matched steps {len(Y)} first-error {int(Y.sum())} | skipped {skip}")
+    print(f"\nshadow diagnostics |corr|:  PR-resultant {abscorr(PR, RES):.3f}  PR-EDIS {abscorr(PR, EDS):.3f}  "
+          f"PR-length {abscorr(PR, LEN):.3f}   PR/n-length {abscorr(PRN, LEN):.3f}  PR/n-EDIS {abscorr(PRN, EDS):.3f}")
+    print(f"\n{'baseline -> + shape(PR,top1)':44s} {'base':>6s} {'+shape':>7s} {'delta':>7s}")
+    ladder = [
+        ("resultant", [gR]),
+        ("resultant + EDIS", [gR, EDS]),
+        ("resultant + EDIS + length", [gR, EDS, LEN]),
+        ("OURS (geom + entropy battery)", [gG] + ucols),
+        ("OURS + EDIS + length", [gG] + ucols + [EDS, LEN]),
+    ]
+    for nm, base in ladder:
+        b = oof(base, Y, G); bs = oof(base + shape, Y, G)
+        print(f"  {nm:44s} {b:6.3f} {bs:7.3f} {bs - b:+7.3f}")
+    # length-normalized shape variant (PR/n) over the strongest controlled baseline
+    strong = [gG] + ucols + [EDS, LEN]
+    print(f"\n  PR/n (length-normalized) over OURS+EDIS+len: "
+          f"{oof(strong, Y, G):.3f} -> {oof(strong + [PRN, T1], Y, G):.3f}")
+    print("\nread: DECISIVE = delta of shape over 'resultant + EDIS + length' and over 'OURS + EDIS + length'. "
+          "If > 0 there, PR carries error signal that is NEITHER an EDIS shadow NOR token count -- a real "
+          "second geometric axis. Check the shadow |corr|: high PR-EDIS or PR-length would warn; if PR/n "
+          "(length-normalized) keeps the increment, length is excluded directly. If delta collapses to ~0 once "
+          "EDIS+length are in the baseline, the earlier +0.055 was EDIS/length leakage, not shape.")
 
 
 if __name__ == "__main__":
