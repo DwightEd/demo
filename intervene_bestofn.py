@@ -152,14 +152,39 @@ def first_fire(score, thr):
     return int(idx[0]) if len(idx) else None
 
 
-def reroute(S, q, prefix, n, temp):
-    """best-of-N from the truncation: sample N high-temp continuations, majority-vote the answer."""
+def act_bestofn(S, q, prefix, args):
+    """best-of-N from the truncation: sample N high-temp continuations, majority-vote (weakest actuator)."""
     answers = []
-    for _ in range(n):
-        cont = S.generate(S.prompt(q) + prefix, temp=temp)
+    for _ in range(args.bestof):
+        cont = S.generate(S.prompt(q) + prefix, temp=args.reroute_temp)
         answers.append(extract_answer(prefix + "\n" + cont))
     votes = Counter(_norm(a) for a in answers if a is not None)
     return votes.most_common(1)[0][0] if votes else None
+
+
+def act_repath(S, q, prefix, args):
+    """REPATH: truncate, high-temp regenerate with an explicit DIFFERENT-METHOD instruction -- a
+    corrective push (not just resampling), aimed at escaping a confident-wrong attractor."""
+    stem = S.prompt(q) + prefix + ("\n\nThe step above is likely a mistake. Discard it and solve this "
+                                   "part again from here using a DIFFERENT method or approach.\n")
+    cont = S.generate(stem, temp=args.reroute_temp)
+    return extract_answer(prefix + "\n" + cont)
+
+
+def act_compress(S, q, prefix, args):
+    """COMPRESS+RESET (Halo-style context surgery): summarize ONLY the verified-correct progress so
+    far, discard the rest, regenerate from [question + verified summary]."""
+    cmsg = [{"role": "user", "content":
+             f"Problem: {q}\n\nReasoning so far (may contain mistakes):\n{prefix}\n\nList ONLY the "
+             "conclusions that are correct and verified, as short bullets. Discard wrong/uncertain steps."}]
+    summary = S.generate(S.tok.apply_chat_template(cmsg, tokenize=False, add_generation_prompt=True),
+                         max_new=200, temp=0.0)
+    np2 = S.prompt(q + f"\n\nVerified progress so far:\n{summary}\n\nContinue ONLY from the verified "
+                   "progress; do not repeat earlier mistakes.")
+    return extract_answer(S.generate(np2, temp=args.temp))
+
+
+ACTUATORS = {"bestofn": act_bestofn, "repath": act_repath, "compress": act_compress}
 
 
 def main():
@@ -172,6 +197,7 @@ def main():
     ap.add_argument("--temp", type=float, default=0.7)
     ap.add_argument("--reroute_temp", type=float, default=1.0)
     ap.add_argument("--bestof", type=int, default=5, help="N continuations at a trigger")
+    ap.add_argument("--actuators", default="bestofn,repath,compress", help="comma list: bestofn,repath,compress")
     ap.add_argument("--fpr", type=float, default=0.15, help="precision-first chain-FPR on correct calib chains")
     args = ap.parse_args()
 
@@ -206,10 +232,13 @@ def main():
     print(f"calib: {len(cal)} chains ({len(cor)} correct) | thr_halo {thr_halo:.2f} thr_ours {thr_ours:.2f} "
           f"| matched chain-FPR target {args.fpr}")
 
-    # ---- TEST: baseline + Halo-reroute + OURS-reroute + budget-matched self-consistency ----
-    acc = {"baseline": 0, "Halo": 0, "OURS": 0, "self-cons": 0}
-    fire = {"Halo": 0, "OURS": 0}; broke = {"Halo": 0, "OURS": 0}; fixed = {"Halo": 0, "OURS": 0}
-    sel = []                                                    # (ours_score, halo_score, base_ok) for risk-coverage
+    # ---- TEST: each TRIGGER (Halo/OURS) x each ACTUATOR (bestofn/repath/compress) ----
+    acts = [a.strip() for a in args.actuators.split(",") if a.strip()]
+    trigs = ["Halo", "OURS"]
+    acc = {"baseline": 0, "self-cons": 0}
+    pa = {(t, a): 0 for t in trigs for a in acts}              # pass@1 per (trigger, actuator)
+    fixed = {(t, a): 0 for t in trigs for a in acts}; broke = {(t, a): 0 for t in trigs for a in acts}
+    fire = {t: 0 for t in trigs}; sel = []
     n = 0
     for qi, (q, gold) in enumerate(test):
         pr = S.prompt(q); sol = S.generate(pr, temp=args.temp)
@@ -217,38 +246,43 @@ def main():
         if len(pn) < 2:
             continue
         n += 1
-        base_ans = extract_answer(sol); base_ok = correct(base_ans, gold)
-        acc["baseline"] += int(base_ok)
+        base_ans = extract_answer(sol); base_ok = correct(base_ans, gold); acc["baseline"] += int(base_ok)
         gz, ez = chain_scores(pn, en, mu_g, sd_g, mu_e, sd_e)
         sel.append((float(np.nanmax(np.maximum(gz, ez))), float(np.nanmax(ez)), int(base_ok)))
-        triggers = {"Halo": first_fire(ez, thr_halo),
-                    "OURS": first_fire(np.maximum(gz, ez), thr_ours)}
-        for m, fj in triggers.items():
-            if fj is None or fj >= len(sp):
-                acc[m] += int(base_ok); continue                # no trigger -> keep baseline answer
-            fire[m] += 1
-            cut = sp[fj][0]; ans = reroute(S, q, sol[:cut], args.bestof, args.reroute_temp)
-            ok = correct(ans, gold); acc[m] += int(ok)
-            if base_ok and not ok:
-                broke[m] += 1                                   # broke a correct chain (precision cost)
-            if (not base_ok) and ok:
-                fixed[m] += 1                                   # fixed a wrong chain
-        # budget-matched self-consistency: spend bestof extra samples at the END, majority vote with base
+        fj = {"Halo": first_fire(ez, thr_halo), "OURS": first_fire(np.maximum(gz, ez), thr_ours)}
+        for t in trigs:
+            j = fj[t]
+            if j is None or j >= len(sp):
+                for a in acts:
+                    pa[(t, a)] += int(base_ok)                 # no trigger -> keep baseline
+                continue
+            if t == "OURS":
+                fire["OURS"] += 1
+            elif t == "Halo":
+                fire["Halo"] += 1
+            prefix = sol[:sp[j][0]]
+            for a in acts:
+                ans = ACTUATORS[a](S, q, prefix, args); ok = correct(ans, gold); pa[(t, a)] += int(ok)
+                if base_ok and not ok:
+                    broke[(t, a)] += 1
+                if (not base_ok) and ok:
+                    fixed[(t, a)] += 1
         extra = [extract_answer(S.generate(pr, temp=args.temp)) for _ in range(args.bestof)]
         votes = Counter(_norm(a) for a in ([base_ans] + extra) if a is not None)
         acc["self-cons"] += int(correct(votes.most_common(1)[0][0], gold) if votes else False)
         if (qi + 1) % 20 == 0:
-            print(f"  [{qi+1}] n={n} base {acc['baseline']/n:.3f} Halo {acc['Halo']/n:.3f} "
-                  f"OURS {acc['OURS']/n:.3f}")
+            print(f"  [{qi+1}] n={n} base {acc['baseline']/n:.3f}")
 
-    print(f"\nmodel {args.model} | test {n} | bestof {args.bestof} | reroute_temp {args.reroute_temp} | fpr {args.fpr}")
-    print(f"\n{'method':14s} {'pass@1':>7s}")
-    for m in ["baseline", "self-cons", "Halo", "OURS"]:
-        print(f"  {m:14s} {acc[m]/max(n,1):7.3f}")
-    print(f"\ntriggers (test): Halo {fire['Halo']}  OURS {fire['OURS']}   "
-          f"(OURS-extra = confident errors Halo's entropy trigger missed)")
-    print(f"fixed wrong:     Halo {fixed['Halo']}  OURS {fixed['OURS']}")
-    print(f"broke correct:   Halo {broke['Halo']}  OURS {broke['OURS']}  (precision cost; precision-first keeps low)")
+    nn = max(n, 1)
+    print(f"\nmodel {args.model} | test {n} | actuators {acts} | bestof {args.bestof} | reroute_temp "
+          f"{args.reroute_temp} | fpr {args.fpr}")
+    print(f"\npass@1:  baseline {acc['baseline']/nn:.3f}   self-cons {acc['self-cons']/nn:.3f}")
+    print(f"triggers fired: Halo {fire['Halo']}  OURS {fire['OURS']}  (OURS-extra = confident errors Halo misses)")
+    print(f"\n{'trigger x actuator':24s} {'pass@1':>7s} {'fixed':>6s} {'broke':>6s} {'net':>5s}")
+    for t in trigs:
+        for a in acts:
+            f, b = fixed[(t, a)], broke[(t, a)]
+            print(f"  {t+' x '+a:24s} {pa[(t,a)]/nn:7.3f} {f:6d} {b:6d} {f-b:+5d}")
     # ---- SELECTIVE PREDICTION / risk-coverage (no reroute -- detection edge -> abstention utility) ----
     # answer the chains the detector ranks LEAST suspicious; abstain on the rest. higher accuracy on the
     # answered set = the detector that better ranks wrong (incl. confident errors) to the abstain pile.
@@ -261,12 +295,14 @@ def main():
         k = max(1, int(round(cov * len(ok))))
         ao = float(ok[order_o[:k]].mean()); ah = float(ok[order_h[:k]].mean())
         print(f"  {cov:<9.1f} {ao:7.3f} {ah:7.3f} {'(same as Halo)':>13s}")
-    print("\nread: TWO intervention reads. (1) best-of-N REROUTE (above): OURS ~ Halo because resampling cannot "
-          "fix CONFIDENT errors -- the model re-generates the same wrong answer (a known wall: detection is "
-          "diagnostic, not causal). (2) SELECTIVE PREDICTION (here): the geometric trigger ABSTAINS on the "
-          "confident errors Halo misses, so OURS answered-set accuracy > Halo at low coverage -- the detection "
-          "edge converts to UTILITY without needing to fix. This is the defensible downstream: abstain/escalate "
-          "the dangerous confident errors, don't try to repair them.")
+    print("\nread: (A) FIX -- the trigger x actuator table. Compare actuators: bestofn (resampling, weakest), "
+          "repath (different-method corrective push), compress (Halo-style context surgery). For each, does "
+          "OURS-trigger net (fixed-broke) beat Halo-trigger? If a stronger actuator (repath/compress) converts "
+          "OURS's extra confident-error triggers into fixes, the FIX story works. If ALL actuators give OURS~Halo "
+          "(confident errors un-fixable, per Hidden Error Awareness), fall back to (B). (B) ABSTAIN -- the "
+          "selective-prediction table: OURS answered-set accuracy > Halo at low coverage = the detection edge "
+          "converts to utility by abstaining on confident errors, no fix needed. Report whichever the data "
+          "supports; both are legitimate downstreams in the literature (Halo/self-correct fix; Zhao/TokUR abstain).")
 
 
 if __name__ == "__main__":
