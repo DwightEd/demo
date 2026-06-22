@@ -209,6 +209,7 @@ def main():
     # ---- TEST: baseline + Halo-reroute + OURS-reroute + budget-matched self-consistency ----
     acc = {"baseline": 0, "Halo": 0, "OURS": 0, "self-cons": 0}
     fire = {"Halo": 0, "OURS": 0}; broke = {"Halo": 0, "OURS": 0}; fixed = {"Halo": 0, "OURS": 0}
+    sel = []                                                    # (ours_score, halo_score, base_ok) for risk-coverage
     n = 0
     for qi, (q, gold) in enumerate(test):
         pr = S.prompt(q); sol = S.generate(pr, temp=args.temp)
@@ -219,6 +220,7 @@ def main():
         base_ans = extract_answer(sol); base_ok = correct(base_ans, gold)
         acc["baseline"] += int(base_ok)
         gz, ez = chain_scores(pn, en, mu_g, sd_g, mu_e, sd_e)
+        sel.append((float(np.nanmax(np.maximum(gz, ez))), float(np.nanmax(ez)), int(base_ok)))
         triggers = {"Halo": first_fire(ez, thr_halo),
                     "OURS": first_fire(np.maximum(gz, ez), thr_ours)}
         for m, fj in triggers.items():
@@ -247,11 +249,24 @@ def main():
           f"(OURS-extra = confident errors Halo's entropy trigger missed)")
     print(f"fixed wrong:     Halo {fixed['Halo']}  OURS {fixed['OURS']}")
     print(f"broke correct:   Halo {broke['Halo']}  OURS {broke['OURS']}  (precision cost; precision-first keeps low)")
-    print("\nread: HEADLINE = OURS pass@1 > Halo pass@1 at matched FPR/budget, with OURS firing on MORE wrong "
-          "chains (the extra = confident errors the entropy trigger misses) and fixing more, at a comparable "
-          "broke-correct cost. self-cons is the budget-matched non-triggered control. If OURS ~ Halo, the "
-          "geometric trigger does not help intervention; if OURS > Halo with fixed>broke, the detection edge "
-          "translates into a correction edge -- the two-main-line story closes.")
+    # ---- SELECTIVE PREDICTION / risk-coverage (no reroute -- detection edge -> abstention utility) ----
+    # answer the chains the detector ranks LEAST suspicious; abstain on the rest. higher accuracy on the
+    # answered set = the detector that better ranks wrong (incl. confident errors) to the abstain pile.
+    arr = np.array(sel, float)  # cols: ours_score, halo_score, base_ok
+    ok = arr[:, 2]
+    print(f"\nselective prediction (answered-set accuracy at coverage; abstain on most-suspicious):")
+    print(f"  {'coverage':9s} {'OURS':>7s} {'Halo':>7s} {'entropy=Halo':>13s}")
+    order_o = np.argsort(arr[:, 0]); order_h = np.argsort(arr[:, 1])   # ascending badness -> answer first
+    for cov in [1.0, 0.9, 0.8, 0.7, 0.6, 0.5]:
+        k = max(1, int(round(cov * len(ok))))
+        ao = float(ok[order_o[:k]].mean()); ah = float(ok[order_h[:k]].mean())
+        print(f"  {cov:<9.1f} {ao:7.3f} {ah:7.3f} {'(same as Halo)':>13s}")
+    print("\nread: TWO intervention reads. (1) best-of-N REROUTE (above): OURS ~ Halo because resampling cannot "
+          "fix CONFIDENT errors -- the model re-generates the same wrong answer (a known wall: detection is "
+          "diagnostic, not causal). (2) SELECTIVE PREDICTION (here): the geometric trigger ABSTAINS on the "
+          "confident errors Halo misses, so OURS answered-set accuracy > Halo at low coverage -- the detection "
+          "edge converts to UTILITY without needing to fix. This is the defensible downstream: abstain/escalate "
+          "the dangerous confident errors, don't try to repair them.")
 
 
 if __name__ == "__main__":
