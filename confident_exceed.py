@@ -75,13 +75,18 @@ def main():
 
     z = np.load(args.npz, allow_pickle=True)
     cn = [str(x) for x in z["cloud_feature_names"]]
+    gn = [str(x) for x in z["geom_feature_names"]] if "geom_feature_names" in z.files else []
     lyu = [int(x) for x in z["layers_used"]]; li = lyu.index(args.layer)
     SC, SR = z["stepcloud"], z["step_token_ranges"]; ges = z["gold_error_step"].astype(int)
+    SG = z["stepgeom"] if "stepgeom" in z.files else None
     UD = z["tok_U_D"]; fi = cn.index("resultant")
+    mti = cn.index("mean_tok_norm") if "mean_tok_norm" in cn else None      # pure magnitude
+    ngi = gn.index("norm") if "norm" in gn else None                        # pooled model-length
 
-    RES, UDV, EDS, Y, NT = [], [], [], [], []
+    RES, POOL, MAG, UDV, EDS, Y, NT = [], [], [], [], [], [], []
     for i in range(len(SC)):
         sc = np.asarray(SC[i], float); rng = np.asarray(SR[i], int); k = int(ges[i])
+        sg = np.asarray(SG[i], float) if SG is not None else None
         correct = (k < 0); T = rng.shape[0]; a0 = int(rng[0, 0]); ud = np.asarray(UD[i], float)
         for j in range(T):
             if correct or j < k:
@@ -94,36 +99,48 @@ def main():
             if hi - lo < 2:
                 continue
             uds = ud[lo:hi]
-            RES.append(sc[j, li, fi]); UDV.append(float(np.nanmean(uds))); EDS.append(edis(uds))
+            RES.append(sc[j, li, fi])
+            POOL.append(sg[j, li, ngi] if (sg is not None and ngi is not None) else np.nan)  # pooled norm
+            MAG.append(sc[j, li, mti] if mti is not None else np.nan)                          # mean tok norm
+            UDV.append(float(np.nanmean(uds))); EDS.append(edis(uds))
             Y.append(lab); NT.append(int(rng[j, 1] - rng[j, 0] + 1))
-    RES = np.asarray(RES); UDV = np.asarray(UDV); EDS = np.asarray(EDS)
-    Y = np.asarray(Y, int); NT = np.asarray(NT, float)
+    RES = np.asarray(RES); POOL = np.asarray(POOL); MAG = np.asarray(MAG)
+    UDV = np.asarray(UDV); EDS = np.asarray(EDS); Y = np.asarray(Y, int); NT = np.asarray(NT, float)
     keep = np.isfinite(RES) & np.isfinite(UDV)
-    RES, UDV, EDS, Y, NT = RES[keep], UDV[keep], EDS[keep], Y[keep], NT[keep]
+    RES, POOL, MAG, UDV, EDS, Y, NT = RES[keep], POOL[keep], MAG[keep], UDV[keep], EDS[keep], Y[keep], NT[keep]
 
     print(f"file: {args.npz} | layer {args.layer} | steps {len(Y)} | first-error {int(Y.sum())}")
-    print(f"overall AUROC:  geometry {bdir(auroc(-RES, Y)):.3f}  entropy {bdir(auroc(UDV, Y)):.3f}  "
+    print(f"overall AUROC:  dir(resultant) {bdir(auroc(-RES, Y)):.3f}  pooled-norm {bdir(auroc(-POOL, Y)):.3f}  "
+          f"mag(mean_tok_norm) {bdir(auroc(-MAG, Y)):.3f}  entropy {bdir(auroc(UDV, Y)):.3f}  "
           f"EDIS {bdir(auroc(EDS, Y)):.3f}")
 
     q = np.quantile(UDV, [1 / 3, 2 / 3]); strat = np.digitize(UDV, q)
     names = ["LOW entropy (CONFIDENT)", "MID entropy", "HIGH entropy (uncertain)"]
-    print(f"\n{'confidence stratum':26s} {'n':>6s} {'err':>5s} {'geom':>7s} {'(bkt)':>7s} "
+    print(f"\n{'confidence stratum':26s} {'n':>6s} {'err':>5s} {'dir':>6s} {'pool':>6s} {'mag':>6s} "
           f"{'entropy':>8s} {'EDIS':>7s}")
     for s in range(3):
         m = strat == s; ne = int(Y[m].sum())
-        ag = bdir(auroc(-RES[m], Y[m])); bk = bucket(-RES[m], Y[m], NT[m])
+        ad = bdir(auroc(-RES[m], Y[m])); ap = bdir(auroc(-POOL[m], Y[m])); am = bdir(auroc(-MAG[m], Y[m]))
         au = bdir(auroc(UDV[m], Y[m])); ae = bdir(auroc(EDS[m], Y[m]))
-        print(f"  {names[s]:26s} {int(m.sum()):>6d} {ne:>5d} {ag:>7.3f} {bk:>7.3f} {au:>8.3f} {ae:>7.3f}")
+        print(f"  {names[s]:26s} {int(m.sum()):>6d} {ne:>5d} {ad:>6.3f} {ap:>6.3f} {am:>6.3f} "
+              f"{au:>8.3f} {ae:>7.3f}")
+    # length-clean check for the best geometry in the confident stratum
+    cf = strat == 0
+    print(f"\nCONFIDENT-stratum length-bucket:  dir {bucket(-RES[cf], Y[cf], NT[cf]):.3f}  "
+          f"pooled-norm {bucket(-POOL[cf], Y[cf], NT[cf]):.3f}  mag {bucket(-MAG[cf], Y[cf], NT[cf]):.3f}")
 
     conf = strat == 0
     share = int(Y[conf].sum()) / max(int(Y.sum()), 1)
     print(f"\nDANGER SHARE: {100*share:.0f}% of ALL first-errors live in the CONFIDENT stratum "
           f"(low-entropy, entropy-family blind).")
-    print("read: HEADLINE FIGURE. In 'LOW entropy (CONFIDENT)', geometry stays ~0.72 while BOTH entropy and "
-          "EDIS collapse toward 0.5 -- the entropy family (static AND dynamic) is structurally blind to "
-          "confident hallucinations, and geometry is the only signal that detects them. This is the scoped "
-          "EXCEED: not 'beats EDIS on average' (it does not), but 'uniquely covers the most dangerous, "
-          "entropy-invisible failure mode'. The danger share quantifies how much of the error mass this is.")
+    print("read: HEADLINE FIGURE. In 'LOW entropy (CONFIDENT)', the GEOMETRY family (dir/pool/mag) stays high "
+          "while BOTH entropy and EDIS collapse toward 0.5 -- the entropy family (static AND dynamic) is "
+          "structurally blind to confident hallucinations. dir=pure direction (resultant), pool=POOLED "
+          "MODEL-LENGTH ||sum w*h|| (direction x magnitude, the original 'norm drops at the error' signal), "
+          "mag=mean token norm (pure magnitude). Pick whichever geometry wins in the confident stratum AND "
+          "survives the length bucket -- if pooled-norm > dir, magnitude carries extra signal and we should "
+          "NOT strip it. This is the scoped EXCEED: geometry uniquely covers the most dangerous, "
+          "entropy-invisible failure mode; danger share = how much error mass lives there.")
 
 
 if __name__ == "__main__":
