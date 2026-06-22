@@ -164,14 +164,15 @@ def main():
                   ("GIS = 1/2(d+m)(1+v)", GIS), ("GIS product d(1+m)(1+v)", GISp),
                   ("GIS x step-EDIS", GISe)]:
         print(f"  {nm:28s} {bdir(auroc(v, Y)):7.3f} {bucket(v, Y, NT):7.3f}")
-    print("\nread: GIS is MULTIPLICATIVE (EDIS-form), not a logistic stack -- each geometric component keeps "
-          "its own rank-CDF discriminative range and they multiply, so the score fires on the CONJUNCTION "
-          "(diffuse AND multimodal AND dispersed = the multi-peak directional collapse of a reasoning error). "
-          "WIN = GIS > step-EDIS on the hard configs (omnimath/olympiad) where single resultant and the "
-          "logistic ensemble both lost -- the multimodality term is what resultant is blind to. GISxEDIS is "
-          "the organic fusion ceiling. Check the multimodality component's standalone AUROC + bucket: if it "
-          "is length-confounded (cloud_D), pooled rises but bucket does not -- then we need the directional "
-          "eigenvalue spread from the raw token cloud (respcloud) instead of a step-summary proxy.")
+    print("\nRESULT (observed, 4 configs): GIS does NOT exceed step-EDIS. The multimodality proxy cloud_D is "
+          "length-confounded (standalone pooled ~0.72 but bucket ~0.59) -- multiplying it in raises pooled "
+          "cosmetically while bucket stalls, and step-EDIS's within-step entropy DYNAMICS beats every geometry "
+          "variant on the length-controlled bucket (0.66-0.69 vs 0.58-0.60 on omnimath/olympiad). Honest "
+          "conclusion: at step-level DETECTION AUROC, static geometry summaries cannot beat entropy dynamics; "
+          "GISxEDIS ~ EDIS (geometry barely complements). A length-clean multimodality would need the raw "
+          "direction eigenvalue spread (respcloud), but the within-step entropy trajectory is simply the "
+          "stronger localizer here. Detection is not where geometry wins; pivot to downstream (online "
+          "intervention / confident-error blind spot) -- see step_demo.py.")
 
 
 if __name__ == "__main__":
