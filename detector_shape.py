@@ -170,6 +170,17 @@ def main():
     strong = [gG] + ucols + [EDS, LEN]
     print(f"\n  PR/n (length-normalized) over OURS+EDIS+len: "
           f"{oof(strong, Y, G):.3f} -> {oof(strong + [PRN, T1], Y, G):.3f}")
+
+    # HEADLINE SELF-CHECK: does the GEOMETRY modality (pooled-norm) survive the SAME strict baseline
+    # that just killed shape? (the shape lesson: an increment over a weak baseline can be leakage)
+    print(f"\n  --- headline check: GEOMETRY (pooled-norm) under strict baselines ---")
+    print(f"  {'baseline -> + geometry':44s} {'base':>6s} {'+geo':>7s} {'delta':>7s}")
+    for nm, base in [("entropy battery (no geom)", ucols),
+                     ("entropy battery + EDIS", ucols + [EDS]),
+                     ("entropy battery + EDIS + length", ucols + [EDS, LEN])]:
+        b = oof(base, Y, G); bg = oof(base + [gG], Y, G)
+        print(f"  {nm:44s} {b:6.3f} {bg:7.3f} {bg - b:+7.3f}")
+    print(f"  |corr| geom-EDIS {abscorr(GEO, EDS):.3f}  geom-length {abscorr(GEO, LEN):.3f}")
     print("\nread: DECISIVE = delta of shape over 'resultant + EDIS + length' and over 'OURS + EDIS + length'. "
           "If > 0 there, PR carries error signal that is NEITHER an EDIS shadow NOR token count -- a real "
           "second geometric axis. Check the shadow |corr|: high PR-EDIS or PR-length would warn; if PR/n "
