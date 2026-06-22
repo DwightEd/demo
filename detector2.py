@@ -52,6 +52,13 @@ def bdir(a):
     return max(a, 1 - a) if np.isfinite(a) else a
 
 
+def abscorr(a, b):
+    a = np.asarray(a, float); b = np.asarray(b, float); m = np.isfinite(a) & np.isfinite(b)
+    if m.sum() < 5 or a[m].std() < 1e-12 or b[m].std() < 1e-12:
+        return float("nan")
+    return abs(float(np.corrcoef(a[m], b[m])[0, 1]))
+
+
 def bucket(s, y, nt, nb=5):
     m = np.isfinite(s) & np.isfinite(nt); s, y, nt = s[m], y[m], nt[m]
     if len(s) < 10:
@@ -158,6 +165,15 @@ def main():
         print(f"  {nm:32s} {a:7.3f} {bucket(v, Y, NT):7.3f}")
     print(f"\n  OURS - EDIS = {res['OURS (geom + our entropy)'] - res['EDIS (SOTA baseline)']:+.3f}   "
           f"OURS-unc - EDIS = {res['OURS-unc (our entropy, no EDIS)'] - res['EDIS (SOTA baseline)']:+.3f}")
+
+    # HEADLINE ROBUSTNESS: does geometry survive the STRICT [our entropy + EDIS + length] baseline?
+    # (the spectral-shape lesson: an increment over a weak baseline can be EDIS/length leakage.)
+    ucols = [UNC[:, c] for c in range(UNC.shape[1])]; gbad = -POOL
+    base = oof(np.column_stack(ucols + [EDS, NT]), Y, G)
+    base_geo = oof(np.column_stack(ucols + [EDS, NT, gbad]), Y, G)
+    ab, ag = bdir(auroc(base, Y)), bdir(auroc(base_geo, Y))
+    print(f"  STRICT check: geometry over [our-entropy + EDIS + length]  {ab:.3f} -> {ag:.3f}  ({ag - ab:+.3f})"
+          f"   |corr| geom-EDIS {abscorr(gbad, EDS):.3f}  geom-length {abscorr(gbad, NT):.3f}")
     print("\nread: GOAL = OURS (geometry + our own entropy-dynamics, ZERO EDIS inside) beats the EDIS baseline "
           "on every config. Two clean wins to watch: (1) OURS-unc - EDIS >= 0 means even our own entropy "
           "formulation matches/beats the hand-crafted EDIS (entropy has many forms); (2) OURS - EDIS > 0 with "
