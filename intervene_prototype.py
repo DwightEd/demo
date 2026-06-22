@@ -153,6 +153,7 @@ class Solver:
         ent = (-(torch.softmax(logits, -1) * torch.log_softmax(logits, -1)).sum(-1)).cpu().numpy()
         base = len(prompt)
         res, en, sp, vecs = [], [], [], []
+        ent_tok = np.array([ent[i] for i, (o0, o1) in enumerate(offsets) if o0 >= base and o1 > o0])  # per-token (EDIS)
         for (cs, ce) in step_spans(solution):              # STEP granularity (matches validation)
             a, b = cs + base, ce + base
             tok_idx = [i for i, (o0, o1) in enumerate(offsets) if o0 >= a and o1 <= b and o1 > o0]
@@ -164,7 +165,7 @@ class Solver:
                     p = (w[:, None] * u).sum(0); vecs.append(p / (np.linalg.norm(p) + 1e-9))
                 else:
                     vecs.append(np.zeros(H.shape[1], np.float32))
-        return np.array(res), np.array(en), sp, vecs
+        return np.array(res), np.array(en), sp, vecs, ent_tok
 
     @torch.no_grad()
     def compress_reset(self, q, partial, temp):
@@ -265,7 +266,7 @@ def main():
     for qi, (q, gold) in enumerate(probs):
         prompt = S.prompt(q); sol = S.generate(prompt, temp=args.temp)
         ok = correct(extract_answer(sol), gold)
-        res, en, sp, vecs = S.signals(prompt, sol)
+        res, en, sp, vecs, _ = S.signals(prompt, sol)
         if len(res) < 3:
             continue
         items.append(dict(q=q, prompt=prompt, sol=sol, gold=gold, ok=ok, sp=sp, vecs=vecs,

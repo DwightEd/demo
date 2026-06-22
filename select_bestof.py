@@ -26,6 +26,22 @@ from collections import Counter
 from intervene_prototype import Solver, extract_answer, correct
 
 
+def edis(H, w=8, tb=1.36, tr=1.33):
+    """Entropy Dynamics Instability Score (Zhu et al. 2026): burst spikes (cumulative entropy growth
+    over window w) + peak-valley rebounds (rise above running min), times (1+variance). Higher =
+    less stable = worse. Computed on the per-TOKEN entropy trajectory. THE strong entropy baseline."""
+    H = np.asarray(H, float)
+    if len(H) < 3:
+        return 0.0
+    burst = sum(1 for t in range(len(H) - w) if H[t + w] - H[t] > tb) if len(H) > w else 0
+    rebound = 0; rmin = H[0]
+    for t in range(1, len(H)):
+        if H[t] - rmin > tr:
+            rebound += 1
+        rmin = min(rmin, H[t])
+    return 0.5 * (burst + rebound) * (1.0 + float(H.var()))
+
+
 def pick(chains, badness_key, drop_frac):
     """drop the worst drop_frac of chains by badness_key, majority-vote the rest. returns answer."""
     valid = [c for c in chains if c["ans"] is not None]
@@ -68,27 +84,28 @@ def main():
         for _ in range(args.samples):
             sol = S.generate(prompt, temp=args.temp)
             ans = extract_answer(sol)
-            res, en, sp, vecs = S.signals(prompt, sol)
-            ent_bad = float(np.nanmax(en)) if len(en) and np.isfinite(en).any() else 0.0
-            geom_bad = (1.0 - float(np.nanmin(res))) if len(res) and np.isfinite(res).any() else 0.0
-            zb = None                              # filled after standardization
-            chains.append(dict(ans=ans, ok=correct(ans, gold), ent_bad=ent_bad, geom_bad=geom_bad))
+            res, en, sp, vecs, ent_tok = S.signals(prompt, sol)
+            ent_bad = float(np.nanmean(en)) if len(en) and np.isfinite(en).any() else 0.0  # sequence entropy
+            edis_bad = edis(ent_tok)                                                        # EDIS (entropy dynamics)
+            geom_bad = (1.0 - float(np.nanmin(res))) if len(res) and np.isfinite(res).any() else 0.0  # ours
+            chains.append(dict(ans=ans, ok=correct(ans, gold), ent_bad=ent_bad, edis_bad=edis_bad, geom_bad=geom_bad))
         per_prob.append((_key(gold), chains))
         if (qi + 1) % 10 == 0:
             print(f"  [{qi+1}/{len(probs)}] sampled")
 
-    # standardize ent_bad/geom_bad across ALL chains for the fused score
+    # standardize each badness across ALL chains; fused = geometry on top of the STRONGEST entropy (EDIS)
     allc = [c for _, ch in per_prob for c in ch]
     def z(arrkey):
         v = np.array([c[arrkey] for c in allc]); m, s = v.mean(), v.std() + 1e-9
         for c in allc:
             c["z_" + arrkey] = (c[arrkey] - m) / s
-    z("ent_bad"); z("geom_bad")
+    z("ent_bad"); z("edis_bad"); z("geom_bad")
     for c in allc:
-        c["fused_bad"] = max(c["z_ent_bad"], c["z_geom_bad"])
+        c["fused_eg"] = max(c["z_edis_bad"], c["z_geom_bad"])   # EDIS + geometry (the headline fusion)
 
-    methods = [("self-consistency", None), ("confidence (DeepConf)", "ent_bad"),
-               ("geometry (ours)", "geom_bad"), ("fused", "fused_bad")]
+    methods = [("self-consistency", None), ("sequence-entropy", "ent_bad"),
+               ("EDIS (dynamics)", "edis_bad"), ("geometry (ours)", "geom_bad"),
+               ("EDIS+geometry (ours)", "fused_eg")]
     acc = {nm: 0 for nm, _ in methods}; oracle = 0
     for gold, chains in per_prob:
         if any(c["ok"] for c in chains):
@@ -105,19 +122,21 @@ def main():
     for nm, _ in methods:
         print(f"  {nm:22s} {acc[nm]/npb:>8.3f}")
 
-    # blind-spot diagnostic: of WRONG chains that confidence TRUSTS (low ent_bad), does geometry flag?
+    # blind-spot diagnostic: of WRONG chains that EDIS (the strong entropy-dynamics method) ranks STABLE
+    # (low EDIS -> it would KEEP them), does geometry flag them? = EDIS's structural blind spot.
     wrong = [c for c in allc if not c["ok"]]
     if wrong:
-        et = np.median([c["ent_bad"] for c in allc]); gt = np.median([c["geom_bad"] for c in allc])
-        conf_wrong = [c for c in wrong if c["ent_bad"] <= et]          # wrong but low-entropy (confident)
-        geo_flag = [c for c in conf_wrong if c["geom_bad"] > gt]       # geometry flags them
-        print(f"\nblind-spot: confident-wrong chains (wrong & low entropy) = {len(conf_wrong)}/{len(wrong)}; "
-              f"geometry flags {len(geo_flag)}/{max(len(conf_wrong),1)} = {len(geo_flag)/max(len(conf_wrong),1):.2f}")
-    print("\nread: HEADLINE = geometry (ours) pass@1 > confidence (DeepConf) pass@1, because geometry vetoes "
-          "the confident-wrong chains confidence keeps. fused should be >= both. self-consistency is the no-"
-          "selection baseline; oracle is the ceiling. The blind-spot line shows geometry catching confident-"
-          "wrong chains the entropy/confidence selector trusts -- the mechanism of the win. Sweep --drop / "
-          "--samples; scale --n.")
+        et = np.median([c["edis_bad"] for c in allc]); gt = np.median([c["geom_bad"] for c in allc])
+        edis_blind = [c for c in wrong if c["edis_bad"] <= et]          # wrong but EDIS-stable (no instability)
+        geo_flag = [c for c in edis_blind if c["geom_bad"] > gt]        # geometry flags them
+        print(f"\nblind-spot vs EDIS: wrong chains EDIS ranks stable (no entropy instability) = "
+              f"{len(edis_blind)}/{len(wrong)}; geometry flags {len(geo_flag)}/{max(len(edis_blind),1)} = "
+              f"{len(geo_flag)/max(len(edis_blind),1):.2f}")
+    print("\nread: EDIS (dynamics) is the SOTA entropy selector -- the real baseline (not sequence-entropy). "
+          "HEADLINE = EDIS+geometry (ours) > EDIS alone: geometry adds an ORTHOGONAL increment on EDIS's blind "
+          "spot -- SUSTAINED-confident errors (low EDIS, no entropy instability) that geometric collapse still "
+          "catches. geometry alone likely < EDIS (EDIS is strong); the win is the fusion. oracle = ceiling. "
+          "Sweep --drop/--samples; scale --n.")
 
 
 if __name__ == "__main__":
