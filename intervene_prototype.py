@@ -197,20 +197,22 @@ class Solver:
             self._hook.remove(); self._hook = None
 
 
-def sol_score(res, en, kind):
-    """per-solution anomaly = max over sentences of the within-solution z-deviation, with the
-    argmax sentence index. geom: -R (concentration drop); entropy: entropy spike. Higher = more
-    suspicious. Returns (score, idx) or (-inf, None) if too short."""
-    if len(res) < 3:
-        return -np.inf, None
-    s = -res if kind == "geom" else en
-    best, bi = -np.inf, None
+def step_resid(res, en, kind):
+    """per-STEP causal within-chain residual sequence (nan for t<2). geom = -R (concentration
+    drop), entropy = entropy spike; higher = more suspicious. This is the ONLINE step-level signal
+    (matches Halo's per-step granularity and exploits geometry's instantaneous dip), vs a chain-
+    level max which would drown the spike."""
+    s = (-np.asarray(res, float)) if kind == "geom" else np.asarray(en, float)
+    out = np.full(len(s), np.nan)
     for t in range(2, len(s)):
-        hist = s[:t]; mu, sd = hist.mean(), hist.std() + 1e-6
-        a = (s[t] - mu) / sd
-        if a > best:
-            best, bi = a, t
-    return best, bi
+        h = s[:t]; out[t] = (s[t] - h.mean()) / (h.std() + 1e-6)
+    return out
+
+
+def first_cross(r, thr):
+    """first step index whose residual crosses the threshold (online trigger), else None."""
+    idx = np.where(r > thr)[0]
+    return int(idx[0]) if len(idx) else None
 
 
 def main():
@@ -266,74 +268,73 @@ def main():
         res, en, sp, vecs = S.signals(prompt, sol)
         if len(res) < 3:
             continue
-        gs, gi = sol_score(res, en, "geom"); es, ei = sol_score(res, en, "entropy")
         items.append(dict(q=q, prompt=prompt, sol=sol, gold=gold, ok=ok, sp=sp, vecs=vecs,
-                          gs=gs, gi=gi, es=es, ei=ei))
+                          res=np.asarray(res, float), en=np.asarray(en, float)))
         if (qi + 1) % 5 == 0:
             print(f"  [{qi+1}/{len(probs)}] baseline pass {np.mean([it['ok'] for it in items]):.3f}")
     nbase = float(np.mean([it["ok"] for it in items])) if items else 0.0
 
-    # ---- z-standardize each signal on CORRECT solutions; fused = max(z_geom, z_entropy) ----
-    cor = [it for it in items if it["ok"]]
-    def zp(sk):
-        v = np.array([it[sk] for it in cor]) if cor else np.array([0.0]); return float(v.mean()), float(v.std() + 1e-9)
-    mg, sg = zp("gs"); me, se = zp("es")
+    # ---- ONLINE step-level trigger: per-step residual, conformal threshold from correct chains ----
     for it in items:
-        it["zg"] = (it["gs"] - mg) / sg; it["ze"] = (it["es"] - me) / se
-        it["zc"] = max(it["zg"], it["ze"]); it["ci"] = it["gi"] if it["zg"] >= it["ze"] else it["ei"]
-    thr = {}
-    for kind, zk in [("entropy", "ze"), ("geom", "zg"), ("fused", "zc")]:
-        v = np.array([it[zk] for it in cor]) if cor else np.array([np.inf])
-        thr[kind] = float(np.quantile(v, 1 - args.fpr))
+        it["rg"] = step_resid(it["res"], it["en"], "geom"); it["re_"] = step_resid(it["res"], it["en"], "entropy")
+        it["mg"] = float(np.nanmax(it["rg"])) if np.isfinite(it["rg"]).any() else -np.inf
+        it["me"] = float(np.nanmax(it["re_"])) if np.isfinite(it["re_"]).any() else -np.inf
+    cor = [it for it in items if it["ok"]]
+    thr_g = float(np.quantile([it["mg"] for it in cor], 1 - args.fpr)) if cor else np.inf
+    thr_e = float(np.quantile([it["me"] for it in cor], 1 - args.fpr)) if cor else np.inf
+    for it in items:
+        it["fg"] = first_cross(it["rg"], thr_g); it["fe"] = first_cross(it["re_"], thr_e)
 
-    def intervene(it, ik):
-        """apply the chosen actuator at trigger step it[ik]; return final-answer-correct bool."""
-        cut = it["sp"][it[ik]][0]; stem = it["prompt"] + it["sol"][:cut]
-        if args.actuator == "compress":
-            regen = S.compress_reset(it["q"], it["sol"][:cut], args.temp)
-            return correct(extract_answer(regen), it["gold"])
-        if args.actuator == "steer":                       # mechanism-derived re-anchor (NOT np.ones)
-            ti = it[ik]; pre = [it["vecs"][j] for j in range(ti) if np.linalg.norm(it["vecs"][j]) > 0]
+    def fix_at(it, step_idx, actuator):
+        """intervene at a given step index with a given actuator; return final-correct bool."""
+        if step_idx is None:
+            return it["ok"]
+        cut = it["sp"][step_idx][0]; stem = it["prompt"] + it["sol"][:cut]
+        if actuator == "compress":
+            return correct(extract_answer(S.compress_reset(it["q"], it["sol"][:cut], args.temp)), it["gold"])
+        if actuator == "steer":
+            pre = [it["vecs"][j] for j in range(step_idx) if np.linalg.norm(it["vecs"][j]) > 0]
             if not pre:
                 return it["ok"]
-            S.set_steer(np.mean(pre, 0), args.alpha)        # push residual toward healthy-step mean direction
-            new = S.generate(stem, temp=args.temp); S.clear_steer()
+            S.set_steer(np.mean(pre, 0), args.alpha); new = S.generate(stem, temp=args.temp); S.clear_steer()
             return correct(extract_answer(it["sol"][:cut] + new), it["gold"])
-        new = S.generate(stem + "\nWait, let me re-check this step carefully.\n", temp=max(args.temp, 0.9))
-        return correct(extract_answer(it["sol"][:cut] + new), it["gold"])
+        return it["ok"]
 
-    # ---- pass 2: 3 triggers (entropy=Halo, geom, fused=ours), SAME actuator, matched FPR ----
-    # blind spot defined NON-circularly by entropy's actual non-firing (not a mean-entropy proxy):
-    # bs_caught = wrong solutions this trigger fires on that the ENTROPY trigger MISSED; bs_fixed = of those, repaired.
-    TRIG = [("entropy", "ze", "ei"), ("geom", "zg", "gi"), ("fused", "zc", "ci")]
-    rows = {k: dict(fired=0, fire_wrong=0, fire_correct=0, after_ok=0, bs_caught=0, bs_fixed=0)
-            for k, _, _ in TRIG}
-    nn = max(len(items), 1)
-    for it in items:
-        ent_miss = it["ze"] <= thr["entropy"]              # entropy trigger does NOT fire here
-        for kind, zk, ik in TRIG:
-            r = rows[kind]
-            if not (it[zk] > thr[kind] and it[ik] is not None):
-                r["after_ok"] += int(it["ok"]); continue   # no fire -> keep baseline
-            r["fired"] += 1; r["fire_wrong"] += int(not it["ok"]); r["fire_correct"] += int(it["ok"])
-            aok = intervene(it, ik); r["after_ok"] += int(aok)
-            if (not it["ok"]) and ent_miss:                # BLIND SPOT: wrong + entropy missed it
-                r["bs_caught"] += 1; r["bs_fixed"] += int(aok)
+    # ---- quadrants on WRONG solutions (online step-level firing) ----
+    wrong = [it for it in items if not it["ok"]]
+    both = [it for it in wrong if it["fe"] is not None and it["fg"] is not None]
+    eonly = [it for it in wrong if it["fe"] is not None and it["fg"] is None]
+    gonly = [it for it in wrong if it["fe"] is None and it["fg"] is not None]   # BLIND SPOT
+    neither = [it for it in wrong if it["fe"] is None and it["fg"] is None]
+    nc = max(len(cor), 1)
+    fpr_g = sum(it["fg"] is not None for it in cor) / nc
+    fpr_e = sum(it["fe"] is not None for it in cor) / nc
 
-    nwrong = sum(1 for it in items if not it["ok"])
-    print(f"\nmodel {args.model} | layer {args.layer} | N {len(items)} | actuator {args.actuator} | FPR {args.fpr}")
-    print(f"baseline pass-rate: {nbase:.3f}   (entropy = Halo trigger; fused = ours)   wrong solutions: {nwrong}")
-    print(f"\n{'trigger':9s} {'fired':>6s} {'on-wrong':>9s} {'on-correct':>11s} {'pass(after)':>12s} "
-          f"{'bs-caught':>10s} {'bs-fixed':>9s}")
-    for kind, _, _ in TRIG:
-        r = rows[kind]
-        print(f"{kind:9s} {r['fired']:>6d} {r['fire_wrong']:>9d} {r['fire_correct']:>11d} "
-              f"{r['after_ok']/nn:>12.3f} {r['bs_caught']:>10d} {r['bs_fixed']:>9d}")
-    print("\nread: WIN = fused pass(after) > entropy pass(after) (we beat Halo's trigger at matched FPR/actuator). "
-          "BLIND SPOT (the real claim, non-circular) = geom/fused 'bs-caught' (wrong solutions the entropy "
-          "trigger MISSED but ours fired on) and 'bs-fixed' (of those, repaired): entropy's bs-caught is ~0 "
-          "by construction; if geom/fused bs-caught > 0 with bs-fixed > 0, geometry fills a blind spot Halo "
-          "structurally cannot. Scale to MATH-500 full (--n 500); GSM8K is only the Tier-1 do-no-harm control.")
+    print(f"\nmodel {args.model} | layer {args.layer} | N {len(items)} | online step-level | "
+          f"alpha {args.alpha} | baseline {nbase:.3f}")
+    print(f"empirical FPR (fires on correct): entropy {fpr_e:.3f}  geom {fpr_g:.3f}   wrong solutions: {len(wrong)}")
+    print(f"\nWRONG-solution quadrants (who fires):")
+    print(f"  both fire            {len(both):>4d}")
+    print(f"  entropy-only         {len(eonly):>4d}")
+    print(f"  GEOM-ONLY (blindspot){len(gonly):>4d}   <- errors entropy STRUCTURALLY misses, geometry catches")
+    print(f"  neither              {len(neither):>4d}")
+
+    # ---- on the BLIND SPOT: which actuator repairs it? compress (Halo-style) vs steer (geometric) ----
+    bs_comp = sum(fix_at(it, it["fg"], "compress") for it in gonly)
+    bs_steer = sum(fix_at(it, it["fg"], "steer") for it in gonly)
+    # reference: on entropy-caught errors, does the actuator work at all (sanity)
+    ec_comp = sum(fix_at(it, it["fe"], "compress") for it in (eonly[:len(gonly)] or eonly))
+    ng = max(len(gonly), 1)
+    print(f"\nBLIND SPOT repair ({len(gonly)} errors entropy missed, geometry caught):")
+    print(f"  compress (Halo actuator)  fixed {bs_comp:>3d}/{len(gonly)}  ({bs_comp/ng:.2f})")
+    print(f"  steer    (geometric, a={args.alpha:g}) fixed {bs_steer:>3d}/{len(gonly)}  ({bs_steer/ng:.2f})")
+    print(f"  [ref] compress on entropy-caught: {ec_comp}/{len(eonly[:len(gonly)] or eonly)}")
+    print("\nread: HEADLINE = blind-spot size (GEOM-ONLY) > 0 -> geometry catches errors entropy structurally "
+          "misses (claim independent of any actuator). Then repair: hypothesis is steer (push representation "
+          "back to the chain's healthy concentrated direction) beats compress on these LOW-entropy confident "
+          "errors -- 'geometric signal + geometric actuator fixes the geometric blind spot'. Sweep --alpha "
+          "{2,4,6,8,12} for steer. Scale --n (more wrong solutions). pass(after) is NOT the headline (the "
+          "blind spot is diluted in it); bs-fixed by actuator on the GEOM-ONLY set is.")
 
 
 if __name__ == "__main__":
