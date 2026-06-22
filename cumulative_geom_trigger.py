@@ -164,10 +164,15 @@ def analyze(chains, *, fpr=0.2, calib_frac=0.5, lam=0.8, kappa=0.5, seed=0):
             c["omega_" + s] = om
             c["peak_" + s] = float(np.max(om)) if len(om) else 0.0
 
+    # MATCHED-FPR operating point: threshold each signal on ALL correct chains at the same quantile,
+    # so the realized false-positive rate on correct chains is IDENTICAL across geom/ent/edis. Wrong
+    # chains never touch the threshold, so the catch / blind-spot comparison stays leak-free while the
+    # comparison is fair (the old calib-only quantile let eval FPR drift, so EDIS could 'catch more'
+    # merely by firing more). calib/eval split is kept only for the out-of-sample FPR check below.
     psi = {}
     q = 1.0 - fpr
     for s in SIG:
-        psi[s] = float(np.quantile([c["peak_" + s] for c in calib], q))
+        psi[s] = float(np.quantile([c["peak_" + s] for c in cor], q))
 
     for c in chains:
         for s in SIG:
@@ -176,14 +181,18 @@ def analyze(chains, *, fpr=0.2, calib_frac=0.5, lam=0.8, kappa=0.5, seed=0):
             if s == "geom":
                 c["fg"] = fa                       # geometry trigger step (for repair)
 
-    fpr_e = {s: (float(np.mean([c["fire_" + s] for c in ev])) if ev else float("nan")) for s in SIG}
+    fpr_e = {s: float(np.mean([c["fire_" + s] for c in cor])) for s in SIG}     # matched by construction
+    fpr_oos = {}                                                                # out-of-sample generalization
+    for s in SIG:
+        th = float(np.quantile([c["peak_" + s] for c in calib], q)) if calib else psi[s]
+        fpr_oos[s] = float(np.mean([first_at(c["omega_" + s], th) is not None for c in ev])) if ev else float("nan")
 
     ab = lambda c: c.get("abs_ent", np.nan)
     blind = [c for c in wro if c["fire_geom"] and not c["fire_ent"] and not c["fire_edis"]]
     ecaught = [c for c in wro if c["fire_ent"] or c["fire_edis"]]
     return dict(
         n=len(chains), n_correct=len(cor), n_wrong=len(wro), n_calib=len(calib), n_eval=len(ev),
-        psi=psi, sf=sf, fpr=fpr_e,
+        psi=psi, sf=sf, fpr=fpr_e, fpr_oos=fpr_oos,
         catch={s: int(sum(c["fire_" + s] for c in wro)) for s in SIG},
         geom_not_ent=int(sum(c["fire_geom"] and not c["fire_ent"] for c in wro)),
         geom_not_edis=int(sum(c["fire_geom"] and not c["fire_edis"] for c in wro)),
@@ -197,10 +206,12 @@ def analyze(chains, *, fpr=0.2, calib_frac=0.5, lam=0.8, kappa=0.5, seed=0):
 def report(r):
     print(f"\nchains {r['n']}  correct {r['n_correct']} (calib {r['n_calib']}/eval {r['n_eval']})  "
           f"wrong {r['n_wrong']}")
-    print(f"Psi (conformal accumulation threshold): " + "  ".join(f"{s}={r['psi'][s]:.2f}" for s in SIG))
-    print(f"held-out FPR (cumulative trigger fires on EVAL correct):")
+    print(f"Psi (matched-FPR accumulation threshold): " + "  ".join(f"{s}={r['psi'][s]:.2f}" for s in SIG))
+    print(f"FPR matched on correct chains (identical operating point) | catches on wrong | oos-FPR:")
     for s in SIG:
-        print(f"  {s:5s} {r['fpr'][s]:.3f}   (fires on {r['catch'][s]}/{r['n_wrong']} wrong chains)")
+        oos = r.get("fpr_oos", {}).get(s, float("nan"))
+        print(f"  {s:5s} FPR {r['fpr'][s]:.3f}   catches {r['catch'][s]:>3d}/{r['n_wrong']} wrong   "
+              f"(held-out FPR {oos:.3f})")
     print(f"\nblind spot (wrong & geom fires & NEITHER ent NOR edis fires): {r['n_blind']}")
     print(f"  geom\\ent {r['geom_not_ent']}   geom\\edis {r['geom_not_edis']}   "
           f"geom\\both {r['n_blind']}  <- representation collapse caught it, both entropy signals missed")
