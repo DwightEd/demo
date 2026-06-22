@@ -129,18 +129,30 @@ def main():
     print(f"\nCONFIDENT-stratum length-bucket:  dir {bucket(-RES[cf], Y[cf], NT[cf]):.3f}  "
           f"pooled-norm {bucket(-POOL[cf], Y[cf], NT[cf]):.3f}  mag {bucket(-MAG[cf], Y[cf], NT[cf]):.3f}")
 
+    # SHARP confidence cut: in the most-confident X%, entropy is near-flat so EDIS (which needs entropy
+    # dynamics) must mechanically collapse, while geometry does not depend on entropy variation.
+    print(f"\n{'most-confident cut':18s} {'n':>6s} {'err':>5s} {'dir':>6s} {'pool':>6s} "
+          f"{'entropy':>8s} {'EDIS':>7s}")
+    for pct in [0.05, 0.10, 0.20]:
+        thr = np.quantile(UDV, pct); m = UDV <= thr; ne = int(Y[m].sum())
+        ad = bdir(auroc(-RES[m], Y[m])); ap = bdir(auroc(-POOL[m], Y[m]))
+        au = bdir(auroc(UDV[m], Y[m])); ae = bdir(auroc(EDS[m], Y[m]))
+        print(f"  bottom {int(pct*100):>3d}% entropy  {int(m.sum()):>6d} {ne:>5d} {ad:>6.3f} {ap:>6.3f} "
+              f"{au:>8.3f} {ae:>7.3f}")
+
     conf = strat == 0
     share = int(Y[conf].sum()) / max(int(Y.sum()), 1)
     print(f"\nDANGER SHARE: {100*share:.0f}% of ALL first-errors live in the CONFIDENT stratum "
           f"(low-entropy, entropy-family blind).")
-    print("read: HEADLINE FIGURE. In 'LOW entropy (CONFIDENT)', the GEOMETRY family (dir/pool/mag) stays high "
-          "while BOTH entropy and EDIS collapse toward 0.5 -- the entropy family (static AND dynamic) is "
-          "structurally blind to confident hallucinations. dir=pure direction (resultant), pool=POOLED "
-          "MODEL-LENGTH ||sum w*h|| (direction x magnitude, the original 'norm drops at the error' signal), "
-          "mag=mean token norm (pure magnitude). Pick whichever geometry wins in the confident stratum AND "
-          "survives the length bucket -- if pooled-norm > dir, magnitude carries extra signal and we should "
-          "NOT strip it. This is the scoped EXCEED: geometry uniquely covers the most dangerous, "
-          "entropy-invisible failure mode; danger share = how much error mass lives there.")
+    print("read: CORRECTED CLAIM. At the tercile cut, EDIS does NOT collapse in the confident stratum "
+          "(~0.67-0.73) -- it is entropy DYNAMICS, not level, so confident steps with entropy bursts still "
+          "fire it; geometry is only marginally ahead there. The ONLY place the exceed can hold is the SHARP "
+          "cut: in the bottom 5-10% entropy (near-flat) steps, EDIS has no entropy variation to compute "
+          "burst/peak-valley and must collapse toward 0.5, while geometry (dir / pooled-norm) does not depend "
+          "on entropy dynamics. DECISIVE = the bottom-5%/10% rows: if geom holds (~0.7) while EDIS drops to "
+          "~0.5, geometry uniquely detects the genuinely-confident errors EDIS cannot; if EDIS still holds "
+          "there, geometry has no exclusive territory over EDIS and the anchor must be reconsidered. Also "
+          "watch dir vs pool: if pooled-norm wins, magnitude carries extra signal we should not strip.")
 
 
 if __name__ == "__main__":
