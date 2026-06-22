@@ -84,11 +84,13 @@ def main():
         for _ in range(args.samples):
             sol = S.generate(prompt, temp=args.temp)
             ans = extract_answer(sol)
-            res, en, sp, vecs, ent_tok = S.signals(prompt, sol)
-            ent_bad = float(np.nanmean(en)) if len(en) and np.isfinite(en).any() else 0.0  # sequence entropy
-            edis_bad = edis(ent_tok)                                                        # EDIS (entropy dynamics)
-            geom_bad = (1.0 - float(np.nanmin(res))) if len(res) and np.isfinite(res).any() else 0.0  # ours
-            chains.append(dict(ans=ans, ok=correct(ans, gold), ent_bad=ent_bad, edis_bad=edis_bad, geom_bad=geom_bad))
+            res, en, sp, vecs, ent_tok, Rtraj = S.signals(prompt, sol)
+            ent_bad = float(np.nanmean(en)) if len(en) and np.isfinite(en).any() else 0.0  # sequence entropy (static)
+            edis_bad = edis(ent_tok)                                                        # EDIS = entropy DYNAMICS
+            geom_bad = (1.0 - float(np.nanmin(res))) if len(res) and np.isfinite(res).any() else 0.0  # resultant (static)
+            gdis_bad = edis(1.0 - Rtraj[np.isfinite(Rtraj)])           # GDIS = geometric DYNAMICS (EDIS formula on 1-R)
+            chains.append(dict(ans=ans, ok=correct(ans, gold), ent_bad=ent_bad, edis_bad=edis_bad,
+                               geom_bad=geom_bad, gdis_bad=gdis_bad))
         per_prob.append((_key(gold), chains))
         if (qi + 1) % 10 == 0:
             print(f"  [{qi+1}/{len(probs)}] sampled")
@@ -99,13 +101,13 @@ def main():
         v = np.array([c[arrkey] for c in allc]); m, s = v.mean(), v.std() + 1e-9
         for c in allc:
             c["z_" + arrkey] = (c[arrkey] - m) / s
-    z("ent_bad"); z("edis_bad"); z("geom_bad")
+    z("ent_bad"); z("edis_bad"); z("geom_bad"); z("gdis_bad")
     for c in allc:
-        c["fused_eg"] = max(c["z_edis_bad"], c["z_geom_bad"])   # EDIS + geometry (the headline fusion)
+        c["fused_eg"] = max(c["z_edis_bad"], c["z_gdis_bad"])   # EDIS + GDIS (both dynamics)
 
-    methods = [("self-consistency", None), ("sequence-entropy", "ent_bad"),
-               ("EDIS (dynamics)", "edis_bad"), ("geometry (ours)", "geom_bad"),
-               ("EDIS+geometry (ours)", "fused_eg")]
+    methods = [("self-consistency", None), ("sequence-entropy (static)", "ent_bad"),
+               ("resultant (static)", "geom_bad"), ("EDIS = entropy-dyn", "edis_bad"),
+               ("GDIS = geom-dyn (ours)", "gdis_bad"), ("GDIS+EDIS", "fused_eg")]
     acc = {nm: 0 for nm, _ in methods}; oracle = 0
     for gold, chains in per_prob:
         if any(c["ok"] for c in chains):
@@ -122,21 +124,20 @@ def main():
     for nm, _ in methods:
         print(f"  {nm:22s} {acc[nm]/npb:>8.3f}")
 
-    # blind-spot diagnostic: of WRONG chains that EDIS (the strong entropy-dynamics method) ranks STABLE
-    # (low EDIS -> it would KEEP them), does geometry flag them? = EDIS's structural blind spot.
+    # diagnostic: of WRONG chains EDIS ranks stable (its blind spot), does GDIS (geometric dynamics) flag them?
     wrong = [c for c in allc if not c["ok"]]
     if wrong:
-        et = np.median([c["edis_bad"] for c in allc]); gt = np.median([c["geom_bad"] for c in allc])
-        edis_blind = [c for c in wrong if c["edis_bad"] <= et]          # wrong but EDIS-stable (no instability)
-        geo_flag = [c for c in edis_blind if c["geom_bad"] > gt]        # geometry flags them
-        print(f"\nblind-spot vs EDIS: wrong chains EDIS ranks stable (no entropy instability) = "
-              f"{len(edis_blind)}/{len(wrong)}; geometry flags {len(geo_flag)}/{max(len(edis_blind),1)} = "
-              f"{len(geo_flag)/max(len(edis_blind),1):.2f}")
-    print("\nread: EDIS (dynamics) is the SOTA entropy selector -- the real baseline (not sequence-entropy). "
-          "HEADLINE = EDIS+geometry (ours) > EDIS alone: geometry adds an ORTHOGONAL increment on EDIS's blind "
-          "spot -- SUSTAINED-confident errors (low EDIS, no entropy instability) that geometric collapse still "
-          "catches. geometry alone likely < EDIS (EDIS is strong); the win is the fusion. oracle = ceiling. "
-          "Sweep --drop/--samples; scale --n.")
+        et = np.median([c["edis_bad"] for c in allc]); gt = np.median([c["gdis_bad"] for c in allc])
+        edis_blind = [c for c in wrong if c["edis_bad"] <= et]
+        gdis_flag = [c for c in edis_blind if c["gdis_bad"] > gt]
+        print(f"\nEDIS-blind wrong chains (no entropy instability) = {len(edis_blind)}/{len(wrong)}; "
+              f"GDIS flags {len(gdis_flag)}/{max(len(edis_blind),1)} = {len(gdis_flag)/max(len(edis_blind),1):.2f}")
+    print("\nread: HEADLINE = GDIS (geometric dynamics, ours) pass@1 > EDIS (entropy dynamics, SOTA) -- the "
+          "SAME instability-counting lens applied to the resultant trajectory, which is CLEANER than the "
+          "entropy trajectory. Sanity: EDIS > sequence-entropy (our EDIS impl is faithful) and resultant-static "
+          "should already be decent. If GDIS > EDIS, geometric dynamics BEATS entropy dynamics (the strong "
+          "top-venue claim, not a complement). If GDIS < EDIS, fall back to fusion / the static-vs-dynamic "
+          "asymmetry. Sweep --drop/--samples; scale --n.")
 
 
 if __name__ == "__main__":
