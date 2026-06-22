@@ -139,10 +139,11 @@ def main():
     for nm, v in [("resultant (single)", -RES), ("step-EDIS (entropy-dyn)", EDS),
                   ("GEOM ENSEMBLE (ours)", geo_oof), ("GEOM + step-EDIS", fus_oof)]:
         print(f"  {nm:28s} {bdir(auroc(v, Y)):7.3f} {bucket(v, Y, NT):7.3f}")
-    print("\nread: WIN = GEOM ENSEMBLE > step-EDIS on ALL configs (pooled + bucket) -> the geometric family "
-          "comprehensively beats entropy dynamics at step-level localization. GEOM+EDIS shows whether they "
-          "are complementary (fused > both). Single resultant only wins on gsm8k; the ensemble adds the "
-          "within-step / spectral / anomaly geometry that hard configs need. Watch bucket (length-controlled).")
+    print("\nread: RESULT (observed): the logistic ensemble beats step-EDIS on gsm8k/math but LOSES on "
+          "omnimath/olympiad (pooled AND bucket). A linear logistic stack washes out each feature's peak and "
+          "does NOT comprehensively beat entropy dynamics -- see step_geom_instability.py for the principled "
+          "MULTIPLICATIVE (EDIS-form) geometry score that preserves each component and targets the hard "
+          "configs. GEOM+EDIS is the (logistic) fusion ceiling.")
 
 
 if __name__ == "__main__":
