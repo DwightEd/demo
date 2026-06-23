@@ -302,7 +302,7 @@ def main():
           "(confident errors un-fixable, per Hidden Error Awareness), fall back to (B). (B) ABSTAIN -- the "
           "selective-prediction table: OURS answered-set accuracy > Halo at low coverage = the detection edge "
           "converts to utility by abstaining on confident errors, no fix needed. Report whichever the data "
-          "supports; both are legitimate downstreams in the literature (Halo/self-correct fix; Zhao/TokUR abstain).")
+          "supports; both are legitimate downstreams in the literature (self-correct/fix vs selective-prediction/abstain).")
 
 
 if __name__ == "__main__":
