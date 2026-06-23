@@ -38,7 +38,7 @@ def edis_adp(seq, w=1):
 
 
 def trend(seq):
-    """Linear-fit slope and R^2 (monotonicity) of a trajectory (Zhao-style)."""
+    """Linear-fit slope and R^2 (trajectory monotonicity)."""
     s = np.asarray(seq, float); s = s[np.isfinite(s)]; n = len(s)
     if n < 3:
         return 0.0, 0.0
