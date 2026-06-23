@@ -76,24 +76,32 @@ def per_token_kappa(U, ok, wins, ema_a, axis):
     return out
 
 
+def aggregate(col):
+    c = col[np.isfinite(col)]
+    if len(c) < 2:
+        return dict(mean=np.nan, min=np.nan, slope=0.0, std=0.0, drop=0.0)
+    t = np.arange(len(c))
+    return dict(mean=float(c.mean()), min=float(c.min()), slope=float(np.polyfit(t, c, 1)[0]),
+                std=float(c.std()), drop=float(c.ptp()))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("npz")
     ap.add_argument("--layer", type=int, default=14)
-    ap.add_argument("--wins", type=int, nargs="+", default=[8, 16, 32])
+    ap.add_argument("--wins", type=int, nargs="+", default=[16, 32])
     ap.add_argument("--ema", type=float, default=0.9)
     args = ap.parse_args()
 
     z = np.load(args.npz, allow_pickle=True)
     csl = [int(x) for x in z["cloud_store_layers"]]; li = csl.index(args.layer)
-    RC, SR = z["respcloud"], z["step_token_ranges"]
-    ges = z["gold_error_step"].astype(int)
+    RC, SR = z["respcloud"], z["step_token_ranges"]; ges = z["gold_error_step"].astype(int)
     axis = global_axis(RC, li)
 
-    methods = ["sem", "sem_nx", "causal", "causal_nx", "ema", "ema_nx"]
-    for w in args.wins:
-        methods += [f"w{w}", f"w{w}_nx"]
-    S = {m: [] for m in methods}; Y = []
+    cons = ["causal", "causal_nx", "ema", "ema_nx"] + [f"w{w}{s}" for w in args.wins for s in ("", "_nx")]
+    ops = ["mean", "min", "slope", "std", "drop"]; sgn = dict(mean=-1, min=-1, slope=-1, std=1, drop=1)
+    Sstep = {(m, op): [] for m in cons for op in ops}; Stok = {m: [] for m in cons}
+    sem, sem_nx, Y, Ytok = [], [], [], []
 
     for i in range(len(RC)):
         if RC[i] is None:
@@ -101,15 +109,13 @@ def main():
         H = np.asarray(RC[i], np.float64)[:, li, :]
         nrm = np.linalg.norm(H, axis=1); ok = nrm > 1e-9
         U = np.zeros_like(H); U[ok] = H[ok] / nrm[ok, None]
-        rng = np.asarray(SR[i], int); a0 = int(rng[0, 0]); T = rng.shape[0]
-        k = int(ges[i]); correct = (k < 0)
+        rng = np.asarray(SR[i], int); a0 = int(rng[0, 0]); T = rng.shape[0]; k = int(ges[i]); correct = (k < 0)
         ts = np.full(H.shape[0], -1, int)
         for j in range(T):
             lo = max(0, rng[j, 0] - a0); hi = min(H.shape[0] - 1, rng[j, 1] - a0)
             if lo <= hi:
                 ts[lo:hi + 1] = j
         pt = per_token_kappa(U, ok, args.wins, args.ema, axis)
-
         for j in range(T):
             if correct or j < k:
                 lab = 0
@@ -120,21 +126,22 @@ def main():
             idx = np.where(ts == j)[0]
             if idx.size < 2 or ok[idx].sum() < 2:
                 continue
-            Y.append(lab)
-            mu = U[idx][ok[idx]].mean(0)                       # semantic-step pooled (validated)
-            S["sem"].append(float(np.linalg.norm(mu)))
-            S["sem_nx"].append(float(np.linalg.norm(mu - (mu @ axis) * axis)))
-            for m in methods[2:]:                              # token-level: deepest dip in the step
-                col = pt[m][idx]
-                S[m].append(float(np.nanmin(col)) if np.isfinite(col).any() else np.nan)
+            Y.append(lab); mu = U[idx][ok[idx]].mean(0)
+            sem.append(float(np.linalg.norm(mu))); sem_nx.append(float(np.linalg.norm(mu - (mu @ axis) * axis)))
+            for m in cons:
+                ag = aggregate(pt[m][idx])
+                for op in ops:
+                    Sstep[(m, op)].append(ag[op])
+                Stok[m].extend(pt[m][idx].tolist())
+            Ytok.extend([lab] * idx.size)
 
-    Y = np.asarray(Y, int)
-    ceil = bdir(auroc(-np.asarray(S["sem"], float), Y))
-    print(f"{args.npz} | L{args.layer} | steps {len(Y)} | err {int(Y.sum())} | ceiling(sem) {ceil:.3f}")
-    print(f"{'method':12s} {'AUROC':>7s} {'vs_ceil':>8s}")
-    for m in methods:
-        a = bdir(auroc(-np.asarray(S[m], float), Y))
-        print(f"{m:12s} {a:7.3f} {a - ceil:+8.3f}")
+    Y = np.asarray(Y, int); Ytok = np.asarray(Ytok, int)
+    cl = bdir(auroc(-np.asarray(sem), Y)); clx = bdir(auroc(-np.asarray(sem_nx), Y))
+    print(f"{args.npz} | L{args.layer} | steps {len(Y)} err {int(Y.sum())} | ceil sem {cl:.3f} sem_nx {clx:.3f}")
+    print(f"{'construction':12s} " + " ".join(f"{op:>6s}" for op in ops) + "   tok")
+    for m in cons:
+        row = " ".join(f"{bdir(auroc(sgn[op] * np.asarray(Sstep[(m, op)], float), Y)):6.3f}" for op in ops)
+        print(f"{m:12s} {row}  {bdir(auroc(-np.asarray(Stok[m], float), Ytok)):.3f}")
 
 
 if __name__ == "__main__":
