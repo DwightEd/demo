@@ -49,6 +49,8 @@ def main():
     z = np.load(args.npz, allow_pickle=True)
     csl = [int(x) for x in z["cloud_store_layers"]]; li = csl.index(args.layer)
     RC, SR = z["respcloud"], z["step_token_ranges"]; ges = z["gold_error_step"].astype(int)
+    isc = z["is_correct"].astype(int) if "is_correct" in z.files else None
+    use_isc = isc is not None and not (ges >= 0).any()   # sampled/real-inference: label by final-answer
     seqs, NT, Y = [], [], []
     for i in range(len(RC)):
         if RC[i] is None:
@@ -58,7 +60,8 @@ def main():
         ek = ema_kappa(U, ok, args.ema)
         if not np.isfinite(ek).any():
             continue
-        seqs.append(ek); NT.append(int(np.isfinite(ek).sum())); Y.append(int(int(ges[i]) >= 0))
+        seqs.append(ek); NT.append(int(np.isfinite(ek).sum()))
+        Y.append(int(isc[i] == 0) if use_isc else int(int(ges[i]) >= 0))
     b = float(np.nanmedian(np.concatenate(seqs)))
     CP, MN, ME = [], [], []
     for ek in seqs:
