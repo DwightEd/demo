@@ -82,7 +82,7 @@ def aggregate(col):
         return dict(mean=np.nan, min=np.nan, slope=0.0, std=0.0, drop=0.0)
     t = np.arange(len(c))
     return dict(mean=float(c.mean()), min=float(c.min()), slope=float(np.polyfit(t, c, 1)[0]),
-                std=float(c.std()), drop=float(c.ptp()))
+                std=float(c.std()), drop=float(np.ptp(c)))
 
 
 def main():
