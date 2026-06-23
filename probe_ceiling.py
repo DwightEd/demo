@@ -55,7 +55,7 @@ def main():
     z = np.load(args.npz, allow_pickle=True)
     csl = [int(x) for x in z["cloud_store_layers"]]; li = csl.index(args.layer)
     RC, SR = z["respcloud"], z["step_token_ranges"]; ges = z["gold_error_step"].astype(int)
-    V, KA, NT, Y, G = [], [], [], [], []
+    V, MU, KA, MAG, NT, Y, G = [], [], [], [], [], [], []
     for i in range(len(RC)):
         if RC[i] is None:
             continue
@@ -73,15 +73,17 @@ def main():
             if hi - lo < 2:
                 continue
             L = hi - lo; w = np.exp(np.arange(L) / (L - 1)); w /= w.sum()
-            V.append(w @ H[lo:hi]); KA.append(np.linalg.norm(w @ U[lo:hi]))
+            v = w @ H[lo:hi]; r = w @ U[lo:hi]; ka = np.linalg.norm(r)   # raw pooled / resultant vector / concentration
+            V.append(v); MU.append(r / ka if ka > 1e-9 else r); KA.append(ka); MAG.append(np.linalg.norm(v))
             NT.append(L); Y.append(lab); G.append(i)
-    V = np.asarray(V); KA = np.asarray(KA); NT = np.asarray(NT, float); Y = np.asarray(Y, int); G = np.asarray(G, int)
-    s_k = -KA
-    s_v = oof(V, Y, G)
-    s_kv = oof(np.column_stack([V, KA]), Y, G)
+    V = np.asarray(V); MU = np.asarray(MU); KA = np.asarray(KA); MAG = np.asarray(MAG)
+    NT = np.asarray(NT, float); Y = np.asarray(Y, int); G = np.asarray(G, int)
+    rows = [("kappa scalar (concentr)", -KA), ("orient mu_hat (256d)", oof(MU, Y, G)),
+            ("pooled-norm (magnitude)", MAG), ("probe on repr (256d)", oof(V, Y, G)),
+            ("mu_hat + kappa", oof(np.column_stack([MU, KA]), Y, G))]
     print(f"{args.npz} | L{args.layer} | steps {len(Y)} err {int(Y.sum())} | repr dim {V.shape[1]}")
-    for nm, s in [("kappa scalar", s_k), ("probe on repr (256d)", s_v), ("repr + kappa", s_kv)]:
-        print(f"  {nm:22s} AUROC {bdir(auroc(s, Y)):.3f}  bkt(len) {bucket(s, Y, NT):.3f}")
+    for nm, s in rows:
+        print(f"  {nm:24s} AUROC {bdir(auroc(s, Y)):.3f}  bkt(len) {bucket(s, Y, NT):.3f}")
 
 
 if __name__ == "__main__":
