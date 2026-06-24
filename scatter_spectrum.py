@@ -111,6 +111,20 @@ def main():
     strict("spectrum top-5", [EV5[:, c] for c in range(5)])
     strict("all 2nd-moment feats", list(feats.values()))
 
+    # combination: does a multiplicative kappa x eff_rank term add over the two linear terms?
+    def strict_b(name, base, extra):
+        sb = oof(base, Y, G); sf = oof(base + extra, Y, G); ds = []
+        for _ in range(200):
+            idx = np.concatenate([ci[c] for c in rng.choice(ch, len(ch), replace=True)])
+            ds.append(auroc(sf[idx], Y[idx]) - auroc(sb[idx], Y[idx]))
+        cl, cu = np.percentile(ds, [2.5, 97.5])
+        print(f"  COMBO {name:30s} {auroc(sb,Y):.3f} -> {auroc(sf,Y):.3f}  (+{auroc(sf,Y)-auroc(sb,Y):.3f}, CI [{cl:+.3f}, {cu:+.3f}])")
+
+    er = feats["eff_rank"]
+    print(f"  kappa*eff_rank (product) AUROC {bdir(auroc(KA * er, Y)):.3f}")
+    strict_b("kappa*eff_rank over [k+eff+len]", [-KA, er, NT], [KA * er])
+    strict_b("kappa/eff_rank over [k+eff+len]", [-KA, er, NT], [KA / np.maximum(er, 1e-9)])
+
 
 if __name__ == "__main__":
     main()
