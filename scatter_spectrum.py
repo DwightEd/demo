@@ -105,6 +105,9 @@ def main():
         cl, cu = np.percentile(ds, [2.5, 97.5])
         print(f"  STRICT {name:22s} over [kappa+len]  {auroc(base,Y):.3f} -> {auroc(full,Y):.3f}  (+{auroc(full,Y)-auroc(base,Y):.3f}, CI [{cl:+.3f}, {cu:+.3f}])")
 
+    # minimal principled combinations: keep the KEY part, drop redundant eigenvalue summaries
+    strict("eff_rank only", [feats["eff_rank"]])
+    strict("lam1 + eff_rank", [feats["lam1"], feats["eff_rank"]])
     strict("spectrum top-5", [EV5[:, c] for c in range(5)])
     strict("all 2nd-moment feats", list(feats.values()))
 
