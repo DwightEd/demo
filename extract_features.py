@@ -602,12 +602,12 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="cap #chains (debug).")
     ap.add_argument("--output", required=True)
     ap.add_argument("--smoke", action="store_true",
-                    help="tiny CPU model (sshleifer/tiny-gpt2) to test wiring.")
+                    help="tiny CPU model (tiny-random-LlamaForCausalLM, safetensors) to test wiring.")
     args = ap.parse_args()
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 
-    model_name = "sshleifer/tiny-gpt2" if args.smoke else args.model
+    model_name = "hf-internal-testing/tiny-random-LlamaForCausalLM" if args.smoke else args.model
     print(f"Loading model {model_name} ...")
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     if tokenizer.pad_token is None:
