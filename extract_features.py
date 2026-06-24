@@ -269,7 +269,7 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
                   store_token_geom, max_seq_len, store_step_vectors=False,
                   cloud_eff_rank=False, intrinsic_dim=False, sv_layers=None,
                   grad_block=None, cloud_layers=None, cloud_P=None, cloud_delta=False,
-                  massive_fixed=None, want_attn=False):
+                  massive_fixed=None, want_attn=False, dump_hidden=False):
     """Return a dict of arrays for one chain, or None if it cannot be aligned."""
     prompt = EXTRACT_PROMPT.format(q=rec["question"])
     response = rec["response"]
@@ -453,7 +453,10 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
         prof.update({f"UE_{s}": float("nan") for s in tp.PROFILE_STATS})
 
     step_ranges = np.asarray(safe, dtype=np.int32)
+    hidden_full = (np.stack([hs[li][a0:b1 + 1] for li in range(L)], axis=1).astype(np.float16)
+                   if dump_hidden else None)   # (R, L, d) full per-token hidden, response span
     return {
+        "hidden_full": hidden_full,
         "tok_U_D": U_D, "tok_U_C": U_C,
         "tok_U_E": (U_E.astype(np.float32) if U_E is not None else None),
         "tok_U_E_offsets": U_E_off,
@@ -589,6 +592,10 @@ def main():
     ap.add_argument("--grad_from_layer", type=int, default=None,
                     help="only blocks >= this carry grad for --grad_profile (memory).")
     ap.add_argument("--max_seq_len", type=int, default=4096)
+    ap.add_argument("--hidden_dump_dir", default=None,
+                    help="write per-chain FULL per-token hidden states <id>.npy (R,L,d) fp16 here "
+                         "(streamable via mmap; layers = --layers). For one-time complete extraction; "
+                         "kept out of the npz to avoid load-time OOM.")
     ap.add_argument("--limit", type=int, default=None, help="cap #chains (debug).")
     ap.add_argument("--output", required=True)
     ap.add_argument("--smoke", action="store_true",
@@ -675,7 +682,9 @@ def main():
             model, tokenizer, records, layer_indices, args.massive_m, device,
             args.max_seq_len, n=args.massive_global)
 
-    rows, profiles = [], []
+    rows, profiles, hidden_files = [], [], []
+    if args.hidden_dump_dir:
+        os.makedirs(args.hidden_dump_dir, exist_ok=True)
     n_seen = n_kept = 0
     for rec in tqdm(records, desc="chains"):
         n_seen += 1
@@ -691,7 +700,7 @@ def main():
                 grad_block=grad_block,
                 cloud_layers=cloud_set, cloud_P=cloud_P,
                 cloud_delta=args.cloud_delta, massive_fixed=massive_fixed,
-                want_attn=args.attn_sink)
+                want_attn=args.attn_sink, dump_hidden=bool(args.hidden_dump_dir))
         except Exception as e:
             import traceback
             print(f"  warn: chain {rec['id']} failed: {e}")
@@ -700,6 +709,11 @@ def main():
         if res is None:
             continue
         n_kept += 1
+        hf = res.pop("hidden_full", None)
+        if args.hidden_dump_dir and hf is not None:
+            fn = "".join(c if c.isalnum() or c in "._-" else "_" for c in str(rec["id"])) + ".npy"
+            np.save(os.path.join(args.hidden_dump_dir, fn), hf)
+            hidden_files.append(fn)
         rows.append({**rec, **res})
         profiles.append(res["profile"])
         if device == "cuda" and n_kept % 50 == 0:
@@ -749,6 +763,11 @@ def main():
         # R2: random-projected per-token response clouds (object: (R, Lc, k) fp16 each)
         respcloud=np.array([r["respcloud"] for r in rows], dtype=object),
         clouds_stored=np.array(args.store_clouds),
+        # full per-token hidden states dumped as per-chain shards (id-aligned filenames)
+        hidden_stored=np.array(bool(args.hidden_dump_dir)),
+        hidden_dir=np.array(args.hidden_dump_dir or "", dtype=object),
+        hidden_files=np.array(hidden_files, dtype=object),
+        hidden_layers=np.array(layer_indices, dtype=np.int32),
         cloud_store_layers=np.array(cloud_set, dtype=np.int32),
         cloud_proj_dim=np.array(args.cloud_proj_dim),
         cloud_proj=(cloud_P if cloud_P is not None else np.array(False)),
