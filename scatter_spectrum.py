@@ -125,6 +125,13 @@ def main():
     strict_b("kappa*eff_rank over [k+eff+len]", [-KA, er, NT], [KA * er])
     strict_b("kappa/eff_rank over [k+eff+len]", [-KA, er, NT], [KA / np.maximum(er, 1e-9)])
 
+    # SIGN (mechanism): >0.5 = HIGH value is error. Compare across configs -- does eff_rank FLIP easy vs hard?
+    print(f"  SIGN raw AUROC (>0.5: high=error)  eff_rank {auroc(er, Y):.3f}  lam1 {auroc(feats['lam1'], Y):.3f}  kappa {auroc(KA, Y):.3f}")
+    # DECISIVE: rule out residual NONLINEAR length -- put log n, 1/n, sqrt n, n^2 into the baseline
+    NL = [NT, np.log(NT + 1.0), 1.0 / np.maximum(NT, 1.0), np.sqrt(NT), NT ** 2]
+    strict_b("spectrum5 over [kappa+NONLIN-len]", [-KA] + NL, [EV5[:, c] for c in range(5)])
+    strict_b("eff_rank  over [kappa+NONLIN-len]", [-KA] + NL, [er])
+
 
 if __name__ == "__main__":
     main()
