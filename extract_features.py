@@ -428,6 +428,8 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
             for ti, pos in enumerate(range(a0, b1 + 1)):
                 f = geo.vector_features(H_l[pos], massive_m=massive_m)
                 tokgeom[ti, li] = [f[k] for k in geo.GEOM_FEATURE_NAMES]
+    hidden_full = (np.stack([hs[c][a0:b1 + 1] for c in dump_cols], axis=1).astype(np.float16)
+                   if dump_cols else None)   # (R, len(dump_cols), d) full per-token hidden, before del hs
     del hs
 
     # --- epistemic U_E (grad): one backward per (strided) token ---
@@ -453,8 +455,6 @@ def extract_chain(model, tokenizer, rec, device, layer_indices,
         prof.update({f"UE_{s}": float("nan") for s in tp.PROFILE_STATS})
 
     step_ranges = np.asarray(safe, dtype=np.int32)
-    hidden_full = (np.stack([hs[c][a0:b1 + 1] for c in dump_cols], axis=1).astype(np.float16)
-                   if dump_cols else None)   # (R, len(dump_cols), d) full per-token hidden, response span
     return {
         "hidden_full": hidden_full,
         "tok_U_D": U_D, "tok_U_C": U_C,
