@@ -56,6 +56,7 @@ def main():
     csl = [int(x) for x in z["cloud_store_layers"]]; li = csl.index(args.layer)
     RC, SR = z["respcloud"], z["step_token_ranges"]; ges = z["gold_error_step"].astype(int)
     KA, LAM1, EFFR, GAP, RESID, AVAR, AFRAC, NT, Y, G = ([] for _ in range(10))
+    EV5 = []   # top-5 scatter eigenvalues = the spectrum AS A VECTOR (richer than a scalar)
     for i in range(len(RC)):
         if RC[i] is None:
             continue
@@ -81,6 +82,7 @@ def main():
             KA.append(ka); LAM1.append(ev[0]); EFFR.append(float(np.exp(-(ev * np.log(ev)).sum())))
             GAP.append(ev[0] - (ev[1] if n > 1 else 0.0)); RESID.append(1 - ev[0])
             AVAR.append(float(a.var())); AFRAC.append(float((a < 0).mean()))
+            EV5.append(np.pad(ev[:5], (0, max(0, 5 - len(ev))))[:5])
             NT.append(n); Y.append(lab); G.append(i)
     KA = np.asarray(KA); NT = np.asarray(NT, float); Y = np.asarray(Y, int); G = np.asarray(G, int)
     feats = {"lam1": LAM1, "eff_rank": EFFR, "gap": GAP, "residual": RESID, "align_var": AVAR, "anti_frac": AFRAC}
@@ -89,15 +91,22 @@ def main():
     print(f"  kappa (1st moment)   AUROC {bdir(auroc(-KA, Y)):.3f}  bkt {bucket(-KA, Y, NT):.3f}")
     for nm, v in feats.items():
         print(f"  {nm:20s} AUROC {bdir(auroc(v, Y)):.3f}  bkt {bucket(v, Y, NT):.3f}")
-    # strict increment: scatter+alignment over [kappa + length]
-    base = oof([-KA, NT], Y, G); full = oof([-KA, NT] + list(feats.values()), Y, G)
-    ab, af = auroc(base, Y), auroc(full, Y)
-    ch = np.unique(G); rng = np.random.default_rng(0); ci = {c: np.where(G == c)[0] for c in ch}; ds = []
-    for _ in range(200):
-        idx = np.concatenate([ci[c] for c in rng.choice(ch, len(ch), replace=True)])
-        ds.append(auroc(full[idx], Y[idx]) - auroc(base[idx], Y[idx]))
-    cl, cu = np.percentile(ds, [2.5, 97.5])
-    print(f"  STRICT: 2nd-moment over [kappa+len]  {ab:.3f} -> {af:.3f}  (+{af-ab:.3f}, CI [{cl:+.3f}, {cu:+.3f}])")
+    EV5 = np.asarray(EV5)
+    print(f"  spectrum top-5 (vector)  AUROC {bdir(auroc(oof([EV5[:, c] for c in range(5)], Y, G), Y)):.3f}  bkt {bucket(oof([EV5[:, c] for c in range(5)], Y, G), Y, NT):.3f}")
+
+    ch = np.unique(G); rng = np.random.default_rng(0); ci = {c: np.where(G == c)[0] for c in ch}
+
+    def strict(name, extra):
+        base = oof([-KA, NT], Y, G); full = oof([-KA, NT] + extra, Y, G)
+        ds = []
+        for _ in range(200):
+            idx = np.concatenate([ci[c] for c in rng.choice(ch, len(ch), replace=True)])
+            ds.append(auroc(full[idx], Y[idx]) - auroc(base[idx], Y[idx]))
+        cl, cu = np.percentile(ds, [2.5, 97.5])
+        print(f"  STRICT {name:22s} over [kappa+len]  {auroc(base,Y):.3f} -> {auroc(full,Y):.3f}  (+{auroc(full,Y)-auroc(base,Y):.3f}, CI [{cl:+.3f}, {cu:+.3f}])")
+
+    strict("spectrum top-5", [EV5[:, c] for c in range(5)])
+    strict("all 2nd-moment feats", list(feats.values()))
 
 
 if __name__ == "__main__":
