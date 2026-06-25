@@ -37,21 +37,35 @@ def feats(H):
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("npz"); ap.add_argument("--layer", type=int, default=14); ap.add_argument("--ntol", type=int, default=4); args = ap.parse_args()
     z = np.load(args.npz, allow_pickle=True)
-    csl = [int(x) for x in z["cloud_store_layers"]]; li = csl.index(args.layer)
-    RC, SR = z["respcloud"], z["step_token_ranges"]; pid = z["problem_ids"].astype(int); isc = z["is_correct"].astype(int)
+    pid = z["problem_ids"].astype(int); isc = z["is_correct"].astype(int)
     names = ["HS", "effrank", "lam1"]
-    # per rollout: list of (step feature vec, n)
     rolls = []   # (problem_id, is_correct, [(f3, n), ...])
-    for i in range(len(RC)):
-        if RC[i] is None:
-            continue
-        H = np.asarray(RC[i], np.float64)[:, li, :]; rng = np.asarray(SR[i], int); a0 = int(rng[0, 0]); steps = []
-        for j in range(rng.shape[0]):
-            lo = max(0, int(rng[j, 0]) - a0); hi = min(len(H), int(rng[j, 1]) - a0 + 1)
-            if hi - lo >= 4:
-                steps.append((feats(H[lo:hi]), hi - lo))
-        if steps:
-            rolls.append((int(pid[i]), int(isc[i]), steps))
+    if "sv_clouds" in z.files:                       # multisample format: per-rollout (n_tok, L, d) + per-step sizes
+        cl_layers = [int(x) for x in z["cloud_layers"]]; li = cl_layers.index(args.layer)
+        SVC, SZ = z["sv_clouds"], z["cloud_sizes"]
+        for i in range(len(SVC)):
+            if SVC[i] is None:
+                continue
+            cl = np.asarray(SVC[i], np.float64)[:, li, :]; sizes = np.asarray(SZ[i], int); pos = 0; steps = []
+            for sz in sizes:
+                if sz >= 4 and pos + sz <= len(cl):
+                    steps.append((feats(cl[pos:pos + sz]), int(sz)))
+                pos += sz
+            if steps:
+                rolls.append((int(pid[i]), int(isc[i]), steps))
+    else:                                            # respcloud format (teacher-forcing extraction)
+        csl = [int(x) for x in z["cloud_store_layers"]]; li = csl.index(args.layer)
+        RC, SR = z["respcloud"], z["step_token_ranges"]
+        for i in range(len(RC)):
+            if RC[i] is None:
+                continue
+            H = np.asarray(RC[i], np.float64)[:, li, :]; rng = np.asarray(SR[i], int); a0 = int(rng[0, 0]); steps = []
+            for j in range(rng.shape[0]):
+                lo = max(0, int(rng[j, 0]) - a0); hi = min(len(H), int(rng[j, 1]) - a0 + 1)
+                if hi - lo >= 4:
+                    steps.append((feats(H[lo:hi]), hi - lo))
+            if steps:
+                rolls.append((int(pid[i]), int(isc[i]), steps))
     # per-problem correct-rollout reference (feature, n) per channel
     from collections import defaultdict
     ref = defaultdict(list)   # problem_id -> list of (f3, n) from CORRECT rollouts
