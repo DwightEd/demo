@@ -61,7 +61,7 @@ def feats(H, center=False):
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("npz"); ap.add_argument("--layer", type=int, default=14); args = ap.parse_args()
     z = np.load(args.npz, allow_pickle=True)
-    ges = z["gold_error_step"].astype(int); SR = z["step_token_ranges"]
+    ges = z["gold_error_step"].astype(int)
     if "hidden_stored" in z.files and bool(z["hidden_stored"]):
         hd = str(z["hidden_dir"]); hl = [int(x) for x in z["hidden_layers"]]; lc = hl.index(args.layer); ids = z["ids"]
         def getH(i):
@@ -75,35 +75,15 @@ def main():
 
     fn = ["HS", "ME", "lam1"]
     RESP_raw = {k: [] for k in fn}; RESP_cen = {k: [] for k in fn}; RLEN = []; RY = []
-    P_dF, P_in, P_nt, Y, G = [], [], [], [], []; chains = []
     for i in range(N):
         H = getH(i)
         if H is None or len(H) < 4:
             continue
-        rng = np.asarray(SR[i], int); a0 = int(rng[0, 0]); k = int(ges[i]); correct = k < 0; T = rng.shape[0]
+        k = int(ges[i]); correct = k < 0
         wr = feats(H, False); wc = feats(H, True)
         for c, nm in enumerate(fn):
             RESP_raw[nm].append(wr[c]); RESP_cen[nm].append(wc[c])
         RLEN.append(len(H)); RY.append(int(not correct))
-        ends = [min(len(H), int(rng[j, 1]) - a0 + 1) for j in range(T)]
-        pre = [feats(H[:e])[1] for e in ends]
-        seq = np.array([pre[j] - (pre[j - 1] if j >= 1 else 0.0) for j in range(T)])
-        instep = np.full(T, np.nan)
-        for j in range(T):
-            lo = max(0, int(rng[j, 0]) - a0)
-            if ends[j] - lo >= 4:
-                instep[j] = feats(H[lo:ends[j]])[1]
-        for j in range(T):
-            if correct or j < k:
-                lab = 0
-            elif j == k:
-                lab = 1
-            else:
-                continue
-            P_dF.append(seq[j]); P_in.append(instep[j]); P_nt.append(int(rng[j, 1] - rng[j, 0] + 1)); Y.append(lab); G.append(i)
-        if not correct and T >= 4:
-            chains.append({"seq": seq, "instep": instep, "k": k, "T": T,
-                           "nt": np.array([int(rng[j, 1] - rng[j, 0] + 1) for j in range(T)], float)})
     RLEN = np.asarray(RLEN, float); RY = np.asarray(RY, int)
     print(f"{args.npz} | L{args.layer} | {src} | chains {len(RY)} err {int(RY.sum())}")
     print("  -- RESPONSE-LEVEL whole-response Gram (chain correct vs error) --")
@@ -111,25 +91,6 @@ def main():
     for nm in fn:
         vr = np.asarray(RESP_raw[nm], float); vc = np.asarray(RESP_cen[nm], float)
         print(f"     {nm:6s}  AUROC {bdir(auroc(vr, RY)):.3f} bkt {bucket(vr, RY, RLEN):.3f}    AUROC {bdir(auroc(vc, RY)):.3f} bkt {bucket(vc, RY, RLEN):.3f}")
-    P_dF = np.asarray(P_dF); P_in = np.asarray(P_in); P_nt = np.asarray(P_nt, float); Y = np.asarray(Y, int)
-    print("  -- STEP-LEVEL: prefix-cumulative dF(ME) vs within-step ME --")
-    print(f"     prefix dF   pooled {bdir(auroc(P_dF, Y)):.3f}  bkt {bucket(P_dF, Y, P_nt):.3f}")
-    print(f"     within-step pooled {bdir(auroc(P_in, Y)):.3f}  bkt {bucket(P_in, Y, P_nt):.3f}")
-
-    def wc(key):
-        sign = 1.0 if auroc({"seq": P_dF, "instep": P_in}[key], Y) >= 0.5 else -1.0; locs, w = [], []
-        for ch in chains:
-            v = ch[key]; nt = ch["nt"]; k = ch["k"]; fin = np.isfinite(v) & np.isfinite(nt)
-            if fin.sum() < 3 or not fin[k]:
-                continue
-            b = np.polyfit(nt[fin], v[fin], 1); res = sign * (v - (b[0] * nt + b[1]))
-            others = np.array([j for j in range(len(v)) if j != k and fin[j]])
-            if len(others) < 2:
-                continue
-            locs.append(np.mean(res[others] < res[k])); w.append(len(others))
-        return np.average(locs, weights=np.asarray(w, float)) if locs else float("nan")
-    print(f"     prefix dF   within-chain wc_loc(perp len) {wc('seq'):.3f}")
-    print(f"     within-step within-chain wc_loc(perp len) {wc('instep'):.3f}")
 
 
 if __name__ == "__main__":
