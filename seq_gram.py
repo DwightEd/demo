@@ -1,11 +1,12 @@
-"""Sequence-level vs within-step Gram spectral functionals (the paper 2602.09158 uses the WHOLE-sequence Gram).
-  Response-level: whole-response Gram functionals (HS=log-vol, ME=eff-rank, lam1) -> chain correct vs error.
-  Step-level via PREFIX-cumulative: dF(t) = F(tokens<=step t) - F(<=step t-1) = step t's contribution to the
-    global geometry (large-n, cross-step) vs the isolated within-step F. Pooled + within-chain localization.
-Runs on respcloud (whole-response per-token cloud) in *_cloud.npz / full_*.npz."""
+"""Whole-response Gram functionals, STRICT to the paper 2602.09158 (Eq 1-2), on FULL-dim hidden states.
+  G_l = H_l H_l^T  (H_l = m tokens x d, raw, uncentered);  HS = (1/m) log det G_l = (1/m) sum_i log lambda_i (Eq 1);
+  ME = -sum_i q_i log q_i, q_i = lambda_i / trace(G_l)  (Eq 2);  lam1 = top q_i (ours).
+HS is finite only when G_l is full rank (m <= d) -> requires FULL-dim hidden (data/hidden shards), NOT JL-256.
+Response-level (chain correct vs error) raw vs centered; step-level prefix-cumulative dF(ME) vs within-step."""
 from __future__ import annotations
 import argparse
 import numpy as np
+import hidden_io
 
 
 def auroc(s, y):
@@ -40,49 +41,58 @@ def bucket(s, y, nt, nb=5):
 
 
 def feats(H, center=False):
-    """Paper-faithful (center=False): HS = (1/T) sum log(sigma) = seq-normalized log-volume of the RAW Gram;
-    ME = -sum p log p (von Neumann matrix entropy). center=True = centered (covariance) ablation = drops magnitude."""
-    if len(H) < 4:
+    """(HS, ME, lam1) strict to Eq 1-2. HS=nan if G_l rank-deficient (m>d)."""
+    m = len(H)
+    if m < 4:
         return (np.nan, np.nan, np.nan)
     M = (H - H.mean(0)) if center else H
-    s = np.linalg.svd(M, compute_uv=False); s = s[s > 1e-9]
-    if len(s) < 2:
+    s = np.linalg.svd(M, compute_uv=False)        # min(m,d) singular values of H_l
+    lam = s ** 2                                   # eigenvalues of G_l = H_l H_l^T (the min(m,d) of them)
+    nz = lam[lam > 1e-9]
+    if len(nz) < 2:
         return (np.nan, np.nan, np.nan)
-    lam = s ** 2; p = lam / lam.sum()
-    HS = float(np.log(s).sum() / len(H))          # sequence-normalized log-volume (paper HS)
-    ME = float(-(p * np.log(p)).sum())            # von Neumann matrix entropy (paper ME)
-    return (HS, ME, float(p[0]))
+    q = nz / nz.sum()                              # q_i = lambda_i / trace(G_l)
+    ME = float(-(q * np.log(q)).sum())             # Eq 2
+    lam1 = float(q[0])
+    HS = float(np.log(lam).sum() / m) if (len(lam) == m and lam.min() > 1e-9) else np.nan   # Eq 1, strict
+    return (HS, ME, lam1)
 
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("npz"); ap.add_argument("--layer", type=int, default=14); args = ap.parse_args()
     z = np.load(args.npz, allow_pickle=True)
-    csl = [int(x) for x in z["cloud_store_layers"]]; li = csl.index(args.layer)
-    RC, SR = z["respcloud"], z["step_token_ranges"]; ges = z["gold_error_step"].astype(int)
+    ges = z["gold_error_step"].astype(int); SR = z["step_token_ranges"]
+    if "hidden_stored" in z.files and bool(z["hidden_stored"]):
+        hd = str(z["hidden_dir"]); hl = [int(x) for x in z["hidden_layers"]]; lc = hl.index(args.layer); ids = z["ids"]
+        def getH(i):
+            a = hidden_io.load_chain(hd, ids[i]); return np.asarray(a[:, lc, :], np.float64)
+        src = f"FULL-dim hidden shards ({hd})"; N = len(ids)
+    else:
+        csl = [int(x) for x in z["cloud_store_layers"]]; li = csl.index(args.layer); RC = z["respcloud"]
+        def getH(i):
+            return None if RC[i] is None else np.asarray(RC[i], np.float64)[:, li, :]
+        src = "respcloud (JL-256: HS rank-deficient -> nan)"; N = len(RC)
+
     fn = ["HS", "ME", "lam1"]
-    # response-level (whole-response Gram): paper-faithful raw + centered ablation
     RESP_raw = {k: [] for k in fn}; RESP_cen = {k: [] for k in fn}; RLEN = []; RY = []
-    # step-level prefix-cumulative dF (eff-rank) + within-step eff-rank, for contrast
-    P_dF, P_in, P_nt, P_pos, Y, G = [], [], [], [], [], []
-    chains = []
-    for i in range(len(RC)):
-        if RC[i] is None:
+    P_dF, P_in, P_nt, Y, G = [], [], [], [], []; chains = []
+    for i in range(N):
+        H = getH(i)
+        if H is None or len(H) < 4:
             continue
-        H = np.asarray(RC[i], np.float64)[:, li, :]; rng = np.asarray(SR[i], int); a0 = int(rng[0, 0]); k = int(ges[i]); correct = k < 0; T = rng.shape[0]
-        wr = feats(H, False); wcn = feats(H, True)
+        rng = np.asarray(SR[i], int); a0 = int(rng[0, 0]); k = int(ges[i]); correct = k < 0; T = rng.shape[0]
+        wr = feats(H, False); wc = feats(H, True)
         for c, nm in enumerate(fn):
-            RESP_raw[nm].append(wr[c]); RESP_cen[nm].append(wcn[c])
+            RESP_raw[nm].append(wr[c]); RESP_cen[nm].append(wc[c])
         RLEN.append(len(H)); RY.append(int(not correct))
         ends = [min(len(H), int(rng[j, 1]) - a0 + 1) for j in range(T)]
-        pre = [feats(H[:e])[1] for e in ends]              # eff-rank of prefix <= step j
-        seq = np.full(T, np.nan)
-        for j in range(T):
-            seq[j] = pre[j] - (pre[j - 1] if j >= 1 else 0.0)   # dF(t)
+        pre = [feats(H[:e])[1] for e in ends]
+        seq = np.array([pre[j] - (pre[j - 1] if j >= 1 else 0.0) for j in range(T)])
         instep = np.full(T, np.nan)
         for j in range(T):
-            lo = max(0, int(rng[j, 0]) - a0); hi = ends[j]
-            if hi - lo >= 4:
-                instep[j] = feats(H[lo:hi])[1]
+            lo = max(0, int(rng[j, 0]) - a0)
+            if ends[j] - lo >= 4:
+                instep[j] = feats(H[lo:ends[j]])[1]
         for j in range(T):
             if correct or j < k:
                 lab = 0
@@ -90,41 +100,36 @@ def main():
                 lab = 1
             else:
                 continue
-            P_dF.append(seq[j]); P_in.append(instep[j]); P_nt.append(int(rng[j, 1] - rng[j, 0] + 1)); P_pos.append(j); Y.append(lab); G.append(i)
+            P_dF.append(seq[j]); P_in.append(instep[j]); P_nt.append(int(rng[j, 1] - rng[j, 0] + 1)); Y.append(lab); G.append(i)
         if not correct and T >= 4:
             chains.append({"seq": seq, "instep": instep, "k": k, "T": T,
                            "nt": np.array([int(rng[j, 1] - rng[j, 0] + 1) for j in range(T)], float)})
     RLEN = np.asarray(RLEN, float); RY = np.asarray(RY, int)
-    print(f"{args.npz} | L{args.layer} | chains {len(RY)} err-chains {int(RY.sum())} | steps {len(Y)} err {int(np.sum(Y))}")
-    print("  -- RESPONSE-LEVEL (whole-response Gram): chain correct vs error --")
-    print(f"     {'metric':9s} {'raw(paper)':>20s} {'centered(no-magnitude)':>24s}")
+    print(f"{args.npz} | L{args.layer} | {src} | chains {len(RY)} err {int(RY.sum())}")
+    print("  -- RESPONSE-LEVEL whole-response Gram (chain correct vs error) --")
+    print(f"     {'metric':6s} {'raw(paper)':>22s} {'centered(no-magnitude)':>24s}")
     for nm in fn:
         vr = np.asarray(RESP_raw[nm], float); vc = np.asarray(RESP_cen[nm], float)
-        print(f"     {nm:9s}  AUROC {bdir(auroc(vr, RY)):.3f} bkt {bucket(vr, RY, RLEN):.3f}   "
-              f"AUROC {bdir(auroc(vc, RY)):.3f} bkt {bucket(vc, RY, RLEN):.3f}")
-    P_dF = np.asarray(P_dF); P_in = np.asarray(P_in); P_nt = np.asarray(P_nt, float); P_pos = np.asarray(P_pos, float); Y = np.asarray(Y, int)
-    print("  -- STEP-LEVEL: prefix-cumulative dF(eff-rank) vs within-step eff-rank --")
+        print(f"     {nm:6s}  AUROC {bdir(auroc(vr, RY)):.3f} bkt {bucket(vr, RY, RLEN):.3f}    AUROC {bdir(auroc(vc, RY)):.3f} bkt {bucket(vc, RY, RLEN):.3f}")
+    P_dF = np.asarray(P_dF); P_in = np.asarray(P_in); P_nt = np.asarray(P_nt, float); Y = np.asarray(Y, int)
+    print("  -- STEP-LEVEL: prefix-cumulative dF(ME) vs within-step ME --")
     print(f"     prefix dF   pooled {bdir(auroc(P_dF, Y)):.3f}  bkt {bucket(P_dF, Y, P_nt):.3f}")
     print(f"     within-step pooled {bdir(auroc(P_in, Y)):.3f}  bkt {bucket(P_in, Y, P_nt):.3f}")
 
-    def wc(arr_key, ctrl):
-        locs, w = [], []
-        sign = 1.0 if auroc({"seq": P_dF, "instep": P_in}[arr_key], Y) >= 0.5 else -1.0
+    def wc(key):
+        sign = 1.0 if auroc({"seq": P_dF, "instep": P_in}[key], Y) >= 0.5 else -1.0; locs, w = [], []
         for ch in chains:
-            v = ch[arr_key]; k = ch["k"]; c = ch[ctrl]; fin = np.isfinite(v) & np.isfinite(c)
+            v = ch[key]; nt = ch["nt"]; k = ch["k"]; fin = np.isfinite(v) & np.isfinite(nt)
             if fin.sum() < 3 or not fin[k]:
                 continue
-            b = np.polyfit(c[fin], v[fin], 1); res = sign * (v - (b[0] * c + b[1]))
+            b = np.polyfit(nt[fin], v[fin], 1); res = sign * (v - (b[0] * nt + b[1]))
             others = np.array([j for j in range(len(v)) if j != k and fin[j]])
             if len(others) < 2:
                 continue
             locs.append(np.mean(res[others] < res[k])); w.append(len(others))
         return np.average(locs, weights=np.asarray(w, float)) if locs else float("nan")
-
-    for ch in chains:
-        ch["pos"] = np.arange(ch["T"], dtype=float)
-    print(f"     prefix dF   within-chain wc_loc(perp len) {wc('seq','nt'):.3f}   wc_loc(perp pos) {wc('seq','pos'):.3f}")
-    print(f"     within-step within-chain wc_loc(perp len) {wc('instep','nt'):.3f}")
+    print(f"     prefix dF   within-chain wc_loc(perp len) {wc('seq'):.3f}")
+    print(f"     within-step within-chain wc_loc(perp len) {wc('instep'):.3f}")
 
 
 if __name__ == "__main__":
