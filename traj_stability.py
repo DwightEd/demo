@@ -58,10 +58,10 @@ def chordal(V1, V2):
     return float(np.sqrt(max(0.0, 1.0 - (M ** 2).sum() / k)))
 
 
-def chain_feats(H, sizes, k):
-    ends = np.cumsum(sizes); starts = ends - sizes; ers, subs, gv = [], [], []
+def chain_feats(H, slices, k):
+    ers, subs, gv = [], [], []
     prevV = None; prevH = None
-    for a, b in zip(starts, ends):
+    for a, b in slices:
         Hj = H[a:b]
         er, V = step_geom(Hj, k); ers.append(er)
         if V is not None and prevV is not None:
@@ -87,17 +87,32 @@ def chain_feats(H, sizes, k):
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("npz"); ap.add_argument("--layer", type=int, default=16); ap.add_argument("--k", type=int, default=5); args = ap.parse_args()
     z = np.load(args.npz, allow_pickle=True)
-    assert "sv_clouds" in z.files and "cloud_sizes" in z.files, "need --store_clouds multisample npz (sv_clouds+cloud_sizes)"
-    pid = z["problem_ids"].astype(int); isc = z["is_correct"].astype(int)
-    cl = [int(x) for x in z["cloud_layers"]]; li = cl.index(args.layer); SVC, SZ = z["sv_clouds"], z["cloud_sizes"]; yinc = (isc == 0).astype(int)
+    pid = z["problem_ids"].astype(int)
+    isc = (z["is_correct_strict"] if "is_correct_strict" in z.files else z["is_correct"]).astype(int)
+    if "respcloud" in z.files:                                   # extract_features: respcloud + step_token_ranges
+        csl = [int(x) for x in z["cloud_store_layers"]]; li = csl.index(args.layer); RC = z["respcloud"]; SR = z["step_token_ranges"]
+        def get(i):
+            if RC[i] is None:
+                return None, None
+            H = np.asarray(RC[i], np.float64)[:, li, :]; rng = np.asarray(SR[i], int); a0 = int(rng[0, 0])
+            sl = [(max(0, int(rng[j, 0]) - a0), min(len(H), int(rng[j, 1]) - a0 + 1)) for j in range(rng.shape[0])]
+            return H, [(a, b) for a, b in sl if b - a >= 1]
+    elif "sv_clouds" in z.files:                                 # 10_sample --store_clouds: sv_clouds + cloud_sizes
+        cl = [int(x) for x in z["cloud_layers"]]; li = cl.index(args.layer); SVC, SZ = z["sv_clouds"], z["cloud_sizes"]
+        def get(i):
+            if SVC[i] is None:
+                return None, None
+            H = np.asarray(SVC[i], np.float64)[:, li, :]; sz = np.asarray(SZ[i], int)
+            e = np.cumsum(sz); s = e - sz; return H, list(zip(s.tolist(), e.tolist()))
+    else:
+        raise SystemExit("npz has neither respcloud nor sv_clouds")
+    yinc = (isc == 0).astype(int)
     rows, keep = [], []
-    for i in range(len(SVC)):
-        if SVC[i] is None:
+    for i in range(len(RC) if "respcloud" in z.files else len(SVC)):
+        H, sl = get(i)
+        if H is None or sl is None or len(sl) < 2:
             continue
-        H = np.asarray(SVC[i], np.float64)[:, li, :]; sizes = np.asarray(SZ[i], int)
-        if sizes.sum() != len(H) or len(sizes) < 2:
-            continue
-        rows.append(chain_feats(H, sizes, args.k)); keep.append(i)
+        rows.append(chain_feats(H, sl, args.k)); keep.append(i)
     keep = np.array(keep); yk = yinc[keep]; pk = pid[keep]
     groups = defaultdict(list)
     for j, p in enumerate(pk):

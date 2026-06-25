@@ -38,19 +38,30 @@ def feats(H):
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("npz"); ap.add_argument("--layer", type=int, default=16); args = ap.parse_args()
+    ap = argparse.ArgumentParser(); ap.add_argument("npz"); ap.add_argument("--layer", type=int, default=14); args = ap.parse_args()
     z = np.load(args.npz, allow_pickle=True)
-    assert "sv_clouds" in z.files, "need a --store_clouds multisample npz (sv_clouds absent)"
-    pid = z["problem_ids"].astype(int); isc = z["is_correct"].astype(int)
-    cl = [int(x) for x in z["cloud_layers"]]; li = cl.index(args.layer); SVC = z["sv_clouds"]; yinc = (isc == 0).astype(int)
+    pid = z["problem_ids"].astype(int)
+    isc = (z["is_correct_strict"] if "is_correct_strict" in z.files else z["is_correct"]).astype(int)
+    if "respcloud" in z.files:                                   # extract_features --source sampled / processbench
+        csl = [int(x) for x in z["cloud_store_layers"]]; li = csl.index(args.layer); RC = z["respcloud"]
+        def getH(i):
+            return None if RC[i] is None else np.asarray(RC[i], np.float64)[:, li, :]
+        N = len(RC); src = f"respcloud(JL) L{args.layer}"
+    elif "sv_clouds" in z.files:                                 # 10_sample_and_extract --store_clouds
+        cl = [int(x) for x in z["cloud_layers"]]; li = cl.index(args.layer); SVC = z["sv_clouds"]
+        def getH(i):
+            return None if SVC[i] is None else np.asarray(SVC[i], np.float64)[:, li, :]
+        N = len(SVC); src = f"sv_clouds L{args.layer}"
+    else:
+        raise SystemExit("npz has neither respcloud nor sv_clouds (no token clouds stored)")
+    yinc = (isc == 0).astype(int)
     rows, keep = [], []
-    for i in range(len(SVC)):
-        if SVC[i] is None:
-            continue
-        H = np.asarray(SVC[i], np.float64)[:, li, :]
-        if len(H) >= 4:
+    for i in range(N):
+        H = getH(i)
+        if H is not None and len(H) >= 4:
             rows.append(feats(H)); keep.append(i)
     keep = np.array(keep); yk = yinc[keep]; pk = pid[keep]
+    print(f"# {src} | strict_labels={'is_correct_strict' in z.files}")
     groups = defaultdict(list)
     for j, p in enumerate(pk):
         groups[p].append(j)
