@@ -29,11 +29,13 @@ def feats(H):
     for tg, M in (("raw", H), ("cen", H - H.mean(0))):
         s = np.linalg.svd(M, compute_uv=False); lam = s * s; nz = lam[lam > 1e-9]
         if len(nz) < 2:
-            out[f"lam1_{tg}"] = out[f"effrank_{tg}"] = out[f"HS_{tg}"] = np.nan; continue
+            out[f"lam1_{tg}"] = out[f"effrank_{tg}"] = out[f"HS_{tg}"] = out[f"alpha_{tg}"] = np.nan; continue
         q = nz / nz.sum()
         out[f"lam1_{tg}"] = float(q[0])
         out[f"effrank_{tg}"] = float(np.exp(-(q * np.log(q)).sum()))
         out[f"HS_{tg}"] = float(np.log(lam).sum() / n) if (len(lam) == n and lam.min() > 1e-9) else np.nan
+        sig = np.sqrt(nz); kk = np.arange(1, len(sig) + 1)         # power-law slope alpha (Yi Liu 2604.15350 Finding 7)
+        out[f"alpha_{tg}"] = float(-np.polyfit(np.log(kk), np.log(sig), 1)[0])
     return out
 
 
@@ -69,7 +71,7 @@ def main():
     npairs = sum(int(yk[g].sum()) * int((yk[g] == 0).sum()) for g in grp)
     print(f"{args.npz} | L{args.layer} | rollouts {len(keep)} | usable-problems {len(grp)} | within-pairs {npairs} | incorrect {int(yk.sum())}/{len(yk)}")
     print(f"  {'feature':12s} {'within(diff-ctrl)':>17s} {'pooled(cross)':>14s}")
-    for nm in ["kappa", "lam1_raw", "lam1_cen", "effrank_raw", "effrank_cen", "HS_raw", "HS_cen", "n_tok"]:
+    for nm in ["kappa", "alpha_raw", "alpha_cen", "lam1_raw", "lam1_cen", "effrank_raw", "effrank_cen", "HS_raw", "HS_cen", "n_tok"]:
         f = np.array([r.get(nm, np.nan) for r in rows], float)
         ap_ = auroc(f, yk); sign = 1.0 if (np.isfinite(ap_) and ap_ >= 0.5) else -1.0
         num = den = 0.0
