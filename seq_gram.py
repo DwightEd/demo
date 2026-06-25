@@ -39,14 +39,19 @@ def bucket(s, y, nt, nb=5):
     return num / den if den else float("nan")
 
 
-def feats(H):
+def feats(H, center=False):
+    """Paper-faithful (center=False): HS = (1/T) sum log(sigma) = seq-normalized log-volume of the RAW Gram;
+    ME = -sum p log p (von Neumann matrix entropy). center=True = centered (covariance) ablation = drops magnitude."""
     if len(H) < 4:
         return (np.nan, np.nan, np.nan)
-    Hc = H - H.mean(0); s = np.linalg.svd(Hc, compute_uv=False); lam = s ** 2; lam = lam[lam > 1e-9]
-    if len(lam) < 2:
+    M = (H - H.mean(0)) if center else H
+    s = np.linalg.svd(M, compute_uv=False); s = s[s > 1e-9]
+    if len(s) < 2:
         return (np.nan, np.nan, np.nan)
-    p = lam / lam.sum()
-    return (float(np.log(lam).mean()), float(np.exp(-(p * np.log(p)).sum())), float(p[0]))  # HS, eff-rank, lam1
+    lam = s ** 2; p = lam / lam.sum()
+    HS = float(np.log(s).sum() / len(H))          # sequence-normalized log-volume (paper HS)
+    ME = float(-(p * np.log(p)).sum())            # von Neumann matrix entropy (paper ME)
+    return (HS, ME, float(p[0]))
 
 
 def main():
@@ -54,9 +59,9 @@ def main():
     z = np.load(args.npz, allow_pickle=True)
     csl = [int(x) for x in z["cloud_store_layers"]]; li = csl.index(args.layer)
     RC, SR = z["respcloud"], z["step_token_ranges"]; ges = z["gold_error_step"].astype(int)
-    fn = ["HS", "effrank", "lam1"]
-    # response-level (whole-response Gram)
-    RESP = {k: [] for k in fn}; RLEN = []; RY = []
+    fn = ["HS", "ME", "lam1"]
+    # response-level (whole-response Gram): paper-faithful raw + centered ablation
+    RESP_raw = {k: [] for k in fn}; RESP_cen = {k: [] for k in fn}; RLEN = []; RY = []
     # step-level prefix-cumulative dF (eff-rank) + within-step eff-rank, for contrast
     P_dF, P_in, P_nt, P_pos, Y, G = [], [], [], [], [], []
     chains = []
@@ -64,9 +69,9 @@ def main():
         if RC[i] is None:
             continue
         H = np.asarray(RC[i], np.float64)[:, li, :]; rng = np.asarray(SR[i], int); a0 = int(rng[0, 0]); k = int(ges[i]); correct = k < 0; T = rng.shape[0]
-        wf = feats(H)
+        wr = feats(H, False); wcn = feats(H, True)
         for c, nm in enumerate(fn):
-            RESP[nm].append(wf[c])
+            RESP_raw[nm].append(wr[c]); RESP_cen[nm].append(wcn[c])
         RLEN.append(len(H)); RY.append(int(not correct))
         ends = [min(len(H), int(rng[j, 1]) - a0 + 1) for j in range(T)]
         pre = [feats(H[:e])[1] for e in ends]              # eff-rank of prefix <= step j
@@ -92,9 +97,11 @@ def main():
     RLEN = np.asarray(RLEN, float); RY = np.asarray(RY, int)
     print(f"{args.npz} | L{args.layer} | chains {len(RY)} err-chains {int(RY.sum())} | steps {len(Y)} err {int(np.sum(Y))}")
     print("  -- RESPONSE-LEVEL (whole-response Gram): chain correct vs error --")
+    print(f"     {'metric':9s} {'raw(paper)':>20s} {'centered(no-magnitude)':>24s}")
     for nm in fn:
-        v = np.asarray(RESP[nm], float)
-        print(f"     {nm:9s} AUROC {bdir(auroc(v, RY)):.3f}  bkt(len) {bucket(v, RY, RLEN):.3f}")
+        vr = np.asarray(RESP_raw[nm], float); vc = np.asarray(RESP_cen[nm], float)
+        print(f"     {nm:9s}  AUROC {bdir(auroc(vr, RY)):.3f} bkt {bucket(vr, RY, RLEN):.3f}   "
+              f"AUROC {bdir(auroc(vc, RY)):.3f} bkt {bucket(vc, RY, RLEN):.3f}")
     P_dF = np.asarray(P_dF); P_in = np.asarray(P_in); P_nt = np.asarray(P_nt, float); P_pos = np.asarray(P_pos, float); Y = np.asarray(Y, int)
     print("  -- STEP-LEVEL: prefix-cumulative dF(eff-rank) vs within-step eff-rank --")
     print(f"     prefix dF   pooled {bdir(auroc(P_dF, Y)):.3f}  bkt {bucket(P_dF, Y, P_nt):.3f}")
