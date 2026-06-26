@@ -600,6 +600,14 @@ def main():
                     help="comma layers for the heavy per-token full dump (subset of --layers); "
                          "default = all of --layers. Keep small (e.g. 10,14,18,22) to bound disk.")
     ap.add_argument("--limit", type=int, default=None, help="cap #chains (debug).")
+    ap.add_argument("--resume", action="store_true",
+                    help="checkpoint each chain to <output>.parts/<id>.pkl and skip chains already "
+                         "done on restart -- survives hangs/kills; final npz merged from parts.")
+    ap.add_argument("--skip_ids", default="",
+                    help="comma list of chain ids to SKIP (e.g. a chain that hangs the GPU).")
+    ap.add_argument("--max_resp_chars", type=int, default=0,
+                    help="if >0, skip chains whose response text exceeds this many chars "
+                         "(guards against one pathological long chain stalling the run).")
     ap.add_argument("--output", required=True)
     ap.add_argument("--smoke", action="store_true",
                     help="tiny CPU model (tiny-random-LlamaForCausalLM, safetensors) to test wiring.")
@@ -685,6 +693,7 @@ def main():
             model, tokenizer, records, layer_indices, args.massive_m, device,
             args.max_seq_len, n=args.massive_global)
 
+    import pickle
     rows, profiles, hidden_files = [], [], []
     dump_layers = layer_indices if not args.hidden_dump_layers else [
         int(x) for x in args.hidden_dump_layers.split(",") if int(x) in layer_indices]
@@ -692,9 +701,34 @@ def main():
     if args.hidden_dump_dir:
         os.makedirs(args.hidden_dump_dir, exist_ok=True)
         print(f"  HIDDEN DUMP: full per-token hidden at layers {dump_layers} -> {args.hidden_dump_dir}/<id>.npy")
+    skip_ids = {x for x in args.skip_ids.split(",") if x}
+    parts_dir = args.output + ".parts"
+    if args.resume:
+        os.makedirs(parts_dir, exist_ok=True)
+        print(f"  RESUME: per-chain checkpoint -> {parts_dir}/ (skip done on restart, survive hangs)")
+    def _san(rid):
+        return "".join(c if c.isalnum() or c in "._-" else "_" for c in str(rid))
     n_seen = n_kept = 0
     for rec in tqdm(records, desc="chains"):
         n_seen += 1
+        rid = str(rec["id"])
+        if rid in skip_ids:
+            continue
+        sp = os.path.join(parts_dir, _san(rid) + ".pkl")
+        if args.resume and os.path.exists(sp):
+            try:
+                with open(sp, "rb") as f:
+                    rowrec = pickle.load(f)
+                rows.append(rowrec); profiles.append(rowrec["profile"])
+                if args.hidden_dump_dir and os.path.exists(os.path.join(args.hidden_dump_dir, _san(rid) + ".npy")):
+                    hidden_files.append(_san(rid) + ".npy")
+                n_kept += 1
+                continue
+            except Exception:
+                pass                                    # corrupt shard -> reprocess
+        if args.max_resp_chars and len(str(rec.get("response", ""))) > args.max_resp_chars:
+            print(f"  skip {rid}: response {len(str(rec['response']))} chars > {args.max_resp_chars}")
+            continue
         try:
             res = extract_chain(
                 model, tokenizer, rec, device, layer_indices,
@@ -718,12 +752,14 @@ def main():
         n_kept += 1
         hf = res.pop("hidden_full", None)
         if args.hidden_dump_dir and hf is not None:
-            fn = "".join(c if c.isalnum() or c in "._-" else "_" for c in str(rec["id"])) + ".npy"
-            np.save(os.path.join(args.hidden_dump_dir, fn), hf)
-            hidden_files.append(fn)
+            np.save(os.path.join(args.hidden_dump_dir, _san(rid) + ".npy"), hf)
+            hidden_files.append(_san(rid) + ".npy")
         del hf
-        rows.append({**rec, **res})
-        profiles.append(res["profile"])
+        rowrec = {**rec, **res}
+        rows.append(rowrec); profiles.append(res["profile"])
+        if args.resume:
+            with open(sp, "wb") as f:
+                pickle.dump(rowrec, f)
         if device == "cuda" and n_kept % 10 == 0:
             torch.cuda.empty_cache()
 
