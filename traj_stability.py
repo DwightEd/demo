@@ -107,8 +107,9 @@ def main():
     else:
         raise SystemExit("npz has neither respcloud nor sv_clouds")
     yinc = (isc == 0).astype(int)
+    from tqdm import tqdm
     rows, keep = [], []
-    for i in range(len(RC) if "respcloud" in z.files else len(SVC)):
+    for i in tqdm(range(len(RC) if "respcloud" in z.files else len(SVC)), desc="traj", unit="chain", dynamic_ncols=True):
         H, sl = get(i)
         if H is None or sl is None or len(sl) < 2:
             continue
