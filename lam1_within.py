@@ -57,8 +57,11 @@ def main():
     else:
         raise SystemExit("npz has neither respcloud nor sv_clouds (no token clouds stored)")
     yinc = (isc == 0).astype(int)
+    print(f"# {src} | {N} rollouts loaded; computing features ...", flush=True)
     rows, keep = [], []
     for i in range(N):
+        if i % 200 == 0:
+            print(f"  {i}/{N}", flush=True)
         H = getH(i)
         if H is not None and len(H) >= 4:
             rows.append(feats(H)); keep.append(i)
