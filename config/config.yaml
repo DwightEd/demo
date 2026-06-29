@@ -1,0 +1,9 @@
+defaults:
+  - data: gsm8k
+  - geom: default
+  - gate: gate2
+  - _self_
+
+seed: 0
+data_dir: data/features        # resolved relative to the original cwd (see run_gate.py)
+outputs_dir: outputs/nts_gates

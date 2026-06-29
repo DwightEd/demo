@@ -1,0 +1,7 @@
+layer: 14
+m: 128
+k: 64
+dloc: 8
+massive_drop: 5
+folds: 5
+bank_cap: 30000
