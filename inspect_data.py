@@ -9,6 +9,8 @@ import argparse, os, numpy as np
 def _ex(z, name):
     v = z[name]
     if getattr(v, "dtype", None) == object:
+        if v.ndim == 0:                      # 0-d object scalar (e.g. hidden_dir, model_name)
+            return f"scalar: {str(v.item())[:70]}"
         shp = next((np.asarray(x).shape for x in v if x is not None and np.asarray(x).size), None)
         return f"object[{len(v)}]  eg-shape {shp}"
     return f"{v.dtype} {v.shape}"
