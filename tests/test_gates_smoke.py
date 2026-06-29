@@ -32,3 +32,14 @@ def test_all_gates_run():
     for name in ["gate0_mahal", "gate1_estimability", "gate2_nts_vs_rema", "gate3_curvature"]:
         res = GATES.create(name, cfg=cfg, params={}).run(tab)  # gate1: npz=None -> skips ID curve
         assert isinstance(res, GateResult) and isinstance(res.kill, bool) and res.lines
+
+
+def test_gates_run_without_kappa():
+    # mirrors the real npz where 'resultant'/kappa is absent (kappa all-NaN)
+    tab = _synth()
+    for c in tab.chains:
+        c.kappa = np.full(len(c.y), np.nan)
+    cfg = GeomCfg(m=20, k=15, dloc=3, massive_drop=2, folds=5)
+    for name in ["gate2_nts_vs_rema", "gate3_curvature"]:
+        res = GATES.create(name, cfg=cfg, params={}).run(tab)
+        assert isinstance(res, GateResult) and isinstance(res.kill, bool)

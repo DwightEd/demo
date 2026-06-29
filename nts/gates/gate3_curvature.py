@@ -27,10 +27,14 @@ class Gate3(BaseGate):
                 _, Nn, _ = chain_energies(tf(chains[i].vecs), bank, cfg.k, cfg.dloc); RAW[i] = Nn
         raw = np.concatenate([RAW[i] for i in range(len(chains))])
         resid = crossfit_signal("nts", table, cfg, folds=cfg.folds)
-        f = table.flat(); kmed = np.median(f.kappa[f.y == 0]); cbw = f.kappa >= kmed
+        f = table.flat()
+        if np.all(np.isnan(f.kappa)):
+            cbw = np.ones(len(f.y), bool); region = "ALL (kappa unavailable)"
+        else:
+            kmed = np.median(f.kappa[f.y == 0]); cbw = f.kappa >= kmed; region = "cbw (kappa>=median)"
         y, g = f.y[cbw], f.groups[cbw]
         r = GateResult(self.name)
-        r.lines.append(f"gate3 curvature | cbw steps {int(cbw.sum())} err {int(y.sum())}")
+        r.lines.append(f"gate3 curvature | region={region} steps {int(cbw.sum())} err {int(y.sum())}")
         r.lines.append(f"  raw normal bucket {bucket(raw[cbw], y, f.speed[cbw]):.3f} | resid bucket {bucket(resid[cbw], y, f.speed[cbw]):.3f}")
         base = oof_logit(raw[cbw][:, None], y, g); full = oof_logit(np.column_stack([raw[cbw], resid[cbw]]), y, g)
         mean, lo, hi, sig = cluster_boot_increment(full, base, y, g)

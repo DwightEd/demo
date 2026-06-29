@@ -32,7 +32,11 @@ class Gate2(BaseGate):
             return sig
 
         full_sig = block(np.ones(len(f.y), bool), "ALL")
-        kmed = np.median(f.kappa[f.y == 0]); cbw = f.kappa >= kmed
-        cbw_sig = block(cbw, "coherent-but-wrong (kappa>=median)")
+        if np.all(np.isnan(f.kappa)):
+            r.lines.append("  [coherent-but-wrong] skipped (kappa/resultant unavailable in this npz)")
+            cbw_sig = False
+        else:
+            kmed = np.median(f.kappa[f.y == 0]); cbw = f.kappa >= kmed
+            cbw_sig = block(cbw, "coherent-but-wrong (kappa>=median)")
         r.kill = not (full_sig or cbw_sig)
         return r
