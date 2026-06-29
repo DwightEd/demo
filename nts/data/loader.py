@@ -142,9 +142,11 @@ def load_full_table(full_npz, hidden_dir=None, layer=14, verbose=True):
             sc = np.asarray(SC[i]); kap = np.array([float(sc[t, li, ri]) for t in range(T)])
         else:
             kap = np.full(T, np.nan)
+        a0 = int(rr[0, 0])
+        sr = np.array([[max(0, int(rr[t, 0]) - a0), max(0, int(rr[t, 1]) - a0 + 1)] for t in range(T)], dtype=int)
         chains.append(ChainData(vecs=vecs, y=y, length=length, speed=sp, repetition=rep,
                                 kappa=kap, problem_id=int(pid[i]), correct=ges[i] < 0,
-                                hidden_path=shard, hidden_col=hcol))
+                                hidden_path=shard, hidden_col=hcol, step_ranges=sr))
     if verbose and n_missing:
         print(f"[loader] {n_missing}/{len(ids)} chains skipped (shard missing under {hd})")
     return StepTable(chains=chains)

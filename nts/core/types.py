@@ -16,6 +16,7 @@ class ChainData:
     correct: bool           # whole chain has no error
     hidden_path: str = None  # path to per-token hidden shard (R,L,d) for step-free cloud signals
     hidden_col: int = 0      # layer column within that shard
+    step_ranges: np.ndarray = None  # (T,2) shard-relative [lo,hi) token slices per step (for per-step NTC)
 
 
 @dataclass

@@ -34,3 +34,28 @@ def bucket(s, y, nt, nb=6):
         if np.isfinite(a) and ne and ng:
             num += a * ne * ng; den += ne * ng
     return num / den if den else float("nan")
+
+
+def spearman(a, b):
+    a = np.asarray(a, float); b = np.asarray(b, float)
+    m = np.isfinite(a) & np.isfinite(b)
+    if m.sum() < 3:
+        return float("nan")
+    ra = np.argsort(np.argsort(a[m])).astype(float)
+    rb = np.argsort(np.argsort(b[m])).astype(float)
+    return float(np.corrcoef(ra, rb)[0, 1])
+
+
+def bimodality_coeff(x):
+    """Sarle's bimodality coefficient BC=(skew^2+1)/kurtosis; >0.555 suggests bimodal."""
+    x = np.asarray(x, float); x = x[np.isfinite(x)]
+    n = len(x)
+    if n < 8:
+        return float("nan")
+    m = x.mean(); s = x.std()
+    if s <= 0:
+        return float("nan")
+    z = (x - m) / s
+    g1 = (z ** 3).mean(); g2 = (z ** 4).mean() - 3.0
+    denom = g2 + 3.0 * (n - 1) ** 2 / ((n - 2) * (n - 3))
+    return float((g1 ** 2 + 1.0) / denom) if denom > 0 else float("nan")
