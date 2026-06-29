@@ -14,6 +14,8 @@ class ChainData:
     kappa: np.ndarray       # (T,) float raw-kappa (resultant)
     problem_id: int
     correct: bool           # whole chain has no error
+    hidden_path: str = None  # path to per-token hidden shard (R,L,d) for step-free cloud signals
+    hidden_col: int = 0      # layer column within that shard
 
 
 @dataclass

@@ -1,2 +1,3 @@
 name: gsm8k
-file: processbench_gsm8k_features.npz
+full: features/full_gsm8k.npz
+hidden: hidden/gsm8k

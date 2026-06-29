@@ -5,7 +5,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from nts.core.config import GeomCfg
 from nts.core.registry import GATES
-from nts.data.loader import load_step_table
+from nts.data.loader import load_full_table
 import nts.signals  # register signals
 import nts.gates    # register gates
 
@@ -13,10 +13,11 @@ import nts.gates    # register gates
 @hydra.main(version_base=None, config_path="../config", config_name="config")
 def main(cfg: DictConfig):
     root = hydra.utils.get_original_cwd()
-    npz = os.path.join(root, cfg.data_dir, cfg.data.file)
     geom = GeomCfg(**OmegaConf.to_container(cfg.geom, resolve=True))
-    table = load_step_table(npz, geom.layer)
-    params = {"npz": npz}  # gate1 needs npz for the ID curve; others ignore it
+    npz = os.path.join(root, cfg.data_dir, cfg.data.full)        # full_*.npz (labels + resultant)
+    hidden = os.path.join(root, cfg.data_dir, cfg.data.hidden)   # data/hidden/<subset>/ per-token shards
+    table = load_full_table(npz, hidden, geom.layer)
+    params = {"npz": npz}  # gate1 ID curve reads stepvec from the full npz
     res = GATES.create(cfg.gate.name, cfg=geom, params=params).run(table)
     print(f"\n=== {cfg.gate.name} on {cfg.data.name} (layer {geom.layer}) ===")
     print(res.summary)

@@ -1,9 +1,9 @@
 defaults:
   - data: gsm8k
   - geom: default
-  - gate: gate2
+  - gate: gate_cloud
   - _self_
 
 seed: 0
-data_dir: data/features        # resolved relative to the original cwd (see run_gate.py)
+data_dir: data                 # resolved relative to original cwd; data yaml gives full/ + hidden/ paths under it
 outputs_dir: outputs/nts_gates

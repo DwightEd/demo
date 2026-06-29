@@ -1,2 +1,3 @@
 name: olympiadbench
-file: processbench_olympiadbench_features.npz
+full: features/full_olympiadbench.npz   # NOTE: may not exist on the box (only gsm8k/math/omnimath confirmed)
+hidden: hidden/olympiadbench

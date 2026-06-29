@@ -1,4 +1,4 @@
-layer: 16   # this npz stores layers [8,16,24,31]; 16 is nearest to the prior-work layer 14 (see nts/README.md)
+layer: 14   # present in data/hidden shards [10,14,18,22]; prior-work analysis layer
 m: 128
 k: 64
 dloc: 8

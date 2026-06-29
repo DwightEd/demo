@@ -1,5 +1,13 @@
 # NTS Evidence Gates (`nts/`)
 
+> **UPDATE 2026-06-29 (supersedes the gsm8k-feature notes below).** The loader now reads the
+> canonical cross-problem data — `data/features/full_*.npz` (labels + `resultant`/κ + `qvec`) +
+> `data/hidden/<subset>/<id>.npy` (full per-token hidden, layers `[10,14,18,22]`, **analysis layer 14**),
+> via `load_full_table`. Two NTS variants are kept: **(1) step-free cloud** — `nts_cloud` signal =
+> off-correct-subspace energy of the token cloud (`geom/subspace.py`), evaluated chain-level
+> within-problem by **`gate_cloud`** (vs `is_correct`, benchmarked against recorded probe 0.71 /
+> SPE 0.68); **(2) step-displacement** — the original `nts` signal + `gate0..3`. See `DATA.md`.
+
 Post-hoc geometric falsification gates over **already-extracted** ProcessBench hidden states (no model/GPU). Mirrors the `hallucination-detection` architecture: `core` (Registry + `StepTable`/`ChainData` + `GeomCfg`), `data` (npz→table loader), `geom` (PCA-whiten reducer, kNN bank, local-PCA tangent/normal decomposition, TwoNN), `signals` (`BaseSignal` + `@SIGNALS.register`: `nts`, `rema`, `kappa`, `mahalanobis`), `eval` (AUROC/bucket/residualize/bootstrap), `gates` (`BaseGate.run→GateResult`). One Hydra entry: `scripts/run_gate.py`.
 
 **Hypothesis under test (NTS):** a reasoning error = step displacement Δh **escaping off the manifold of correct reasoning** (large *normal* component to the local tangent space), while hard-but-correct reasoning stays *tangent*. Gates 0–3 try to **kill** this cheaply; **Gate 2** is decisive (NTS-resid must beat the isotropic REMA baseline after triple residualization).
