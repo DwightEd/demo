@@ -721,7 +721,8 @@ def print_summary(all_results: dict):
     print("\n" + "=" * 80)
     print("Summary")
     print("=" * 80)
-    print(f"{'Test':<15} {'Metric':<25} {'Error':<8} {'Correct':<8} {'Cohen\\'s d':<12} {'p-value':<10}")
+    cohens_label = "Cohen's d"
+    print(f"{'Test':<15} {'Metric':<25} {'Error':<8} {'Correct':<8} {cohens_label:<12} {'p-value':<10}")
     print("-" * 80)
 
     for k in sorted(all_results.keys()):
