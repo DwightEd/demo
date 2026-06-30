@@ -15,6 +15,7 @@ import sys
 import json
 from pathlib import Path
 from datetime import datetime
+import numpy as np
 
 from data_loading import (
     load_all_trajectories,

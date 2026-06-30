@@ -50,9 +50,12 @@ def compute_step_geometry_ultra_fast(H: np.ndarray, step_id: int, layer_id: int)
     else:
         eff_rank = 1.0
 
-    # 谱熵
-    lam = eigenvalues[eigenvalues > eps]
-    spectral_entropy = float(-np.sum(lam * np.log(lam + eps))) if len(lam) > 0 else 0.0
+    # 谱熵：重新归一化后计算
+    if eigenvalues.sum() > eps:
+        eigenvalues_norm = eigenvalues / eigenvalues.sum()  # 重新归一化
+        spectral_entropy = float(-np.sum(eigenvalues_norm * np.log(eigenvalues_norm + eps)))
+    else:
+        spectral_entropy = 0.0
 
     return {
         'step_id': step_id,
