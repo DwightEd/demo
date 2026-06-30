@@ -87,10 +87,13 @@ class StepGeometry:
     spectral_entropy: float = np.nan
     norm: float = np.nan
     eigenvalues: np.ndarray = None
+    principal_directions: np.ndarray = None  # 兼容性
 
     def __post_init__(self):
         if self.eigenvalues is None:
             self.eigenvalues = np.array([])
+        if self.principal_directions is None:
+            self.principal_directions = np.array([])
 
 
 @dataclass

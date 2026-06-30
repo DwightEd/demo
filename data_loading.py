@@ -450,8 +450,10 @@ def print_trajectory_stats(trajectories: List[ReasoningTrajectory],
                 g = geom_seq[0]
                 print(f"  Step 0: κ={g.kappa:.3f}, eff_rank={g.eff_rank:.2f}, "
                       f"entropy={g.spectral_entropy:.3f}, n_tokens={g.n_tokens}")
-                print(f"  Principal directions shape: {g.principal_directions.shape}")
-                print(f"  Eigenvalues top3: {g.eigenvalues[:3]}")
+                if hasattr(g, 'principal_directions') and g.principal_directions.size > 0:
+                    print(f"  Principal directions shape: {g.principal_directions.shape}")
+                if g.eigenvalues.size >= 3:
+                    print(f"  Eigenvalues top3: {g.eigenvalues[:3]}")
 
     print("=" * 80)
 
