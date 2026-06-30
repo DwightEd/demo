@@ -93,19 +93,37 @@ def extract_step_geometry_from_stepcloud(stepcloud_data: np.ndarray,
     geom = StepGeometry(
         step_id=step_idx,
         layer=layer_id,
-        n_tokens=int(features[0]) if not np.isnan(features[0]) else 0,
+        n_tokens=1,  # 不在stepcloud中存储
     )
 
-    # 特征索引（根据scatter_spectrum.py的顺序）
-    # 假设顺序：n_tokens, kappa, eff_rank, lam1, gap, residual, ...
-    geom.kappa = float(features[1]) if not np.isnan(features[1]) else np.nan
-    geom.eff_rank = float(features[2]) if not np.isnan(features[2]) else np.nan
+    # 特征索引（根据CLOUD_NAMES顺序）:
+    # CLOUD_NAMES = ("cloud_D", "cloud_V", "cloud_C", "coherence",
+    #                "mean_tok_norm", "resultant", "resultant_bulk",
+    #                "resultant_unif", "norm_bulk")
+    # 0: cloud_D (effective rank)
+    # 1: cloud_V (energy)
+    # 2: cloud_C (concentration)
+    # 3: coherence
+    # 4: mean_tok_norm
+    # 5: resultant (κ - directional concentration)
+    # 6: resultant_bulk
+    # 7: resultant_unif
+    # 8: norm_bulk
 
-    # spectrum前5个（如果没有直接存储，从eff_rank估计）
-    geom.spectrum = np.array([features[i] if i < len(features) and not np.isnan(features[i]) else 0.0
-                             for i in range(3, 8)])
+    geom.kappa = float(features[5]) if len(features) > 5 and not np.isnan(features[5]) else np.nan
+    geom.eff_rank = float(features[0]) if len(features) > 0 and not np.isnan(features[0]) else np.nan
 
-    geom.norm = float(features[3]) if len(features) > 3 and not np.isnan(features[3]) else np.nan
+    # 使用其他几何特征作为"谱形状"的代理
+    # coherence + cloud_C + norm_bulk
+    geom.spectrum = np.array([
+        features[3] if len(features) > 3 and not np.isnan(features[3]) else 0.0,  # coherence
+        features[2] if len(features) > 2 and not np.isnan(features[2]) else 0.0,  # cloud_C
+        features[8] if len(features) > 8 and not np.isnan(features[8]) else 0.0,  # norm_bulk
+        features[6] if len(features) > 6 and not np.isnan(features[6]) else 0.0,  # resultant_bulk
+        features[7] if len(features) > 7 and not np.isnan(features[7]) else 0.0,  # resultant_unif
+    ])
+
+    geom.norm = float(features[4]) if len(features) > 4 and not np.isnan(features[4]) else np.nan
 
     return geom
 
