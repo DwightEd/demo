@@ -44,9 +44,76 @@
 
 ---
 
-## 🏗️ 方法架构：三层分析
+## 🏗️ 方法架构：三层分析（完整版）
 
 ### Layer 1: Step-wise Geometry (每步的几何特征)
+
+#### 1.1 真正的几何信息（基于特征向量）
+
+**关键洞察**：特征值（λ）描述散布强度，特征向量（V）描述主方向。**轨迹是主方向的演化**。
+
+```
+对于步骤i、层l：
+
+Scatter Matrix: S_i^l = (1/n_i) Σ û_j ⊗ û_j
+
+特征分解: S_i^l = V_i^l Λ_i^l (V_i^l)^T
+  - Λ_i^l = diag(λ_1, ..., λ_d): 特征值（描述强度）
+  - V_i^l = [v_1, ..., v_d]: 特征向量（描述方向）
+```
+
+**几何特征（基于特征向量）**：
+```python
+# 主成分方向
+principal_directions_i = V_i[:, :k]  # 前k个主成分向量
+
+# 方向集中度（κ）
+kappa_i = ||mean(û_i)||
+
+# 有效秩
+eff_rank_i = exp(-Σ λ_j log λ_j)
+```
+
+#### 1.2 标量特征的动态演化
+
+即使标量本身是冗余的，它们的**动态变化模式**是有价值的：
+
+```python
+# 标量序列（随步骤演化）
+kappa_sequence = [κ_0, κ_1, κ_2, ...]        # 方向集中度的演化
+eff_rank_sequence = [r_0, r_1, r_2, ...]    # 有效秩的演化
+entropy_sequence = [H_0, H_1, H_2, ...]     # 谱熵的演化
+norm_sequence = [||μ_0||, ||μ_1||, ...]       # 质心范数的演化
+```
+
+**动态变化的统计量**：
+- 均值、方差、最小值、最大值
+- 变化率：Δ_i = value_{i+1} - value_i
+- 累积变化：total_change = |value_last - value_first|
+
+#### 1.3 完整的数据结构
+
+```python
+@dataclass
+class StepGeometry:
+    """单步骤的完整几何描述"""
+    step_id: int
+    layer: int
+    n_tokens: int
+
+    # === 标量特征 ===
+    kappa: float              # 方向集中度
+    eff_rank: float           # 有效秩
+    spectral_entropy: float   # 谱熵
+    norm: float               # 质心范数
+
+    # === 真正的几何特征（特征向量）===
+    principal_directions: np.ndarray  # (d, k) 前k个主成分向量
+    eigenvalues: np.ndarray          # (d,) 所有特征值
+    scatter_matrix: np.ndarray       # (d, d) scatter matrix
+```
+
+---
 
 #### 数据来源
 ```
@@ -107,6 +174,158 @@ class StepGeometry:
 ---
 
 ### Layer 2: Trajectory Geometry (步骤间几何关系)
+
+#### 2.1 真正的几何轨迹分析（基于特征向量）
+
+##### 指标1: Principal Direction Rotation（主方向旋转）
+
+**核心思想**：错误推理中，主成分方向会突然旋转。
+
+```python
+def principal_direction_rotation(g1: StepGeometry, g2: StepGeometry, k: int = 5) -> float:
+    """计算主成分方向的旋转角度
+
+    Returns:
+        平均旋转角度（弧度）
+    """
+    V1 = g1.principal_directions[:, :k]  # (d, k)
+    V2 = g2.principal_directions[:, :k]  # (d, k)
+
+    # 计算每个主成分的旋转角度
+    angles = []
+    for i in range(k):
+        v1_i = V1[:, i]
+        v2_i = V2[:, i]
+        cos_theta = np.dot(v1_i, v2_i)
+        cos_theta = np.clip(cos_theta, -1.0, 1.0)
+        theta = np.arccos(cos_theta)
+        angles.append(theta)
+
+    return np.mean(angles)  # 平均旋转角度
+```
+
+##### 指标2: Subspace Drift（子空间漂移）
+
+**核心思想**：错误推理中，步骤间的子空间夹角会突然增大。
+
+```python
+def subspace_drift(g1: StepGeometry, g2: StepGeometry, k: int = 5) -> float:
+    """计算子空间之间的漂移程度
+
+    使用：主子空间之间的最大夹角
+    """
+    V1 = g1.principal_directions[:, :k]
+    V2 = g2.principal_directions[:, :k]
+
+    # 计算子空间之间的角度（使用Grassmann manifold距离）
+    # 简化：计算两个投影矩阵的Frobenius范数距离
+    P1 = V1 @ V1.T  # (d, d) 投影矩阵
+    P2 = V2 @ V2.T
+
+    drift = np.linalg.norm(P1 - P2, ord='fro')
+    return drift
+```
+
+##### 指标3: Projection Residual（投影残差）
+
+**核心思想**：错误推理中，点云到主子空间的距离会增大（信息丢失）。
+
+```python
+def projection_residual(geometry: StepGeometry, k: int = 5) -> float:
+    """计算点云到主子空间的投影残差
+
+    残差 = ||I - P_k|| * H_i，其中P_k是前k个主成分的投影矩阵
+    """
+    V = geometry.principal_directions[:, :k]
+    P = V @ V.T
+    I = np.eye(V.shape[0])
+    residual = np.linalg.norm(I - P, ord='fro')
+
+    return residual
+```
+
+#### 2.2 标量动态演化分析
+
+##### 指标4: Scalar Evolution Smoothness（标量演化平滑度）
+
+```python
+def scalar_evolution_smoothness(scalar_sequence: List[float]) -> Tuple[float, np.ndarray]:
+    """标量序列的平滑度
+
+    检测标量的演化是否平滑
+    """
+    if len(scalar_sequence) < 2:
+        return np.nan, np.array([])
+
+    diffs = np.diff(scalar_sequence)
+    smoothness = 1.0 / (1.0 + np.var(diffs))
+
+    return smoothness, diffs
+```
+
+##### 指标5: Scalar Trend Consistency（标量趋势一致性）
+
+```python
+def scalar_trend_consistency(scalar_sequence: List[float]) -> float:
+    """标量序列的趋势一致性
+
+    正确推理：单调趋势（如κ递增）
+    错误推理：趋势被打断
+    """
+    if len(scalar_sequence) < 3:
+        return np.nan
+
+    # 拟合线性趋势
+    x = np.arange(len(scalar_sequence))
+    slope, _ = np.polyfit(x, scalar_sequence, 1)
+
+    # 计算R²
+    y_pred = slope * x + np.mean(scalar_sequence)
+    ss_res = np.sum((scalar_sequence - y_pred) ** 2)
+    ss_tot = np.sum((scalar_sequence - np.mean(scalar_sequence)) ** 2)
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+
+    return r2
+```
+
+#### 2.3 组合相似度（更新版）
+
+```python
+def geometric_sim(g1: StepGeometry, g2: StepGeometry) -> float:
+    """组合多个几何维度的相似度
+
+    包括：
+    - 标量相似：κ, eff_rank
+    - 几何相似：主方向旋转、子空间漂移
+    - 谱形状相似：JS散度
+    """
+    # 标量部分
+    kappa_sim = 1.0 - min(abs(g1.kappa - g2.kappa), 1.0)
+    eff_rank_sim = 1.0 - abs(g1.eff_rank - g2.eff_rank) / max(g1.eff_rank, g2.eff_rank, 1.0)
+
+    # 几何部分
+    rotation_sim = 1.0 - (2/np.pi) * principal_direction_rotation(g1, g2)
+    drift_sim = 1.0 / (1.0 + subspace_drift(g1, g2))
+
+    # 谱形状
+    spectrum_sim = 1.0 - jensenshannon(g1.eigenvalues[:10], g2.eigenvalues[:10])
+
+    return (0.2 * kappa_sim + 0.15 * eff_rank_sim +
+            0.25 * rotation_sim + 0.2 * drift_sim +
+            0.2 * spectrum_sim)
+```
+
+#### 2.4 核心指标总结
+
+| 指标 | 类型 | 检测内容 | 预期（正确推理） |
+|------|------|----------|----------------|
+| Principal Direction Rotation | 几何 | 主方向旋转角度 | 小（平滑） |
+| Subspace Drift | 几何 | 子空间漂移程度 | 小（稳定） |
+| Projection Residual | 几何 | 信息丢失程度 | 低（信息保留） |
+| κ Evolution Smoothness | 标量动态 | κ演化平滑度 | 高（单调递增） |
+| eff_rank Trend | 标量动态 | eff_rank趋势 | 一致（无突变） |
+
+---
 
 #### 2.1 几何相似度计算
 
