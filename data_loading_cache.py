@@ -20,7 +20,7 @@ HIDDEN_LAYERS = [10, 14, 18, 22]
 
 
 def compute_step_geometry_ultra_fast(H: np.ndarray, step_id: int, layer_id: int):
-    """超快速计算：只算κ，跳过其他"""
+    """超快速计算：只算κ，用对角元近似eigenvalues"""
     n_tokens = H.shape[0]
     if n_tokens == 0:
         return None
@@ -31,14 +31,28 @@ def compute_step_geometry_ultra_fast(H: np.ndarray, step_id: int, layer_id: int)
     kappa = float(np.linalg.norm(mu))
     norm = float(H.mean())
 
-    # 用一个非常简单的rank估计
-    # rank ≈ (sum of diagonal)^2 / sum of all elements squared
-    S_diag = np.sum(H_norm ** 2, axis=0) / n_tokens
+    # 用scatter matrix的对角元作为近似的eigenvalues
+    S_diag = np.sum(H_norm ** 2, axis=0) / n_tokens  # 对角元
+
+    # 归一化
+    if S_diag.sum() > eps:
+        S_diag = S_diag / S_diag.sum()
+    else:
+        S_diag = np.ones(4096) / 4096
+
+    # 降序排列作为近似谱
+    eigenvalues = np.sort(S_diag)[::-1][:10]  # 前10个
+
+    # 用trace估计rank
     if S_diag.sum() > eps:
         eff_rank = (S_diag.sum() ** 2) / np.sum(S_diag ** 2)
         eff_rank = float(min(eff_rank, n_tokens))
     else:
         eff_rank = 1.0
+
+    # 谱熵
+    lam = eigenvalues[eigenvalues > eps]
+    spectral_entropy = float(-np.sum(lam * np.log(lam + eps))) if len(lam) > 0 else 0.0
 
     return {
         'step_id': step_id,
@@ -46,7 +60,9 @@ def compute_step_geometry_ultra_fast(H: np.ndarray, step_id: int, layer_id: int)
         'n_tokens': n_tokens,
         'kappa': kappa,
         'eff_rank': eff_rank,
+        'spectral_entropy': spectral_entropy,
         'norm': norm,
+        'eigenvalues': eigenvalues,
     }
 
 
