@@ -302,8 +302,6 @@ def geometric_sim(g1: StepGeometry, g2: StepGeometry,
             spectrum_sim = 0.5
     else:
         spectrum_sim = 0.5
-    else:
-        spectrum_sim = 0.5
 
     # 组合
     total_weight = kappa_weight + eff_rank_weight + rotation_weight + drift_weight + spectrum_weight
