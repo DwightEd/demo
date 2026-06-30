@@ -186,35 +186,19 @@ def detect_deep_decay_trajectory(chain, deep_layers=[22, 26, 30]):
 ### 在远程服务器上运行
 
 ```bash
-# 1. 上传脚本到服务器
-scp trajectory_phase_transition.py run_phase_transition.sh user@server:/path/to/demo/
+# 登录服务器并cd到demo目录
+cd /gz-data/research/demo/constrained_manifolds/demo
 
-# 2. 登录服务器并运行
-ssh user@server
-cd /path/to/demo/
-chmod +x run_phase_transition.sh
+# 拉取最新代码
+git pull
 
-# 完整验证（所有数据集）
-./run_phase_transition.sh
+# 运行验证
+python trajectory_phase_transition.py /gz-data/research/demo/data/features/full_omnimath.npz --output_dir ./trajectory_results
 
-# 快速测试（只运行omnimath）
-./run_phase_transition.sh --quick
-
-# 只测试特定数据集
-./run_phase_transition.sh --datasets "math omnimath"
-```
-
-### 本地测试
-
-```bash
-# 1. 安装依赖
-pip install numpy scipy tqdm
-
-# 2. 运行单个文件
-python trajectory_phase_transition.py /path/to/full_omnimath.npz --output_dir ./results
-
-# 3. 指定多层分析
-python trajectory_phase_transition.py /path/to/full_omnimath.npz --layers 10 14 18 22
+# 或运行多个数据集
+for dataset in gsm8k math omnimath; do
+    python trajectory_phase_transition.py /gz-data/research/demo/data/features/full_${dataset}.npz --output_dir ./trajectory_results
+done
 ```
 
 ---
