@@ -165,8 +165,8 @@ def load_all_trajectories_cached(npz_path: str,
     step_token_ranges = data['step_token_ranges']
     subset = Path(npz_path).stem.replace('full_', '')
 
-    # 缓存目录
-    cache_dir = Path(hidden_dir) / "../cache" / subset
+    # 缓存目录（统一使用hidden_dir的父目录）
+    cache_dir = Path(hidden_dir).parent / "cache" / subset
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     n_chains = len(problem_ids)
@@ -266,14 +266,15 @@ def load_all_trajectories_cached(npz_path: str,
 def clear_cache(npz_path: str, hidden_dir: str):
     """清除缓存"""
     subset = Path(npz_path).stem.replace('full_', '')
-    cache_dir = Path(hidden_dir) / "../cache" / subset
+    cache_dir = Path(hidden_dir).parent / "cache" / subset  # 修正路径：hidden_dir的父目录/cache/subset
 
     if cache_dir.exists():
         import shutil
         shutil.rmtree(cache_dir)
         print(f"Cleared cache: {cache_dir}")
+        print(f"Shell equivalent: rm -rf {cache_dir}")
     else:
-        print(f"No cache to clear")
+        print(f"No cache to clear (directory not found): {cache_dir}")
 
 
 if __name__ == "__main__":

@@ -243,10 +243,26 @@ def main():
         print("\n[5/5] Skipping validation experiments")
         all_results['validation'] = {}
 
-    # 保存结果
+    # 保存结果（处理循环引用和numpy类型）
+    def json_serializable(obj):
+        """Convert object to JSON-serializable format"""
+        if isinstance(obj, (np.float32, np.float64, np.int64, np.int32)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif hasattr(obj, '__dict__'):
+            return {k: json_serializable(v) for k, v in obj.__dict__.items()
+                    if not k.startswith('_')}  # Skip private attributes
+        elif isinstance(obj, dict):
+            return {k: json_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [json_serializable(v) for v in obj]
+        else:
+            return str(obj)  # Fallback for other types
+
     output_path = output_dir / f"results_{metadata['subset']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     with open(output_path, 'w') as f:
-        json.dump(all_results, f, indent=2, default=lambda x: float(x) if isinstance(x, (np.float32, np.float64)) else x)
+        json.dump(json_serializable(all_results), f, indent=2)
 
     print(f"\n{'=' * 80}")
     print(f"Results saved to: {output_path}")
