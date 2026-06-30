@@ -26,6 +26,18 @@ from dataclasses import dataclass
 from data_loading import StepGeometry, ReasoningTrajectory
 
 
+def _has_non_empty_array(obj, attr):
+    """安全检查对象是否有非空数组属性"""
+    if not hasattr(obj, attr):
+        return False
+    val = getattr(obj, attr)
+    if val is None:
+        return False
+    if not isinstance(val, np.ndarray):
+        return False
+    return val.size > 0
+
+
 # =============================================================================
 # 真正的几何特征（基于特征向量）
 # =============================================================================
@@ -42,7 +54,7 @@ def principal_direction_rotation(g1: StepGeometry, g2: StepGeometry, k: int = 5)
     Returns:
         平均旋转角度（弧度），范围[0, π/2]
     """
-    if g1.principal_directions.size == 0 or g2.principal_directions.size == 0:
+    if not _has_non_empty_array(g1, 'principal_directions') or not _has_non_empty_array(g2, 'principal_directions'):
         return np.nan
 
     V1 = g1.principal_directions[:, :k]  # (d, k)
@@ -79,7 +91,7 @@ def subspace_drift(g1: StepGeometry, g2: StepGeometry, k: int = 5) -> float:
     Returns:
         漂移程度，越大表示漂移越大
     """
-    if g1.principal_directions.size == 0 or g2.principal_directions.size == 0:
+    if not _has_non_empty_array(g1, 'principal_directions') or not _has_non_empty_array(g2, 'principal_directions'):
         return np.nan
 
     V1 = g1.principal_directions[:, :k]
@@ -114,7 +126,7 @@ def projection_residual(geometry: StepGeometry, k: int = 5) -> float:
     Returns:
         残差，越大表示信息丢失越多
     """
-    if geometry.principal_directions.size == 0:
+    if not _has_non_empty_array(geometry, 'principal_directions'):
         return np.nan
 
     V = geometry.principal_directions[:, :k]
@@ -279,12 +291,17 @@ def geometric_sim(g1: StepGeometry, g2: StepGeometry,
         drift_sim = 0.5
 
     # 谱形状
-    if g1.eigenvalues.size >= 2 and g2.eigenvalues.size >= 2:
-        s1 = g1.eigenvalues[:10]
-        s2 = g2.eigenvalues[:10]
-        s1 = s1 / (s1.sum() + 1e-12)
-        s2 = s2 / (s2.sum() + 1e-12)
-        spectrum_sim = 1.0 - jensenshannon(s1, s2)
+    if _has_non_empty_array(g1, 'eigenvalues') and _has_non_empty_array(g2, 'eigenvalues'):
+        if g1.eigenvalues.size >= 2 and g2.eigenvalues.size >= 2:
+            s1 = g1.eigenvalues[:10]
+            s2 = g2.eigenvalues[:10]
+            s1 = s1 / (s1.sum() + 1e-12)
+            s2 = s2 / (s2.sum() + 1e-12)
+            spectrum_sim = 1.0 - jensenshannon(s1, s2)
+        else:
+            spectrum_sim = 0.5
+    else:
+        spectrum_sim = 0.5
     else:
         spectrum_sim = 0.5
 
@@ -312,12 +329,15 @@ def geometric_sim_scalar_only(g1: StepGeometry, g2: StepGeometry) -> float:
     eff_rank_sim = 1.0 - abs(g1.eff_rank - g2.eff_rank) / max_er
 
     # 谱相似度
-    if g1.eigenvalues.size >= 2 and g2.eigenvalues.size >= 2:
-        s1 = g1.eigenvalues[:10]
-        s2 = g2.eigenvalues[:10]
-        s1 = s1 / (s1.sum() + 1e-12)
-        s2 = s2 / (s2.sum() + 1e-12)
-        spectrum_sim = 1.0 - jensenshannon(s1, s2)
+    if _has_non_empty_array(g1, 'eigenvalues') and _has_non_empty_array(g2, 'eigenvalues'):
+        if g1.eigenvalues.size >= 2 and g2.eigenvalues.size >= 2:
+            s1 = g1.eigenvalues[:10]
+            s2 = g2.eigenvalues[:10]
+            s1 = s1 / (s1.sum() + 1e-12)
+            s2 = s2 / (s2.sum() + 1e-12)
+            spectrum_sim = 1.0 - jensenshannon(s1, s2)
+        else:
+            spectrum_sim = 0.5
     else:
         spectrum_sim = 0.5
 
@@ -349,8 +369,13 @@ def local_smoothness(geometry_sequence: List[StepGeometry]) -> Tuple[float, np.n
         g1 = geometry_sequence[i]
         g2 = geometry_sequence[i + 1]
 
-        # 尝试使用完整相似度
-        if g1.principal_directions.size > 0 and g2.principal_directions.size > 0:
+        # 尝试使用完整相似度（需要principal_directions）
+        has_pd1 = hasattr(g1, 'principal_directions') and g1.principal_directions is not None
+        has_pd2 = hasattr(g2, 'principal_directions') and g2.principal_directions is not None
+        has_size1 = has_pd1 and isinstance(g1.principal_directions, np.ndarray) and g1.principal_directions.size > 0
+        has_size2 = has_pd2 and isinstance(g2.principal_directions, np.ndarray) and g2.principal_directions.size > 0
+
+        if has_size1 and has_size2:
             sim = geometric_sim(g1, g2)
         else:
             sim = geometric_sim_scalar_only(g1, g2)
@@ -385,7 +410,7 @@ def global_coherence(geometry_sequence: List[StepGeometry],
 
     # 早期步骤的平均谱
     early_spectra = [g.eigenvalues[:10] for g in geometry_sequence[:n_early]
-                     if g.eigenvalues.size >= 2]
+                     if _has_non_empty_array(g, 'eigenvalues') and g.eigenvalues.size >= 2]
     if not early_spectra:
         return np.nan
 
@@ -394,7 +419,7 @@ def global_coherence(geometry_sequence: List[StepGeometry],
 
     # 后期步骤的平均谱
     late_spectra = [g.eigenvalues[:10] for g in geometry_sequence[-n_late:]
-                    if g.eigenvalues.size >= 2]
+                    if _has_non_empty_array(g, 'eigenvalues') and g.eigenvalues.size >= 2]
     if not late_spectra:
         return np.nan
 
@@ -423,7 +448,8 @@ def spectral_evolution_stability(geometry_sequence: List[StepGeometry]) -> float
     if len(geometry_sequence) < 3:
         return np.nan
 
-    spectra = [g.eigenvalues[:10] for g in geometry_sequence if g.eigenvalues.size >= 2]
+    spectra = [g.eigenvalues[:10] for g in geometry_sequence
+               if _has_non_empty_array(g, 'eigenvalues') and g.eigenvalues.size >= 2]
     if len(spectra) < 3:
         return np.nan
 
