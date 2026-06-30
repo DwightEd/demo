@@ -321,7 +321,8 @@ def detect_sudden_drop(coherence_profile: list[float],
 
 
 def detect_shallow_lockin_trajectory(trajectory: ReasoningTrajectory,
-                                     shallow_layers: list[int] = None) -> dict:
+                                     shallow_layers: list[int] = None,
+                                     drop_threshold: float = 0.15) -> dict:
     """模式1：Shallow Lock-in = 浅层平滑度突降
 
     检测浅层的信息流锁定
@@ -330,7 +331,7 @@ def detect_shallow_lockin_trajectory(trajectory: ReasoningTrajectory,
     （当前步骤不再与之前步骤相关，而是自强化）
     """
     if shallow_layers is None:
-        shallow_layers = [10, 14, 18]
+        shallow_layers = [10, 14]  # 只使用存在的层
 
     result = {
         'detected': False,
@@ -360,7 +361,7 @@ def detect_shallow_lockin_trajectory(trajectory: ReasoningTrajectory,
             continue
 
         # 检测突然下降
-        detected, drop_idx = detect_sudden_drop(coherence_profile)
+        detected, drop_idx = detect_sudden_drop(coherence_profile, threshold=drop_threshold)
         if detected:
             result['detected'] = True
             result['layer'] = layer
@@ -374,7 +375,9 @@ def detect_shallow_lockin_trajectory(trajectory: ReasoningTrajectory,
 
 
 def detect_deep_decay_trajectory(trajectory: ReasoningTrajectory,
-                                 deep_layers: list[int] = None) -> dict:
+                                 deep_layers: list[int] = None,
+                                 stability_threshold: float = 0.6,
+                                 entropy_threshold: float = 1.3) -> dict:
     """模式2：Deep Decay = 深层谱演化失稳
 
     检测深层的信息衰减
@@ -382,7 +385,7 @@ def detect_deep_decay_trajectory(trajectory: ReasoningTrajectory,
     Decay特征：在深层，谱形状的演化不再平滑，而是混乱
     """
     if deep_layers is None:
-        deep_layers = [22, 26, 30]
+        deep_layers = [18, 20, 22]  # 使用实际存在的层
 
     result = {
         'detected': False,
@@ -411,7 +414,8 @@ def detect_deep_decay_trajectory(trajectory: ReasoningTrajectory,
         late_entropy = np.mean([spectral_entropy(s) for s in late_spectra])
 
         # Decay信号：稳定性低 AND 晚期谱熵低（信息丢失）
-        if stability < 0.5 and late_entropy < 1.0:
+        # 改为OR条件：稳定性低 OR 晚期谱熵低
+        if (stability < stability_threshold) or (late_entropy < entropy_threshold):
             result['detected'] = True
             result['layer'] = layer
             result['stability'] = stability
@@ -593,29 +597,33 @@ def run_validation_h2_h3(trajectories: list[ReasoningTrajectory],
     correct = [t for t in trajectories if t.is_correct]
     error = [t for t in trajectories if not t.is_correct]
 
-    # 检测Shallow Lock-in
+    # 检测Shallow Lock-in - 使用指定层
     lockin_correct = 0
     lockin_error = 0
     for traj in correct:
-        result = detect_shallow_lockin_trajectory(traj)
+        result = detect_shallow_lockin_trajectory(traj, shallow_layers=[layer])
         if result['detected']:
             lockin_correct += 1
 
     for traj in error:
-        result = detect_shallow_lockin_trajectory(traj)
+        result = detect_shallow_lockin_trajectory(traj, shallow_layers=[layer])
         if result['detected']:
             lockin_error += 1
 
-    # 检测Deep Decay
+    # 检测Deep Decay - 使用指定层（或相邻深层）
+    deep_layers_to_use = [layer]
+    if layer < 22:
+        deep_layers_to_use = [layer, min(layer + 2, 22)]
+
     decay_correct = 0
     decay_error = 0
     for traj in correct:
-        result = detect_deep_decay_trajectory(traj)
+        result = detect_deep_decay_trajectory(traj, deep_layers=deep_layers_to_use)
         if result['detected']:
             decay_correct += 1
 
     for traj in error:
-        result = detect_deep_decay_trajectory(traj)
+        result = detect_deep_decay_trajectory(traj, deep_layers=deep_layers_to_use)
         if result['detected']:
             decay_error += 1
 
@@ -780,6 +788,33 @@ def run_all_validations(npz_path: str,
         # H2 & H3: Phase transitions
         print(f"\n[H2] Testing: Shallow Lock-in模式在error中更频繁")
         print(f"[H3] Testing: Deep Decay模式在error中更频繁")
+
+        # 诊断：计算所有链的coherence和stability分布
+        all_coherence = []
+        all_stability = []
+        for traj in trajectories[:100]:  # 采样100个
+            geom_seq = traj.get_geometry_sequence(layer)
+            if len(geom_seq) >= 3:
+                # 计算coherence profile
+                coh_profile = []
+                for i in range(1, len(geom_seq)):
+                    sims = [geometric_sim(geom_seq[i], geom_seq[j]) for j in range(i)]
+                    coh_profile.append(np.mean(sims))
+                if coh_profile:
+                    all_coherence.extend(coh_profile)
+
+                # 计算stability
+                stab = spectral_evolution_stability(geom_seq)
+                if np.isfinite(stab):
+                    all_stability.append(stab)
+
+        if all_coherence:
+            print(f"  Diagnostic: coherence range [{np.min(all_coherence):.3f}, {np.max(all_coherence):.3f}], "
+                  f"mean={np.mean(all_coherence):.3f}")
+        if all_stability:
+            print(f"  Diagnostic: stability range [{np.min(all_stability):.3f}, {np.max(all_stability):.3f}], "
+                  f"mean={np.mean(all_stability):.3f}")
+
         result_h2, result_h3 = run_validation_h2_h3(trajectories, layer)
 
         n_error_total = len([t for t in trajectories if not t.is_correct])
