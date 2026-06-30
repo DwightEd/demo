@@ -5,7 +5,8 @@
 - **Title**: "Trajectory of Thought: Geometric Phase Transitions in Multi-Step Reasoning"
 - **目标会议**: AAAI 2027
 - **创建日期**: 2026-06-30
-- **状态**: 设计阶段，待实现
+- **最后更新**: 2026-06-30
+- **状态**: ✅ 已实现
 
 ---
 
@@ -646,14 +647,22 @@ def run_validation_h1(trajectories: List[ReasoningTrajectory],
 
 ### 需要创建的文件
 ```
-✅ data_loading.py                 # 数据加载与特征计算
-✅ step_geometry.py                # Layer 1: Step-wise Geometry
+✅ data_loading.py                 # 数据加载与特征计算（完整版）
+✅ data_loading_fast.py            # 加速版：稀疏特征值分解 + 多进程
+✅ data_loading_minimal.py         # 极速版：跳过特征值分解，用trace估计
 ✅ trajectory_geometry.py          # Layer 2: Trajectory Geometry
 ✅ phase_transition.py             # Layer 3: Phase Transition Detection
 ✅ validation.py                    # 验证实验 (H1-H4)
-✅ main.py                         # 主入口
-✅ README.md                       # 使用说明
+✅ main.py                         # 主入口（支持三种模式）
+✅ TRAJECTORY_README.md            # 使用说明
 ```
+
+### 加速模式对比
+| 模式 | 文件 | 速度 | 精度 | 适用场景 |
+|------|------|------|------|----------|
+| `--mode full` | data_loading.py | ~500s/chain | 完全精确 | 论文最终结果 |
+| `--mode fast` | data_loading_fast.py | ~10-30s/chain | 较高（稀疏eig） | 标准分析 |
+| `--mode minimal` | data_loading_minimal.py | ~1-2s/chain | 近似（trace估计） | 快速验证 |
 
 ---
 
@@ -899,13 +908,29 @@ def run_all_validations(trajectories: List[ReasoningTrajectory],
 
 **用法**:
 ```bash
+# 极速模式（推荐用于快速验证）
 python main.py \
     --npz_path /gz-data/research/demo/data/features/full_omnimath.npz \
     --hidden_dir /gz-data/research/demo/data/hidden/omnimath/ \
     --output_dir ./trajectory_results \
     --layers 14 \
+    --mode minimal \
+    --n_workers 32 \
+    --n_bootstrap 5000
+
+# 完整模式（论文最终结果）
+python main.py \
+    --npz_path /gz-data/research/demo/data/features/full_omnimath.npz \
+    --hidden_dir /gz-data/research/demo/data/hidden/omnimath/ \
+    --output_dir ./trajectory_results \
+    --layers 14 \
+    --mode full \
     --n_bootstrap 5000
 ```
+
+**新增参数**:
+- `--mode`: 加载模式，可选 `minimal`/`fast`/`full`
+- `--n_workers`: 并行进程数（默认16，0表示串行）
 
 ---
 
@@ -913,13 +938,23 @@ python main.py \
 
 ### 阶段1: 单数据集测试
 ```bash
-# 在omnimath上测试
+# 在omnimath上测试（极速模式）
 cd /gz-data/research/demo/
 python main.py \
     --npz_path data/features/full_omnimath.npz \
     --hidden_dir data/hidden/omnimath/ \
     --output_dir ./results/omnimath \
-    --layers 14
+    --layers 14 \
+    --mode minimal \
+    --n_workers 32
+
+# 完整模式（用于论文最终结果）
+python main.py \
+    --npz_path data/features/full_omnimath.npz \
+    --hidden_dir data/hidden/omnimath/ \
+    --output_dir ./results/omnimath_full \
+    --layers 14 \
+    --mode full
 ```
 
 ### 阶段2: 多层分析
