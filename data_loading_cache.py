@@ -110,9 +110,13 @@ def load_all_trajectories_cached(npz_path: str,
         def __init__(self, chain_id, problem_id, is_correct, n_steps, step_ranges=None, steps=None):
             self.chain_id = chain_id
             self.problem_id = problem_id
-            self.is_correct = is_correct
+            self.is_correct = bool(is_correct)
             self.n_steps = n_steps
-            self.step_ranges = step_ranges or []
+            # 处理numpy数组
+            if step_ranges is None:
+                self.step_ranges = []
+            else:
+                self.step_ranges = list(step_ranges) if hasattr(step_ranges, '__iter__') else []
             self.steps = steps or {}
 
         def has_layer(self, layer):
