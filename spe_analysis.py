@@ -94,7 +94,7 @@ def auroc(score, y):
 
 
 def within_auroc(score, y, pid):
-    conc = tie = npair = 0.0
+    conc = tie = npair = 0.0 
     for p in np.unique(pid):
         m = (pid == p) & np.isfinite(score)
         se, sc = score[m & (y == 1)], score[m & (y == 0)]

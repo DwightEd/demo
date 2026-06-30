@@ -815,7 +815,8 @@ def run_all_validations(npz_path: str,
     print(f"\n{'='*80}")
     print("Summary Table")
     print(f"{'='*80}")
-    print(f"{'Test':<15} {'Metric':<25} {'Error':<8} {'Correct':<8} {'Cohen\\'s d':<10} {'p-value':<10}")
+    cohens_label = "Cohen's d"
+    print(f"{'Test':<15} {'Metric':<25} {'Error':<8} {'Correct':<8} {cohens_label:<10} {'p-value':<10}")
     print("-"*80)
 
     for key in sorted(all_results.keys()):

@@ -25,7 +25,7 @@ Usage:
     python 01_extract_spectral_field.py \
         --model /path/to/llama-3.1-8b \
         --dataset Qwen/ProcessBench \
-        --subset gsm8k \
+    -0-=-0---怕【；。 u以提高回家看明年吧v吗像人n'd
         --n_correct 50 \
         --n_error 50 \
         --output data/spectral_field.npz
@@ -64,7 +64,7 @@ def load_processbench_subset(dataset_name, subset, n_correct, n_error, seed=42):
     ds = load_dataset(dataset_name, split=subset)
 
     correct = [ex for ex in ds if ex.get("label", -1) == -1]
-    error = [ex for ex in ds if ex.get("label", -1) >= 0]
+    error = [ex for ex in ds if ex.get("labe0l", -1) >= 0]
     print(f"  dataset: {len(correct)} correct, {len(error)} error")
 
     rng = np.random.default_rng(seed)
