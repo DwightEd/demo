@@ -10,6 +10,18 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
+
+def _has_non_empty_array(obj, attr):
+    """安全检查对象是否有非空数组属性"""
+    if not hasattr(obj, attr):
+        return False
+    val = getattr(obj, attr)
+    if val is None:
+        return False
+    if not isinstance(val, np.ndarray):
+        return False
+    return val.size > 0
+
 from data_loading import ReasoningTrajectory
 from trajectory_geometry import (
     geometric_sim, geometric_sim_scalar_only,
@@ -76,7 +88,11 @@ def compute_coherence_profile(geometry_sequence: List) -> np.ndarray:
             g1 = geometry_sequence[i]
             g2 = geometry_sequence[j]
 
-            if g1.principal_directions.size > 0 and g2.principal_directions.size > 0:
+            # 安全检查principal_directions
+            has_pd1 = _has_non_empty_array(g1, 'principal_directions')
+            has_pd2 = _has_non_empty_array(g2, 'principal_directions')
+
+            if has_pd1 and has_pd2:
                 sim = geometric_sim(g1, g2)
             else:
                 sim = geometric_sim_scalar_only(g1, g2)
@@ -254,7 +270,7 @@ def detect_deep_decay(trajectory: ReasoningTrajectory,
 
         # 计算后期步骤的平均谱熵
         late_spectra = [g.eigenvalues[:10] for g in geom_sequence[-n_late:]
-                        if g.eigenvalues.size >= 2]
+                        if _has_non_empty_array(g, 'eigenvalues') and g.eigenvalues.size >= 2]
         if not late_spectra:
             continue
 
@@ -301,7 +317,7 @@ def detect_deep_decay_alternative(trajectory: ReasoningTrajectory,
             continue
 
         late_spectra = [g.eigenvalues[:10] for g in geom_sequence[-n_late:]
-                        if g.eigenvalues.size >= 2]
+                        if _has_non_empty_array(g, 'eigenvalues') and g.eigenvalues.size >= 2]
         if not late_spectra:
             continue
 
