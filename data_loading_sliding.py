@@ -32,7 +32,7 @@ def compute_window_geometry(H_window: np.ndarray, window_id: int, layer_id: int,
     eps = 1e-12
 
     # 归一化
-    H_norm = H / (np.linalg.norm(H, axis=1, keepdims=True) + eps)
+    H_norm = H_window / (np.linalg.norm(H_window, axis=1, keepdims=True) + eps)
 
     # κ（一阶矩）
     mu = H_norm.mean(axis=0)

@@ -64,11 +64,15 @@ def save_cached_features(cache_path: Path, chain_id: int, features: dict):
 
 
 def load_cached_features(cache_path: Path, chain_id: int):
-    """加载单个chain的特征"""
+    """加载单个chain的特征（带错误处理）"""
     cache_file = cache_path / f"chain_{chain_id}.pkl"
     if cache_file.exists():
-        with open(cache_file, 'rb') as f:
-            return pickle.load(f)
+        try:
+            with open(cache_file, 'rb') as f:
+                return pickle.load(f)
+        except (EOFError, pickle.UnpicklingError, Exception) as e:
+            # 缓存损坏，返回None触发重新计算
+            return None
     return None
 
 
