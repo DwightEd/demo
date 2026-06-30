@@ -25,7 +25,7 @@ set -euo pipefail
 # 配置
 DATA_BASE="/gz-data/research/demo/data/features"
 OUTPUT_BASE="$HOME/trajectory_phase_results"
-SCRIPTS_DIR="$PWD"
+SCRIPTS_DIR="/gz-data/research/demo"
 
 # 要测试的数据集（按难度递增）
 DATASETS=("full_gsm8k.npz" "full_math.npz" "full_omnimath.npz")

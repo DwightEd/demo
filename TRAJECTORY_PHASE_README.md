@@ -186,10 +186,8 @@ def detect_deep_decay_trajectory(chain, deep_layers=[22, 26, 30]):
 ### 在远程服务器上运行
 
 ```bash
-# 登录服务器并cd到demo目录
-cd /gz-data/research/demo/constrained_manifolds/demo
-
-# 拉取最新代码
+# 正确的项目路径
+cd /gz-data/research/demo/
 git pull
 
 # 运行验证
