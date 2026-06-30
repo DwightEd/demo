@@ -212,8 +212,8 @@ def load_all_trajectories_cached(npz_path: str,
         if compute_times:
             print(f"  Avg compute time: {np.mean(compute_times):.2f}s")
 
-    n_correct = sum(1 for t in trajectories if t.is_correct)
-    n_error = sum(1 for t in trajectories if t.is_correct is False)
+    n_correct = sum(1 for t in trajectories if bool(t.is_correct) == True)
+    n_error = sum(1 for t in trajectories if bool(t.is_correct) == False)
 
     metadata = {
         'subset': subset,
