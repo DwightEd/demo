@@ -450,10 +450,18 @@ def print_trajectory_stats(trajectories: List[ReasoningTrajectory],
                 g = geom_seq[0]
                 print(f"  Step 0: κ={g.kappa:.3f}, eff_rank={g.eff_rank:.2f}, "
                       f"entropy={g.spectral_entropy:.3f}, n_tokens={g.n_tokens}")
-                if hasattr(g, 'principal_directions') and g.principal_directions.size > 0:
-                    print(f"  Principal directions shape: {g.principal_directions.shape}")
-                if g.eigenvalues.size >= 3:
-                    print(f"  Eigenvalues top3: {g.eigenvalues[:3]}")
+
+                # 安全地打印principal_directions
+                if hasattr(g, 'principal_directions') and g.principal_directions is not None:
+                    if isinstance(g.principal_directions, np.ndarray) and g.principal_directions.size > 0:
+                        print(f"  Principal directions shape: {g.principal_directions.shape}")
+
+                # 安全地打印eigenvalues
+                if g.eigenvalues is not None:
+                    if isinstance(g.eigenvalues, np.ndarray) and g.eigenvalues.size >= 3:
+                        print(f"  Eigenvalues top3: {g.eigenvalues[:3]}")
+                    elif isinstance(g.eigenvalues, np.ndarray) and g.eigenvalues.size > 0:
+                        print(f"  Eigenvalues: {g.eigenvalues}")
 
     print("=" * 80)
 
