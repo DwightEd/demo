@@ -14,6 +14,7 @@ import hashlib
 from pathlib import Path
 from tqdm import tqdm
 import time
+from dataclasses import dataclass
 
 HIDDEN_LAYERS = [10, 14, 18, 22]
 
@@ -71,6 +72,56 @@ def load_cached_features(cache_path: Path, chain_id: int):
     return None
 
 
+# 在模块级别定义类（可pickle）
+@dataclass
+class StepGeometry:
+    step_id: int
+    layer: int
+    n_tokens: int
+    kappa: float = np.nan
+    eff_rank: float = np.nan
+    spectral_entropy: float = np.nan
+    norm: float = np.nan
+    eigenvalues: np.ndarray = None
+
+    def __post_init__(self):
+        if self.eigenvalues is None:
+            self.eigenvalues = np.array([])
+
+
+@dataclass
+class ReasoningTrajectory:
+    chain_id: int
+    problem_id: int
+    is_correct: bool
+    n_steps: int
+    step_ranges: list = None
+    steps: dict = None
+
+    def __init__(self, chain_id, problem_id, is_correct, n_steps, step_ranges=None, steps=None):
+        self.chain_id = chain_id
+        self.problem_id = problem_id
+        self.is_correct = bool(is_correct)
+        self.n_steps = n_steps
+        if step_ranges is None:
+            self.step_ranges = []
+        elif isinstance(step_ranges, np.ndarray):
+            self.step_ranges = step_ranges.tolist()
+        elif hasattr(step_ranges, '__iter__'):
+            self.step_ranges = list(step_ranges)
+        else:
+            self.step_ranges = []
+        self.steps = steps or {}
+
+    def has_layer(self, layer):
+        return layer in self.steps and len(self.steps[layer]) > 0
+
+    def get_geometry_sequence(self, layer):
+        if not self.has_layer(layer):
+            return []
+        return [self.steps[layer][i] for i in sorted(self.steps[layer].keys())]
+
+
 def load_all_trajectories_cached(npz_path: str,
                                 hidden_dir: str,
                                 force_recompute: bool = False,
@@ -80,52 +131,6 @@ def load_all_trajectories_cached(npz_path: str,
     首次运行：计算并缓存（需要时间）
     后续运行：直接加载缓存（秒级）
     """
-    from dataclasses import dataclass
-    from typing import Dict, List
-
-    @dataclass
-    class StepGeometry:
-        step_id: int
-        layer: int
-        n_tokens: int
-        kappa: float = np.nan
-        eff_rank: float = np.nan
-        spectral_entropy: float = np.nan
-        norm: float = np.nan
-        eigenvalues: np.ndarray = None
-
-        def __post_init__(self):
-            if self.eigenvalues is None:
-                self.eigenvalues = np.array([])
-
-    @dataclass
-    class ReasoningTrajectory:
-        chain_id: int
-        problem_id: int
-        is_correct: bool
-        n_steps: int
-        step_ranges: list = None
-        steps: Dict = None
-
-        def __init__(self, chain_id, problem_id, is_correct, n_steps, step_ranges=None, steps=None):
-            self.chain_id = chain_id
-            self.problem_id = problem_id
-            self.is_correct = bool(is_correct)
-            self.n_steps = n_steps
-            # 处理numpy数组
-            if step_ranges is None:
-                self.step_ranges = []
-            else:
-                self.step_ranges = list(step_ranges) if hasattr(step_ranges, '__iter__') else []
-            self.steps = steps or {}
-
-        def has_layer(self, layer):
-            return layer in self.steps and len(self.steps[layer]) > 0
-
-        def get_geometry_sequence(self, layer):
-            if not self.has_layer(layer):
-                return []
-            return [self.steps[layer][i] for i in sorted(self.steps[layer].keys())]
 
     # 加载NPZ
     data = np.load(npz_path, allow_pickle=True)
