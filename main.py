@@ -21,6 +21,11 @@ from data_loading import (
     get_trajectory_with_min_steps,
     print_trajectory_stats
 )
+try:
+    from data_loading_fast import load_all_trajectories_fast
+    HAS_FAST = True
+except ImportError:
+    HAS_FAST = False
 from trajectory_geometry import (
     compute_all_metrics,
     print_metrics_summary,
@@ -62,6 +67,8 @@ def parse_args():
                        help='Number of bootstrap iterations (default: 5000)')
     parser.add_argument('--n_top_components', type=int, default=10,
                        help='Number of principal components to compute (default: 10)')
+    parser.add_argument('--n_workers', type=int, default=16,
+                       help='Number of parallel workers for loading (default: 16, 0 for serial)')
 
     # 检测参数
     parser.add_argument('--drop_threshold', type=float, default=0.15,
@@ -102,12 +109,22 @@ def main():
 
     # 加载数据
     print("\n[1/5] Loading trajectories...")
-    trajectories, metadata = load_all_trajectories(
-        npz_path=args.npz_path,
-        hidden_dir=args.hidden_dir,
-        n_top_components=args.n_top_components,
-        verbose=args.verbose,
-    )
+    if HAS_FAST and args.n_workers > 0:
+        print(f"Using fast loading with {args.n_workers} workers...")
+        trajectories, metadata = load_all_trajectories_fast(
+            npz_path=args.npz_path,
+            hidden_dir=args.hidden_dir,
+            n_top=args.n_top_components + 5,
+            n_workers=args.n_workers,
+            verbose=args.verbose,
+        )
+    else:
+        trajectories, metadata = load_all_trajectories(
+            npz_path=args.npz_path,
+            hidden_dir=args.hidden_dir,
+            n_top_components=args.n_top_components,
+            verbose=args.verbose,
+        )
 
     print_trajectory_stats(trajectories, metadata, layer=args.layers[0])
 
