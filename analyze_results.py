@@ -17,6 +17,20 @@ from scipy import stats
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional
 import json
+import sys
+
+# 导入data_loading_gpu中的类定义，以便pickle加载
+try:
+    from data_loading_gpu import ReasoningTrajectory, StepGeometry
+except ImportError:
+    print("Warning: Could not import from data_loading_gpu, trying dynamic import")
+    # 动态导入
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("data_loading_gpu", "data_loading_gpu.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    ReasoningTrajectory = module.ReasoningTrajectory
+    StepGeometry = module.StepGeometry
 
 HIDDEN_LAYERS = [10, 14, 18, 22]
 

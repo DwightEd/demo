@@ -4,6 +4,16 @@
 import pickle
 from pathlib import Path
 import numpy as np
+import importlib.util
+
+# 导入data_loading_gpu中的类定义，以便pickle加载
+try:
+    from data_loading_gpu import ReasoningTrajectory
+except ImportError:
+    spec = importlib.util.spec_from_file_location("data_loading_gpu", "data_loading_gpu.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    ReasoningTrajectory = module.ReasoningTrajectory
 
 
 def inspect_cache_directory(cache_dir_str: str):
