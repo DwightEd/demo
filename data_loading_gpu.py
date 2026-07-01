@@ -464,25 +464,35 @@ def benchmark_methods():
 
 if __name__ == "__main__":
     import sys
+    import argparse
 
-    # 测试模式
-    if len(sys.argv) > 1 and sys.argv[1] == "benchmark":
+    parser = argparse.ArgumentParser(description='GPU加速的几何特征计算')
+    parser.add_argument('--benchmark', action='store_true', help='运行性能对比测试')
+    parser.add_argument('--clear', action='store_true', help='清除缓存')
+    parser.add_argument('--force', action='store_true', help='强制重新计算（忽略缓存）')
+    parser.add_argument('--cpu', action='store_true', help='使用CPU而非GPU')
+    parser.add_argument('--workers', type=int, default=None, help='进程数（默认自动检测）')
+    parser.add_argument('--npz', default='/gz-data/research/demo/data/features/full_omnimath.npz', help='NPZ文件路径')
+    parser.add_argument('--hidden', default='/gz-data/research/demo/data/hidden/omnimath/', help='Hidden目录路径')
+
+    args = parser.parse_args()
+
+    if args.benchmark:
         benchmark_methods()
+    elif args.clear:
+        clear_cache(args.npz, args.hidden)
     else:
         # 正常运行
-        npz_path = "/gz-data/research/demo/data/features/full_omnimath.npz"
-        hidden_dir = "/gz-data/research/demo/data/hidden/omnimath/"
-
         print("Loading with GPU acceleration + multiprocessing...")
         start = time.time()
 
         trajectories, metadata = load_all_trajectories_gpu(
-            npz_path=npz_path,
-            hidden_dir=hidden_dir,
-            force_recompute=False,
+            npz_path=args.npz,
+            hidden_dir=args.hidden,
+            force_recompute=args.force,
             verbose=True,
-            use_gpu=True,
-            n_workers=8,
+            use_gpu=not args.cpu,
+            n_workers=args.workers,
         )
 
         elapsed = time.time() - start
