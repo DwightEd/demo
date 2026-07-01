@@ -15,47 +15,74 @@ from pathlib import Path
 from tqdm import tqdm
 import time
 from dataclasses import dataclass
+from scipy.linalg import eigh
 
 HIDDEN_LAYERS = [10, 14, 18, 22]
 
 
-def compute_step_geometry_ultra_fast(H: np.ndarray, step_id: int, layer_id: int):
-    """超快速计算：只算κ，用对角元近似eigenvalues"""
-    n_tokens = H.shape[0]
+def compute_step_geometry_ultra_fast(H: np.ndarray, step_id: int, layer_id: int, n_top: int = 10):
+    """Step几何特征计算：使用完整的特征值分解（修正版）
+
+    Args:
+        H: hidden states, shape (n_tokens, d)
+        step_id: step索引
+        layer_id: 层ID
+        n_top: 保留前n个特征值
+
+    Returns:
+        dict: 几何特征字典
+    """
+    n_tokens, d = H.shape
     if n_tokens == 0:
         return None
 
     eps = 1e-12
+
+    # 归一化token向量
     H_norm = H / (np.linalg.norm(H, axis=1, keepdims=True) + eps)
+
+    # 一阶矩：kappa = ||mean(û)||
     mu = H_norm.mean(axis=0)
     kappa = float(np.linalg.norm(mu))
     norm = float(H.mean())
 
-    # 用scatter matrix的对角元作为近似的eigenvalues
-    S_diag = np.sum(H_norm ** 2, axis=0) / n_tokens  # 对角元
+    # 完整的scatter matrix
+    S = (H_norm.T @ H_norm) / n_tokens  # (d, d)
 
-    # 归一化
-    if S_diag.sum() > eps:
-        S_diag = S_diag / S_diag.sum()
-    else:
-        S_diag = np.ones(4096) / 4096
+    # 完整的特征值分解（使用scipy.linalg.eigh）
+    try:
+        from scipy.linalg import eigh
+        eigvals = eigh(S, eigvals_only=True)
+    except Exception as e:
+        # 如果分解失败，返回基本信息
+        return {
+            'step_id': step_id,
+            'layer': layer_id,
+            'n_tokens': n_tokens,
+            'kappa': kappa,
+            'norm': norm,
+            'eff_rank': np.nan,
+            'spectral_entropy': np.nan,
+            'eigenvalues': np.array([]),
+        }
 
-    # 降序排列作为近似谱
-    eigenvalues = np.sort(S_diag)[::-1][:10]  # 前10个
+    # 降序排列并归一化
+    eigvals = np.sort(eigvals)[::-1]
+    eigvals = eigvals / (eigvals.sum() + eps)
 
-    # 用trace估计rank
-    if S_diag.sum() > eps:
-        eff_rank = (S_diag.sum() ** 2) / np.sum(S_diag ** 2)
-        eff_rank = float(min(eff_rank, n_tokens))
+    # 取前n_top个特征值
+    eigenvalues = eigvals[:n_top]
+
+    # 计算有效秩 (使用完整特征值)
+    lam = eigvals[eigvals > eps]
+    if len(lam) > 0:
+        eff_rank = float(np.exp(-np.sum(lam * np.log(lam + eps))))
+        eff_rank = float(min(eff_rank, n_tokens))  # 不超过token数
     else:
         eff_rank = 1.0
 
-    # 谱熵：重新归一化后计算
-    if eigenvalues.sum() > eps:
-        eigenvalues_norm = eigenvalues / eigenvalues.sum()  # 重新归一化
-        spectral_entropy = float(-np.sum(eigenvalues_norm * np.log(eigenvalues_norm + eps)))
-    else:
-        spectral_entropy = 0.0
+    # 计算谱熵 (使用完整特征值)
+    spectral_entropy = float(-np.sum(eigvals * np.log(eigvals + eps)))
 
     return {
         'step_id': step_id,
@@ -218,7 +245,7 @@ def load_all_trajectories_cached(npz_path: str,
                         continue
 
                     H = hidden[start:end, layer_idx, :].copy()  # 只复制需要的部分
-                    geom = compute_step_geometry_ultra_fast(H, step_id, layer_id)
+                    geom = compute_step_geometry_ultra_fast(H, step_id, layer_id, n_top=10)
                     if geom:
                         layer_steps[step_id] = StepGeometry(**geom)
 
