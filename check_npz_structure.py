@@ -18,7 +18,12 @@ for key in data.keys():
     print(f'\n{key}:')
     print(f'  Type: {type(val)}')
     print(f'  Shape/Dtype: {val.shape if hasattr(val, "shape") else val.dtype}')
-    print(f'  Size: {len(val)}')
+    if hasattr(val, '__len__') and not isinstance(val, np.ndarray):
+        print(f'  Size: {len(val)}')
+    elif isinstance(val, np.ndarray) and val.ndim > 0:
+        print(f'  Size: {val.shape[0]}')
+    else:
+        print(f'  Size: scalar')
 
     # 如果是object类型，检查第一个元素
     if hasattr(val, 'dtype') and val.dtype == object:
