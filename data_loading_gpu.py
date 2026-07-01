@@ -63,15 +63,20 @@ def compute_step_geometry_gpu(H: np.ndarray, step_id: int, layer_id: int, n_top:
     # Scatter matrix (GPU)
     S = (H_norm.T @ H_norm) / n_tokens  # (d, d)
 
-    # 特征值分解 (GPU) - 只计算特征值
+    # 特征值分解 (GPU) - CuPy只有eigh，没有eigvalsh
     try:
-        eigvals = cla.eighvalsh(S)  # 只返回特征值，更快
+        eigvals, _ = cp.linalg.eigh(S)  # 返回特征值和特征向量，只取特征值
     except Exception as e:
-        print(f"GPU eigvalsh failed: {e}, falling back to CPU")
+        print(f"GPU eigh failed: {e}, falling back to CPU")
         return compute_step_geometry_cpu(H, step_id, layer_id, n_top)
 
     # 降序排列并归一化
     eigvals = cp.sort(eigvals)[::-1]
+
+    # 确保特征值非负（数值稳定性）
+    eigvals = cp.maximum(eigvals, 0)
+
+    # 归一化
     eigvals = eigvals / (eigvals.sum() + eps)
 
     # 取前n_top个特征值
@@ -131,8 +136,13 @@ def compute_step_geometry_cpu(H: np.ndarray, step_id: int, layer_id: int, n_top:
     except Exception as e:
         return None
 
-    # 降序排列并归一化
+    # 降序排列
     eigvals = np.sort(eigvals)[::-1]
+
+    # 确保特征值非负（数值稳定性）
+    eigvals = np.maximum(eigvals, 0)
+
+    # 归一化
     eigvals = eigvals / (eigvals.sum() + eps)
 
     # 取前n_top个特征值
