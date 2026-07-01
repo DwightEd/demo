@@ -299,7 +299,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description='分析OMniMath几何特征结果')
-    parser.add_argument('--cache-dir', type=str, default='/gz-data/research/demo/data/cache/omnimath',
+    parser.add_argument('--cache-dir', type=str, default='/gz-data/research/demo/data/hidden/cache/omnimath',
                         help='缓存目录路径')
     parser.add_argument('--npz-path', type=str, default='/gz-data/research/demo/data/features/full_omnimath.npz',
                         help='NPZ文件路径')

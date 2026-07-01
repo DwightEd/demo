@@ -12,11 +12,12 @@ def diagnose_paths():
     print("缓存诊断工具")
     print("=" * 70)
 
-    # 检查几个可能的缓存路径
+    # 检查几个可能的缓存路径（正确路径在前）
     possible_paths = [
-        "/gz-data/research/demo/data/cache/omnimath",
+        "/gz-data/research/demo/data/hidden/cache/omnimath",  # 正确路径
+        "/gz-data/research/demo/data/cache/omnimath",  # 旧路径
+        "/gz-data/research/demo/data/hidden/cache",
         "/gz-data/research/demo/data/cache",
-        "/gz-data/research/demo/data/hidden/../cache/omnimath",
     ]
 
     print("\n1. 检查缓存目录是否存在...")
@@ -129,7 +130,7 @@ def check_script_logic():
     print("    cache_dir = Path(hidden_dir).parent / 'cache' / subset")
     print("    hidden_dir = '/gz-data/research/demo/data/hidden/omnimath/'")
     print("    subset = 'omnimath'")
-    print("  预期缓存: /gz-data/research/demo/data/cache/omnimath")
+    print("  预期缓存: /gz-data/research/demo/data/hidden/cache/omnimath")
 
     # 检查代码中的保存逻辑
     print("\n8. 保存逻辑检查:")

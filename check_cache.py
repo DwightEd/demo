@@ -11,6 +11,7 @@ def check_cache_dir(cache_dir_str: str):
     cache_dir = Path(cache_dir_str)
 
     print(f"检查缓存目录: {cache_dir}")
+    print(f"  完整路径: {cache_dir.absolute()}")
     print("-" * 60)
 
     if not cache_dir.exists():
@@ -65,10 +66,10 @@ def check_cache_dir(cache_dir_str: str):
 def main():
     # 尝试多个可能的路径
     possible_paths = [
-        "/gz-data/research/demo/data/cache/omnimath",  # Linux服务器
-        "F:/projects/python_projects/research/constrained_manifolds/data/cache/omnimath",  # Windows本地
-        "F:/projects/python_projects/research/constrained_manifolds/demo/data/cache/omnimath",
-        "../data/cache/omnimath",  # 相对路径
+        "/gz-data/research/demo/data/hidden/cache/omnimath",  # Linux服务器（正确）
+        "/gz-data/research/demo/data/cache/omnimath",  # 旧路径
+        "F:/projects/python_projects/research/constrained_manifolds/data/hidden/cache/omnimath",  # Windows本地
+        "../data/hidden/cache/omnimath",  # 相对路径
     ]
 
     if len(sys.argv) > 1:

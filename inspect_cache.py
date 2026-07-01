@@ -88,8 +88,8 @@ def inspect_single_cache_file(cache_file_path: Path, verbose: bool = True):
 def main():
     import sys
 
-    # 默认路径
-    default_cache = "/gz-data/research/demo/data/cache/omnimath"
+    # 默认路径（正确路径：hidden/cache/omnimath）
+    default_cache = "/gz-data/research/demo/data/hidden/cache/omnimath"
 
     if len(sys.argv) > 1:
         cache_dir_str = sys.argv[1]

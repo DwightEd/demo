@@ -309,7 +309,7 @@ def print_online_monitoring_example(trajectories: List[StepTrajectory], layer: i
 def main():
     parser = argparse.ArgumentParser(description='动态监测分析')
     parser.add_argument('--cache-dir', type=str,
-                        default='/gz-data/research/demo/data/cache/omnimath')
+                        default='/gz-data/research/demo/data/hidden/cache/omnimath')
     parser.add_argument('--npz-path', type=str,
                         default='/gz-data/research/demo/data/features/full_omnimath.npz')
     parser.add_argument('--output', type=str,
