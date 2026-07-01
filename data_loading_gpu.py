@@ -248,6 +248,101 @@ class ReasoningTrajectory:
         return [self.steps[layer][i] for i in sorted(self.steps[layer].keys())]
 
 
+def compute_chain_geometry_gpu_batch(hidden: np.ndarray, step_ranges, n_top=10):
+    """GPU批量计算：一次传输，计算所有steps和layers
+
+    优化：减少CPU-GPU数据传输，加速2-3倍
+    """
+    try:
+        import cupy as cp
+    except ImportError:
+        return None
+
+    if step_ranges is None or len(step_ranges) == 0:
+        return {}
+
+    n_tokens_total, n_layers, d = hidden.shape
+    eps = 1e-12
+
+    # 一次性传输整个hidden states到GPU
+    hidden_gpu = cp.asarray(hidden.astype(np.float32))
+
+    # 预归一化所有token向量（GPU上）
+    norms = cp.linalg.norm(hidden_gpu, axis=2, keepdims=True)
+    H_norm_gpu = hidden_gpu / (norms + eps)
+
+    # 计算所有层的所有步骤
+    results = {}
+
+    for layer_idx, layer_id in enumerate(HIDDEN_LAYERS):
+        layer_results = {}
+
+        for step_id, (start, end) in enumerate(step_ranges):
+            if end <= start or end > n_tokens_total:
+                continue
+
+            # 在GPU上提取该step的数据
+            H_step = H_norm_gpu[start:end, layer_idx, :]
+
+            if H_step.shape[0] == 0:
+                continue
+
+            n_tokens = H_step.shape[0]
+
+            # 一阶矩（GPU）
+            mu = H_step.mean(axis=0)
+            kappa = float(cp.linalg.norm(mu))
+            norm_val = float(hidden_gpu[start:end, layer_idx, :].mean())
+
+            # Scatter matrix（GPU）
+            S = (H_step.T @ H_step) / n_tokens
+
+            # 特征值分解（GPU）
+            try:
+                eigvals, _ = cp.linalg.eigh(S)
+            except:
+                continue
+
+            # 降序
+            eigvals = cp.sort(eigvals)[::-1]
+
+            # 确保非负
+            eigvals = cp.maximum(eigvals, 0)
+
+            # 归一化
+            eigvals = eigvals / (eigvals.sum() + eps)
+
+            # 有效秩
+            lam = eigvals[eigvals > eps]
+            if len(lam) > 0:
+                eff_rank = float(cp.exp(-cp.sum(lam * cp.log(lam + eps))))
+                eff_rank = min(eff_rank, n_tokens)
+            else:
+                eff_rank = 1.0
+
+            # 谱熵
+            spectral_entropy = float(-cp.sum(eigvals * cp.log(eigvals + eps)))
+
+            # 取前n_top特征值
+            eigenvalues = cp.asnumpy(eigvals[:n_top])
+
+            layer_results[step_id] = {
+                'step_id': step_id,
+                'layer': layer_id,
+                'n_tokens': n_tokens,
+                'kappa': kappa,
+                'eff_rank': eff_rank,
+                'spectral_entropy': spectral_entropy,
+                'norm': norm_val,
+                'eigenvalues': eigenvalues,
+            }
+
+        if layer_results:
+            results[layer_id] = layer_results
+
+    return results
+
+
 def _compute_single_chain(args):
     """计算单个chain的特征（用于多进程）"""
     idx, npz_path, hidden_dir, use_gpu = args
@@ -267,8 +362,6 @@ def _compute_single_chain(args):
             idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 0), 0
         )
 
-    # 计算特征
-    steps = {}
     ranges = step_token_ranges[idx]
 
     if ranges is None:
@@ -276,6 +369,32 @@ def _compute_single_chain(args):
             idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 0), 0
         )
 
+    # 使用GPU批量计算（优化）
+    if use_gpu:
+        batch_results = compute_chain_geometry_gpu_batch(hidden, ranges, n_top=10)
+
+        if batch_results is not None:
+            # 转换为StepGeometry格式
+            steps = {}
+            for layer_id, layer_results in batch_results.items():
+                layer_steps = {}
+                for step_id, geom in layer_results.items():
+                    layer_steps[step_id] = StepGeometry(**geom)
+                if layer_steps:
+                    steps[layer_id] = layer_steps
+
+            return ReasoningTrajectory(
+                idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 0),
+                len(ranges),
+                step_ranges=ranges,
+                steps=steps,
+            )
+        else:
+            # GPU失败，降级到CPU
+            use_gpu = False
+
+    # CPU逐个计算
+    steps = {}
     for layer_idx, layer_id in enumerate(HIDDEN_LAYERS):
         layer_steps = {}
 
@@ -284,11 +403,7 @@ def _compute_single_chain(args):
                 continue
 
             H = hidden[start:end, layer_idx, :].copy()
-
-            if use_gpu:
-                geom = compute_step_geometry_gpu(H, step_id, layer_id, n_top=10)
-            else:
-                geom = compute_step_geometry_cpu(H, step_id, layer_id, n_top=10)
+            geom = compute_step_geometry_cpu(H, step_id, layer_id, n_top=10)
 
             if geom:
                 layer_steps[step_id] = StepGeometry(**geom)
@@ -296,14 +411,12 @@ def _compute_single_chain(args):
         if layer_steps:
             steps[layer_id] = layer_steps
 
-    traj = ReasoningTrajectory(
+    return ReasoningTrajectory(
         idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 0),
-        len(ranges) if ranges is not None else 0,
+        len(ranges),
         step_ranges=ranges,
         steps=steps,
     )
-
-    return traj
 
 
 def load_all_trajectories_gpu(npz_path: str,
