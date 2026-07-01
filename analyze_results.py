@@ -297,10 +297,26 @@ def print_summary_report(all_stats: List[Dict], metadata: Dict):
 
 def save_json_results(all_stats: List[Dict], metadata: Dict, output_path: Path):
     """保存JSON结果"""
-    output = {
+    # 转换numpy类型为Python原生类型
+    def convert(obj):
+        if isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, bool):
+            return bool(obj)
+        elif isinstance(obj, dict):
+            return {k: convert(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert(v) for v in obj]
+        return obj
+
+    output = convert({
         'metadata': metadata,
         'layer_results': all_stats,
-    }
+    })
 
     with open(output_path, 'w') as f:
         json.dump(output, f, indent=2)
