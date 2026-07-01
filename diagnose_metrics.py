@@ -2,7 +2,8 @@
 """诊断脚本：分析指标分布，帮助调整阈值"""
 
 import numpy as np
-from data_loading_cache import load_all_trajectories_cached, get_trajectory_with_min_steps
+from data_loading_cache import load_all_trajectories_cached
+from data_loading import get_trajectory_with_min_steps
 from trajectory_geometry import compute_all_metrics, extract_scalar_sequence
 from phase_transition import batch_detect_lockin, batch_detect_decay
 import json
