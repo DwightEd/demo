@@ -4,6 +4,13 @@
 import pickle
 import numpy as np
 from pathlib import Path
+import importlib.util
+
+# 导入data_loading_gpu中的类定义
+spec = importlib.util.spec_from_file_location("data_loading_gpu", "data_loading_gpu.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+ReasoningTrajectory = module.ReasoningTrajectory
 
 
 def diagnose():
