@@ -363,19 +363,44 @@ def load_all_trajectories_gpu(npz_path: str,
     # 使用多进程计算未缓存的chains
     if to_compute:
         if verbose:
-            print(f"Computing {len(to_compute)} chains with GPU + multiprocessing...")
+            print(f"Computing {len(to_compute)} chains...")
 
-        # 准备参数
-        compute_args = [(i, npz_path, hidden_dir, use_gpu) for i in to_compute]
+        # GPU用单进程（CUDA不支持多进程）
+        # CPU用多进程
+        if use_gpu:
+            try:
+                import cupy as cp
+                use_gpu_for_compute = True
+            except:
+                use_gpu_for_compute = False
 
-        start_time = time.time()
+            if use_gpu_for_compute:
+                if verbose:
+                    print("GPU mode: using single process (CUDA limitation)")
+                # 单进程计算
+                start_time = time.time()
+                results = []
+                for idx in tqdm(to_compute, desc="Computing features (GPU)"):
+                    traj = _compute_single_chain((idx, npz_path, hidden_dir, True))
+                    results.append(traj)
+                elapsed = time.time() - start_time
+            else:
+                use_gpu_for_compute = False
 
-        with Pool(n_workers) as pool:
-            results = list(tqdm(
-                pool.imap(_compute_single_chain, compute_args),
-                total=len(compute_args),
-                desc="Computing features"
-            ))
+        if not use_gpu_for_compute:
+            if verbose:
+                print(f"CPU mode: using {n_workers} workers")
+            # 准备参数
+            compute_args = [(i, npz_path, hidden_dir, False) for i in to_compute]
+
+            start_time = time.time()
+
+            with Pool(n_workers) as pool:
+                results = list(tqdm(
+                    pool.imap(_compute_single_chain, compute_args),
+                    total=len(compute_args),
+                    desc="Computing features (CPU)"
+                ))
 
         elapsed = time.time() - start_time
 
