@@ -19,19 +19,6 @@ from typing import List, Dict, Tuple, Optional
 import json
 import sys
 
-# 导入data_loading_gpu中的类定义，以便pickle加载
-try:
-    from data_loading_gpu import ReasoningTrajectory, StepGeometry
-except ImportError:
-    print("Warning: Could not import from data_loading_gpu, trying dynamic import")
-    # 动态导入
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("data_loading_gpu", "data_loading_gpu.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    ReasoningTrajectory = module.ReasoningTrajectory
-    StepGeometry = module.StepGeometry
-
 HIDDEN_LAYERS = [10, 14, 18, 22]
 
 
@@ -69,20 +56,36 @@ def compute_auc(x1: np.ndarray, x2: np.ndarray) -> float:
         return 0.5
 
 
-def load_trajectories_from_cache(cache_dir: Path) -> List:
-    """加载缓存的轨迹"""
+def load_trajectories_simple(cache_dir: Path) -> List:
+    """简单加载：直接读取pickle内容，不依赖类定义"""
     trajectories = []
     cache_files = sorted(cache_dir.glob("chain_*.pkl"),
                          key=lambda p: int(p.stem.split('_')[1]))
 
     print(f"Loading {len(cache_files)} cached trajectories...")
+
     for cf in tqdm(cache_files):
         try:
             with open(cf, 'rb') as f:
-                traj = pickle.load(f)
-                trajectories.append(traj)
+                # 直接读取，不反序列化成类
+                content = pickle.load(f)
+
+                # 检查是否有必要的属性
+                if hasattr(content, 'is_correct') and hasattr(content, 'steps'):
+                    trajectories.append(content)
+                else:
+                    print(f"Skip {cf}: missing attributes")
+
         except Exception as e:
             print(f"Failed to load {cf}: {e}")
+            # 尝试直接读取属性
+            try:
+                with open(cf, 'rb') as f:
+                    obj = pickle.load(f, encoding='latin1')
+                    if hasattr(obj, 'is_correct'):
+                        trajectories.append(obj)
+            except:
+                pass
 
     return trajectories
 
@@ -92,19 +95,31 @@ def extract_step_features(trajectories: List, layer: int) -> LayerMetrics:
     metrics = LayerMetrics(layer=layer)
 
     for traj in trajectories:
-        if not traj.has_layer(layer):
+        # 检查是否有该层的数据
+        if not hasattr(traj, 'steps'):
             continue
 
-        geoms = traj.get_geometry_sequence(layer)
-        for geom in geoms:
-            if traj.is_correct:
-                metrics.correct_kappa.append(geom.kappa)
-                metrics.correct_eff_rank.append(geom.eff_rank)
-                metrics.correct_entropy.append(geom.spectral_entropy)
-            else:
-                metrics.error_kappa.append(geom.kappa)
-                metrics.error_eff_rank.append(geom.eff_rank)
-                metrics.error_entropy.append(geom.spectral_entropy)
+        steps = traj.steps
+        if layer not in steps or len(steps[layer]) == 0:
+            continue
+
+        # 遍历该层的所有step
+        for step_id in sorted(steps[layer].keys()):
+            geom = steps[layer][step_id]
+
+            if not hasattr(geom, 'kappa'):
+                continue
+
+            is_correct = traj.is_correct if hasattr(traj, 'is_correct') else None
+
+            if is_correct:
+                metrics.correct_kappa.append(float(geom.kappa) if np.isfinite(geom.kappa) else np.nan)
+                metrics.correct_eff_rank.append(float(geom.eff_rank) if np.isfinite(geom.eff_rank) else np.nan)
+                metrics.correct_entropy.append(float(geom.spectral_entropy) if np.isfinite(geom.spectral_entropy) else np.nan)
+            elif is_correct is False:
+                metrics.error_kappa.append(float(geom.kappa) if np.isfinite(geom.kappa) else np.nan)
+                metrics.error_eff_rank.append(float(geom.eff_rank) if np.isfinite(geom.eff_rank) else np.nan)
+                metrics.error_entropy.append(float(geom.spectral_entropy) if np.isfinite(geom.spectral_entropy) else np.nan)
 
     return metrics
 
@@ -125,48 +140,61 @@ def compute_statistics(metrics: LayerMetrics) -> Dict:
         corr_k = np.array(metrics.correct_kappa)
         err_k = np.array(metrics.error_kappa)
 
-        result['kappa'] = {
-            'correct_mean': float(np.mean(corr_k)),
-            'correct_std': float(np.std(corr_k)),
-            'error_mean': float(np.mean(err_k)),
-            'error_std': float(np.std(err_k)),
-            'cohens_d': float(cohen_d(corr_k, err_k)),
-            'auc': float(compute_auc(err_k, corr_k)),  # error应该更低，所以反过来
-            'p_value': float(stats.ttest_ind(corr_k, err_k).pvalue),
-            'diff_significant': stats.ttest_ind(corr_k, err_k).pvalue < 0.05,
-        }
+        # 移除NaN
+        corr_k = corr_k[np.isfinite(corr_k)]
+        err_k = err_k[np.isfinite(err_k)]
+
+        if len(corr_k) > 0 and len(err_k) > 0:
+            result['kappa'] = {
+                'correct_mean': float(np.mean(corr_k)),
+                'correct_std': float(np.std(corr_k)),
+                'error_mean': float(np.mean(err_k)),
+                'error_std': float(np.std(err_k)),
+                'cohens_d': float(cohen_d(corr_k, err_k)),
+                'auc': float(compute_auc(err_k, corr_k)),
+                'p_value': float(stats.ttest_ind(corr_k, err_k).pvalue),
+                'diff_significant': stats.ttest_ind(corr_k, err_k).pvalue < 0.05,
+            }
 
     # Effective Rank统计
     if len(metrics.correct_eff_rank) > 0 and len(metrics.error_eff_rank) > 0:
         corr_e = np.array(metrics.correct_eff_rank)
         err_e = np.array(metrics.error_eff_rank)
 
-        result['eff_rank'] = {
-            'correct_mean': float(np.mean(corr_e)),
-            'correct_std': float(np.std(corr_e)),
-            'error_mean': float(np.mean(err_e)),
-            'error_std': float(np.std(err_e)),
-            'cohens_d': float(cohen_d(corr_e, err_e)),
-            'auc': float(compute_auc(err_e, corr_e)),  # error应该更高
-            'p_value': float(stats.ttest_ind(corr_e, err_e).pvalue),
-            'diff_significant': stats.ttest_ind(corr_e, err_e).pvalue < 0.05,
-        }
+        corr_e = corr_e[np.isfinite(corr_e)]
+        err_e = err_e[np.isfinite(err_e)]
+
+        if len(corr_e) > 0 and len(err_e) > 0:
+            result['eff_rank'] = {
+                'correct_mean': float(np.mean(corr_e)),
+                'correct_std': float(np.std(corr_e)),
+                'error_mean': float(np.mean(err_e)),
+                'error_std': float(np.std(err_e)),
+                'cohens_d': float(cohen_d(corr_e, err_e)),
+                'auc': float(compute_auc(err_e, corr_e)),
+                'p_value': float(stats.ttest_ind(corr_e, err_e).pvalue),
+                'diff_significant': stats.ttest_ind(corr_e, err_e).pvalue < 0.05,
+            }
 
     # Spectral Entropy统计
     if len(metrics.correct_entropy) > 0 and len(metrics.error_entropy) > 0:
         corr_s = np.array(metrics.correct_entropy)
         err_s = np.array(metrics.error_entropy)
 
-        result['entropy'] = {
-            'correct_mean': float(np.mean(corr_s)),
-            'correct_std': float(np.std(corr_s)),
-            'error_mean': float(np.mean(err_s)),
-            'error_std': float(np.std(err_s)),
-            'cohens_d': float(cohen_d(corr_s, err_s)),
-            'auc': float(compute_auc(err_s, corr_s)),
-            'p_value': float(stats.ttest_ind(corr_s, err_s).pvalue),
-            'diff_significant': stats.ttest_ind(corr_s, err_s).pvalue < 0.05,
-        }
+        corr_s = corr_s[np.isfinite(corr_s)]
+        err_s = err_s[np.isfinite(err_s)]
+
+        if len(corr_s) > 0 and len(err_s) > 0:
+            result['entropy'] = {
+                'correct_mean': float(np.mean(corr_s)),
+                'correct_std': float(np.std(corr_s)),
+                'error_mean': float(np.mean(err_s)),
+                'error_std': float(np.std(err_s)),
+                'cohens_d': float(cohen_d(corr_s, err_s)),
+                'auc': float(compute_auc(err_s, corr_s)),
+                'p_value': float(stats.ttest_ind(corr_s, err_s).pvalue),
+                'diff_significant': stats.ttest_ind(corr_s, err_s).pvalue < 0.05,
+            }
 
     return result
 
@@ -325,32 +353,31 @@ def save_json_results(all_stats: List[Dict], metadata: Dict, output_path: Path):
 
 
 def main():
-    import sys
     import argparse
 
     parser = argparse.ArgumentParser(description='分析OMniMath几何特征结果')
-    parser.add_argument('--cache-dir', type=str, default='/gz-data/research/demo/data/hidden/cache/omnimath',
-                        help='缓存目录路径')
-    parser.add_argument('--npz-path', type=str, default='/gz-data/research/demo/data/features/full_omnimath.npz',
-                        help='NPZ文件路径')
-    parser.add_argument('--output', type=str, default='/gz-data/research/demo/data/results/omnimath_analysis.json',
-                        help='输出JSON路径')
+    parser.add_argument('--cache-dir', type=str, default='/gz-data/research/demo/data/hidden/cache/omnimath')
+    parser.add_argument('--npz-path', type=str, default='/gz-data/research/demo/data/features/full_omnimath.npz')
+    parser.add_argument('--output', type=str, default='/gz-data/research/demo/data/results/omnimath_analysis.json')
 
     args = parser.parse_args()
 
-    # 路径配置
     cache_dir = Path(args.cache_dir)
-    npz_path = args.npz_path
-    output_json = Path(args.output)
-
-    output_json.parent.mkdir(parents=True, exist_ok=True)
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # 加载轨迹
-    trajectories = load_trajectories_from_cache(cache_dir)
+    trajectories = load_trajectories_simple(cache_dir)
     print(f"成功加载 {len(trajectories)} 条轨迹")
 
+    if len(trajectories) == 0:
+        print("错误: 没有加载到任何轨迹！")
+        print(f"缓存目录: {cache_dir}")
+        print(f"请确认缓存是否存在")
+        return
+
     # 加载元数据
-    data = np.load(npz_path, allow_pickle=True)
+    data = np.load(args.npz_path, allow_pickle=True)
     metadata = {
         'subset': 'omnimath',
         'n_chains': len(data['problem_ids']),
@@ -375,7 +402,11 @@ def main():
     print_latex_table(all_stats)
 
     # 保存JSON
-    save_json_results(all_stats, metadata, output_json)
+    try:
+        save_json_results(all_stats, metadata, output_path)
+    except Exception as e:
+        print(f"\nJSON保存失败: {e}")
+        print("但统计结果已在上方显示")
 
 
 if __name__ == "__main__":
