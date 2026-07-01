@@ -17,18 +17,56 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional
 import json
 import argparse
-import importlib.util
-
-# 导入data_loading_gpu中的类定义，以便pickle加载
-try:
-    from data_loading_gpu import ReasoningTrajectory
-except ImportError:
-    spec = importlib.util.spec_from_file_location("data_loading_gpu", "data_loading_gpu.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    ReasoningTrajectory = module.ReasoningTrajectory
 
 HIDDEN_LAYERS = [10, 14, 18, 22]
+
+
+# ========== 必须在__main__中定义相同的类，以便pickle加载 ==========
+
+@dataclass
+class StepGeometry:
+    step_id: int
+    layer: int
+    n_tokens: int
+    kappa: float = np.nan
+    eff_rank: float = np.nan
+    spectral_entropy: float = np.nan
+    norm: float = np.nan
+    eigenvalues: np.ndarray = None
+    principal_directions: np.ndarray = None
+
+    def __post_init__(self):
+        if self.eigenvalues is None:
+            self.eigenvalues = np.array([])
+        if self.principal_directions is None:
+            self.principal_directions = np.array([])
+
+
+class ReasoningTrajectory:
+    def __init__(self, chain_id, problem_id, is_correct, n_steps, step_ranges=None, steps=None):
+        self.chain_id = chain_id
+        self.problem_id = problem_id
+        self.is_correct = bool(is_correct)
+        self.n_steps = n_steps
+        if step_ranges is None:
+            self.step_ranges = []
+        elif isinstance(step_ranges, np.ndarray):
+            self.step_ranges = step_ranges.tolist()
+        elif hasattr(step_ranges, '__iter__'):
+            self.step_ranges = list(step_ranges)
+        else:
+            self.step_ranges = []
+        self.steps = steps or {}
+
+    def has_layer(self, layer):
+        return layer in self.steps and len(self.steps[layer]) > 0
+
+    def get_geometry_sequence(self, layer):
+        if not self.has_layer(layer):
+            return []
+        return [self.steps[layer][i] for i in sorted(self.steps[layer].keys())]
+
+# ========== 类定义结束 ==========
 
 
 @dataclass
