@@ -19,6 +19,13 @@ from typing import List, Dict, Tuple, Optional
 import json
 import sys
 
+# 导入data_loading_gpu中的类定义，以便pickle加载
+# 这必须在加载pickle之前完成
+import importlib.util
+spec = importlib.util.spec_from_file_location("data_loading_gpu", "data_loading_gpu.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
 HIDDEN_LAYERS = [10, 14, 18, 22]
 
 
@@ -57,7 +64,7 @@ def compute_auc(x1: np.ndarray, x2: np.ndarray) -> float:
 
 
 def load_trajectories_simple(cache_dir: Path) -> List:
-    """简单加载：直接读取pickle内容，不依赖类定义"""
+    """加载轨迹：使用导入的类定义来加载pickle"""
     trajectories = []
     cache_files = sorted(cache_dir.glob("chain_*.pkl"),
                          key=lambda p: int(p.stem.split('_')[1]))
@@ -67,25 +74,10 @@ def load_trajectories_simple(cache_dir: Path) -> List:
     for cf in tqdm(cache_files):
         try:
             with open(cf, 'rb') as f:
-                # 直接读取，不反序列化成类
-                content = pickle.load(f)
-
-                # 检查是否有必要的属性
-                if hasattr(content, 'is_correct') and hasattr(content, 'steps'):
-                    trajectories.append(content)
-                else:
-                    print(f"Skip {cf}: missing attributes")
-
+                traj = pickle.load(f)
+                trajectories.append(traj)
         except Exception as e:
             print(f"Failed to load {cf}: {e}")
-            # 尝试直接读取属性
-            try:
-                with open(cf, 'rb') as f:
-                    obj = pickle.load(f, encoding='latin1')
-                    if hasattr(obj, 'is_correct'):
-                        trajectories.append(obj)
-            except:
-                pass
 
     return trajectories
 
