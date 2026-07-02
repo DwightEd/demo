@@ -78,8 +78,8 @@ def load_full_npz(npz_path: str) -> dict:
     """加载 full_*.npz 数据文件
 
     返回包含以下字段的字典:
-        - stepvec: (N, T, 8, 4096) step vectors
-        - stepcloud: (N, T, 33, 9) cloud features
+        - stepvec: object array (N,), 每个元素是 (T, 8, 4096)
+        - stepcloud: object array (N,), 每个元素是 (T, 33, 9)
         - cloud_feature_names: list of 9 feature names
         - is_correct_strict: (N,) correctness labels (0=correct, 1=error)
         - problem_ids: (N,) problem identifiers
@@ -92,34 +92,38 @@ def load_full_npz(npz_path: str) -> dict:
     labels = data['is_correct_strict']
     N = len(problem_ids)
 
-    # stepvec: (N, T, 8, 4096) 或 (T, 8, 4096) 对于单个链
-    if 'stepvec' in data:
-        stepvec = data['stepvec']
-        if stepvec.ndim == 3:  # 单条链
-            stepvec = stepvec[np.newaxis, ...]
-    else:
-        stepvec = None
+    # stepvec: object array (N,), 每个 element 是 (T, n_sv, d)
+    stepvec = data.get('stepvec', None)
 
-    # stepcloud: (N, T, 33, 9) 或类似
-    if 'stepcloud' in data:
-        stepcloud = data['stepcloud']
-        if stepcloud.ndim == 3:  # 单条链
-            stepcloud = stepcloud[np.newaxis, ...]
-    else:
-        stepcloud = None
+    # stepcloud: object array (N,), 每个 element 是 (T, L, 9)
+    stepcloud = data.get('stepcloud', None)
 
     # cloud_feature_names
-    if 'cloud_feature_names' in data:
-        cloud_feature_names = [str(n) for n in data['cloud_feature_names']]
-    else:
-        cloud_feature_names = None
+    cloud_feature_names = data.get('cloud_feature_names', None)
+    if cloud_feature_names is not None:
+        cloud_feature_names = [str(n) for n in cloud_feature_names]
 
     print(f"  Loaded {N} chains")
-    if stepvec is not None:
-        print(f"  stepvec shape: {stepvec.shape}")
-    if stepcloud is not None:
-        print(f"  stepcloud shape: {stepcloud.shape}")
-        print(f"  cloud features: {cloud_feature_names}")
+    if stepvec is not None and len(stepvec) > 0:
+        sample_idx = 0
+        # 找到第一个非 None 的元素来显示 shape
+        for idx in range(min(10, len(stepvec))):
+            if stepvec[idx] is not None and hasattr(stepvec[idx], 'shape'):
+                sample_idx = idx
+                break
+        sample = stepvec[sample_idx]
+        if sample is not None:
+            print(f"  stepvec[{sample_idx}] shape: {sample.shape}")
+    if stepcloud is not None and len(stepcloud) > 0:
+        sample_idx = 0
+        for idx in range(min(10, len(stepcloud))):
+            if stepcloud[idx] is not None and hasattr(stepcloud[idx], 'shape'):
+                sample_idx = idx
+                break
+        sample = stepcloud[sample_idx]
+        if sample is not None:
+            print(f"  stepcloud[{sample_idx}] shape: {sample.shape}")
+            print(f"  cloud features: {cloud_feature_names}")
 
     return {
         'stepvec': stepvec,
@@ -195,16 +199,28 @@ def compute_per_chain_metrics(data: dict, layer_idx: int = 0) -> list:
         print("No stepvec data available.")
         return results
 
-    stepvec = data['stepvec']
+    stepvec = data['stepvec']  # object array (N,), 每个元素是 (T, n_sv, d)
     labels = data['labels']
     N = data['N']
 
+    skipped = 0
+
     for i in tqdm(range(N), desc="Computing phase metrics"):
-        # 提取该链的 stepvec: (T, 8, 4096)
-        if stepvec.ndim == 4:  # (N, T, 8, 4096)
-            chain_stepvec = stepvec[i]
-        else:  # (T, 8, 4096) - 单条链
-            chain_stepvec = stepvec
+        # stepvec 是 object array，每个元素是一个链的数据
+        chain_stepvec = stepvec[i]
+
+        # 跳过 None 或空数据
+        if chain_stepvec is None:
+            skipped += 1
+            continue
+
+        # 转换为 numpy array（如果还不是）
+        chain_stepvec = np.asarray(chain_stepvec)
+
+        # 跳过没有足够步骤的链
+        if chain_stepvec.size == 0 or chain_stepvec.ndim < 2:
+            skipped += 1
+            continue
 
         # 计算指标
         metrics = compute_chain_phase_metrics(chain_stepvec, layer_idx=layer_idx)
@@ -216,6 +232,9 @@ def compute_per_chain_metrics(data: dict, layer_idx: int = 0) -> list:
                 'is_correct': bool(labels[i] == 0),  # 0=correct
                 'metrics': metrics,
             })
+
+    if skipped > 0:
+        print(f"  Skipped {skipped}/{N} chains due to missing/invalid stepvec data")
 
     return results
 
@@ -427,7 +446,7 @@ def main():
                        default='gsm8k',
                        help='数据集名称')
     parser.add_argument('--data_dir',
-                       default='F:/projects/python_projects/research/constrained_manifolds/demo/data/features',
+                       default='/gz-data/research/demo/data/features',
                        help='数据目录路径')
     parser.add_argument('--output_dir',
                        default='./results/phase_instability',
