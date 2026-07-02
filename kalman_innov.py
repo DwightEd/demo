@@ -80,16 +80,29 @@ def em_ssm(chains, k, n_iter=30, reg=1e-4, seed=0):
     """
     rng = np.random.default_rng(seed)
     m = chains[0].shape[1]
-    d = np.concatenate(chains, 0).mean(0)                      # observation offset
-    Yc = [Y - d for Y in chains]
-    # init
-    A = 0.9 * np.eye(k)
-    C = rng.standard_normal((m, k)) * 0.1
-    # seed C with top-k PCA directions of the data (better init)
-    allY = np.concatenate(Yc, 0)
-    U, S, Vt = np.linalg.svd(allY - allY.mean(0), full_matrices=False)
-    C = Vt[:k].T * (S[:k] / np.sqrt(len(allY)))                # (m,k)
-    Q = np.eye(k); R = np.diag(allY.var(0) + reg); mu0 = np.zeros(k); P0 = np.eye(k)
+
+    # Handle single feature case (m=1)
+    if m == 1:
+        # For single feature, use simple initialization
+        A = 0.9 * np.eye(k)
+        C = np.ones((1, k)) * 0.1
+        Q = np.eye(k)
+        R = np.array([[chains[0].var(0) + reg]])
+        mu0 = np.zeros(k)
+        P0 = np.eye(k)
+        d = np.array([np.concatenate(chains, 0).mean()])
+        Yc = [Y - d for Y in chains]
+    else:
+        d = np.concatenate(chains, 0).mean(0)                      # observation offset
+        Yc = [Y - d for Y in chains]
+        # init
+        A = 0.9 * np.eye(k)
+        C = rng.standard_normal((m, k)) * 0.1
+        # seed C with top-k PCA directions of the data (better init)
+        allY = np.concatenate(Yc, 0)
+        U, S, Vt = np.linalg.svd(allY - allY.mean(0), full_matrices=False)
+        C = Vt[:k].T * (S[:k] / np.sqrt(len(allY)))                # (m,k)
+        Q = np.eye(k); R = np.diag(allY.var(0) + reg); mu0 = np.zeros(k); P0 = np.eye(k)
 
     def kalman_smooth(Y):
         T = Y.shape[0]
