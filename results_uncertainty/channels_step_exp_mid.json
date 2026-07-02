@@ -1,0 +1,64 @@
+{
+  "meta": {
+    "input": "gsm8k_v2_5shot_full.npz",
+    "band": "mid",
+    "mode": "step_exp",
+    "N": 983,
+    "n_incorrect": 235,
+    "contrastive_problems": 60,
+    "rep_channel": [
+      "D",
+      "PR",
+      "AE"
+    ],
+    "unc_channel": [
+      "UD",
+      "UC"
+    ],
+    "subset": "all",
+    "label": "answer-based"
+  },
+  "step_corr_pooled": {
+    "D~UD": 0.005,
+    "D~UC": 0.045,
+    "PR~UD": 0.147,
+    "PR~UC": 0.004,
+    "AE~UD": 0.172,
+    "AE~UC": 0.03
+  },
+  "step_corr_within_chain": {
+    "D~UD": -0.108,
+    "D~UC": 0.026,
+    "PR~UD": 0.113,
+    "PR~UC": -0.001,
+    "AE~UD": 0.14,
+    "AE~UC": 0.019
+  },
+  "chain_corr_pooled": {
+    "D~UD": 0.43,
+    "D~UC": -0.007,
+    "PR~UD": 0.167,
+    "PR~UC": -0.005,
+    "AE~UD": 0.134,
+    "AE~UC": 0.02
+  },
+  "chain_corr_within_problem": {
+    "D~UD": 0.453,
+    "D~UC": -0.013,
+    "PR~UD": 0.126,
+    "PR~UC": 0.021,
+    "AE~UD": 0.107,
+    "AE~UC": 0.056
+  },
+  "channel_within_auroc": {
+    "representation_only": 0.5842,
+    "uncertainty_only": 0.5672,
+    "fusion": 0.6287
+  },
+  "static_vs_dynamic_within_auroc": {
+    "rep_static": 0.5772,
+    "rep_dynamic": 0.5906,
+    "unc_static": 0.5909,
+    "unc_dynamic": 0.569
+  }
+}

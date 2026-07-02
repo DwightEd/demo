@@ -1,0 +1,72 @@
+{
+  "metadata": {
+    "sv_layers": [
+      8,
+      10,
+      12,
+      14,
+      16,
+      18,
+      20,
+      22
+    ],
+    "n_chains": 998,
+    "n_correct": 500,
+    "n_error": 498,
+    "subset": "omnimath"
+  },
+  "results": {
+    "L14_H1": {
+      "hypothesis": "H1",
+      "metric": "smoothness",
+      "error_mean": 0.9022042466455452,
+      "correct_mean": 0.9020961996994964,
+      "cohens_d": -0.0033561707286281287,
+      "p_value": 0.5748670532877865,
+      "ci_lower": -0.0040331230856970905,
+      "ci_upper": 0.0037402101088128397,
+      "n_error": 498,
+      "n_correct": 500,
+      "interpretation": "error=0.902 < correct=0.902: d=-0.003, p=0.5749"
+    },
+    "L14_H2": {
+      "hypothesis": "H2",
+      "metric": "shallow_lockin",
+      "error_mean": 0.40763052208835343,
+      "correct_mean": 0.498,
+      "cohens_d": NaN,
+      "p_value": 0.9983223948429321,
+      "ci_lower": NaN,
+      "ci_upper": NaN,
+      "n_error": 203,
+      "n_correct": 249,
+      "interpretation": "OR=0.69, p=0.9983 (203/498 vs 249/500)"
+    },
+    "L14_H3": {
+      "hypothesis": "H3",
+      "metric": "deep_decay",
+      "error_mean": 0.0,
+      "correct_mean": 0.0,
+      "cohens_d": NaN,
+      "p_value": 1.0,
+      "ci_lower": NaN,
+      "ci_upper": NaN,
+      "n_error": 0,
+      "n_correct": 0,
+      "interpretation": "OR=nan, p=1.0000 (0/498 vs 0/500)"
+    },
+    "L14_H4": {
+      "hypothesis": "H4",
+      "metric": "trajectory_vs_stepwise",
+      "error_mean": 0.9636381904792316,
+      "correct_mean": 0.9634826070935237,
+      "cohens_d": 0.16421216368700434,
+      "p_value": NaN,
+      "ci_lower": NaN,
+      "ci_upper": NaN,
+      "n_error": 498,
+      "n_correct": 500,
+      "interpretation": "Trajectory d=-0.013 > Stepwise d=-0.178: \u0394=0.164"
+    }
+  }
+}

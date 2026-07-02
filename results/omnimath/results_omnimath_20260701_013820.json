@@ -1,0 +1,106 @@
+{
+  "L14": {
+    "metadata": {
+      "layer": "14",
+      "n_trajectories": "960",
+      "n_correct": "496",
+      "n_error": 464.0
+    },
+    "lockin_stats": {
+      "total": "960",
+      "correct_detected": "17",
+      "error_detected": "8",
+      "correct_total": 496.0,
+      "error_total": 464.0,
+      "correct_rate": 0.034274193548387094,
+      "error_rate": 0.017241379310344827
+    },
+    "decay_stats": {
+      "total": "960",
+      "correct_detected": "0",
+      "error_detected": "0",
+      "correct_total": 496.0,
+      "error_total": 464.0,
+      "correct_rate": 0.0,
+      "error_rate": 0.0
+    }
+  },
+  "validation": {
+    "L14_H1": {
+      "hypothesis": "H1",
+      "metric": "smoothness",
+      "layer": "14",
+      "error_mean": "0.8474810092072738",
+      "correct_mean": "0.846208409840862",
+      "mean_diff": "-0.0012725993664117752",
+      "test_type": "Mann-Whitney U",
+      "statistic": "110382.0",
+      "p_value": "0.5901695947222187",
+      "cohens_d": "-0.02554587712205263",
+      "odds_ratio": "None",
+      "ci_lower": "-0.007575048195655722",
+      "ci_upper": "0.005220995088385693",
+      "n_error": "456",
+      "n_correct": "480",
+      "interpretation": "Not significant",
+      "significant": "False"
+    },
+    "L14_H2": {
+      "hypothesis": "H2",
+      "metric": "shallow_lockin",
+      "layer": "14",
+      "error_mean": 0.017241379310344827,
+      "correct_mean": 0.034274193548387094,
+      "mean_diff": "-0.017032814238042267",
+      "test_type": "Fisher exact",
+      "statistic": "nan",
+      "p_value": "0.9699010023947643",
+      "cohens_d": "None",
+      "odds_ratio": "0.49432404540763675",
+      "ci_lower": "nan",
+      "ci_upper": "nan",
+      "n_error": 464.0,
+      "n_correct": 496.0,
+      "interpretation": "No significant difference",
+      "significant": "False"
+    },
+    "L14_H3": {
+      "hypothesis": "H3",
+      "metric": "deep_decay",
+      "layer": "14",
+      "error_mean": 0.0,
+      "correct_mean": 0.0,
+      "mean_diff": "0.0",
+      "test_type": "Fisher exact",
+      "statistic": "nan",
+      "p_value": "nan",
+      "cohens_d": "None",
+      "odds_ratio": "nan",
+      "ci_lower": "nan",
+      "ci_upper": "nan",
+      "n_error": 464.0,
+      "n_correct": 496.0,
+      "interpretation": "No significant difference",
+      "significant": "False"
+    },
+    "L14_H4": {
+      "hypothesis": "H4",
+      "metric": "trajectory_vs_stepwise",
+      "layer": "14",
+      "error_mean": "nan",
+      "correct_mean": "nan",
+      "mean_diff": "nan",
+      "test_type": "Bootstrap AUROC",
+      "statistic": "nan",
+      "p_value": "nan",
+      "cohens_d": "None",
+      "odds_ratio": "None",
+      "ci_lower": "nan",
+      "ci_upper": "nan",
+      "n_error": 456.0,
+      "n_correct": 480.0,
+      "interpretation": "No significant difference",
+      "significant": "False"
+    }
+  }
+}
