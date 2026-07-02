@@ -32,6 +32,9 @@ from tqdm import tqdm
 def compute_phase_instability_metrics(unit_vectors):
     """统一相变检测（重命名版，逻辑与原版完全一致，含未修复的已知问题）"""
 
+    # 转换为 float32 以支持 linalg 运算（float16 不被 np.linalg 支持）
+    unit_vectors = np.asarray(unit_vectors, dtype=np.float32)
+
     n_vectors = len(unit_vectors)
 
     # 1. 方向集中度：平均合向量长度（mean resultant length）
@@ -142,8 +145,9 @@ def normalize_vectors(vectors: np.ndarray) -> np.ndarray:
         vectors: (..., d) array of vectors
 
     Returns:
-        (..., d) array of unit vectors
+        (..., d) array of unit vectors (float32)
     """
+    vectors = np.asarray(vectors, dtype=np.float32)
     norms = np.linalg.norm(vectors, axis=-1, keepdims=True)
     norms = np.where(norms > 1e-12, norms, 1.0)  # 避免除零
     return vectors / norms
