@@ -755,7 +755,7 @@ def main():
                          help='数据目录路径')
     parser.add_argument('--output_dir', default='./results/phase_instability',
                          help='输出目录')
-    parser.add_argument('--layer_idx', type=int, default=0,
+    parser.add_argument('--layer_idx', type=int, default=14,
                          help='stepvec 中的层索引 (0-7，对应 sv_layers 数组中的位置；'
                               '运行时会显示实际层号)')
     parser.add_argument('--min_steps', type=int, default=2,
