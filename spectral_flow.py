@@ -6,8 +6,11 @@
 本脚本验证三条可证伪预测（validate_phase_instability.py 只覆盖了"池化步向量的链级
 方向统计"并已将其证伪为长度代理，不覆盖以下任何一条）：
 
-  S1 检测增量: 步级 α_t / Δα_t / 再收缩指数 在 [κ_exp + logN] 之上是否有增量
+  S1 检测增量: 步级 α_t / Δα_t / 再收缩指数 / 方向有效秩 ρ (uncentered/centered/
+     定m子采样三变体, 见 rho_dir/rho_sub) 在 [κ_exp + logN] 之上是否有增量
      (oof_logit + 按题聚类 bootstrap CI —— 这是"指标如何结合"的规范答案: 消融阶梯)。
+     二阶矩前科: 链级 stepvec eff_rank=长度代理(已杀), 原始云 cloud_D 净增+0.02(已杀);
+     本次测的是"单位化 token + 定 m 子采样"的判决变体。
   S2 再收缩: 错误步的步内再收缩指数 (步末κ − 步初κ) 是否弱于正确步 (长度分桶)。
   S3 流断裂定位 (链内秩检验): 错误链中 gold 首错步的断裂分数在本链所有候选步中的
      排名是否显著优于随机 —— 同链内比较，构造上免疫长度/难度混杂。
@@ -66,6 +69,42 @@ def kappa_exp(H):
     return float(np.linalg.norm((w[:, None] * _unit_rows(H)).sum(0)))
 
 
+def _entropy_rank(lam):
+    lam = lam[lam > 1e-12]
+    if lam.size == 0:
+        return float("nan")
+    lam = lam / lam.sum()
+    return float(np.exp(-(lam * np.log(lam)).sum()))
+
+
+def rho_dir(H, center=False):
+    """方向有效秩: 单位 token 向量散布矩阵谱的熵指数, ρ∈[1, n]。
+
+    uncentered (center=False): S=(1/n)ΣûûT, trace=1, λ1>=κ² —— 谱里含一阶矩(κ)；
+    centered  (center=True):  先减合方向再看谱 —— 与 κ 正交的纯二阶矩形状。
+    经 Gram 技巧 (n×n) 计算, n=步内 token 数, 开销可忽略。
+    注意 ρ<=n 且随 n 有采样噪声增长 —— 判读必须配 bucket(n) + 增量 CI + rho_sub。"""
+    if len(H) < 2:
+        return float("nan")
+    U = _unit_rows(np.asarray(H, np.float64))
+    if center:
+        U = U - U.mean(0)
+    G = U @ U.T / len(U)
+    return _entropy_rank(np.linalg.eigvalsh(G))
+
+
+def rho_sub(H, m=16, draws=3, seed=0):
+    """定 m 子采样方向有效秩: 每步都在同样 m 个 token 上评估, 机械 n 依赖
+    (rank<=n + 采样噪声) 被构造性消灭 —— 这是二阶矩信号 vs 长度代理的判决变体。"""
+    n = len(H)
+    if n < m:
+        return float("nan")
+    rng = np.random.default_rng(seed)
+    vals = [rho_dir(H[rng.choice(n, m, replace=False)]) for _ in range(draws)]
+    vals = [v for v in vals if np.isfinite(v)]
+    return float(np.mean(vals)) if vals else float("nan")
+
+
 def window_stats(H):
     """(kappa_mean, alpha) for one token window; nan-safe."""
     if len(H) < 2:
@@ -86,6 +125,7 @@ def chain_features(H, rel_ranges, w=32, stride=16):
     T = len(rel_ranges)
     out = {k: np.full(T, np.nan) for k in
            ("alpha", "dalpha", "kap_mean", "kap_exp", "pr", "recon",
+            "rho_dir", "rho_dir_c", "rho_sub",
             "break_kap", "break_alpha", "ntok")}
     for t, (lo, hi) in enumerate(rel_ranges):
         lo, hi = int(lo), int(hi)
@@ -96,6 +136,9 @@ def chain_features(H, rel_ranges, w=32, stride=16):
             continue
         out["kap_mean"][t] = kappa_mean(seg)
         out["kap_exp"][t] = kappa_exp(seg)
+        out["rho_dir"][t] = rho_dir(seg)
+        out["rho_dir_c"][t] = rho_dir(seg, center=True)
+        out["rho_sub"][t] = rho_sub(seg, seed=t)  # 每步定种子, 可复现
         if n >= MIN_TOK_SPECTRUM:
             out["alpha"][t] = spectral_alpha(seg)
             out["pr"][t] = participation_ratio(seg)
@@ -182,6 +225,7 @@ def run_layer(records, layer, folds=5):
 
     # ---- flatten step-level (eval-masked) ----
     step_keys = ["alpha", "dalpha", "kap_mean", "kap_exp", "pr", "recon",
+                 "rho_dir", "rho_dir_c", "rho_sub",
                  "break_kap", "break_alpha"]
     flat = {k: [] for k in step_keys}
     Y, OK, LEN, PID, CORR = [], [], [], [], []
