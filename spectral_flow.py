@@ -16,6 +16,10 @@
      排名是否显著优于随机 —— 同链内比较，构造上免疫长度/难度混杂。
   S4 层剖面: 以上信号随层 [10,14,18,22] 的变化。
   S5 相位形状: 滑窗 κ/α 序列的"末段收敛指数" (后1/3均值 − 前1/3均值) 链级区分正确/错误。
+  S6 谱级联 (SGoT Finding 5/6 的定量升级, 原文仅 1 模型 5 链无统计检验):
+     各层滑窗 α 梯度序列的层间 Pearson 相关 —— (a) ρ(层距) 衰减剖面;
+     (b) 错误链 vs 正确链的层间同步差 (bucket 控长度); (c) gold 首错步边界附近的
+     "局部失同步"链内秩检验 —— 检验"标点漏拍处即失败处"。--skip_cascade 可跳过。
 
 标签约定: is_correct_strict 1=correct; gold_error_step -1=全对 (见 DATA.md 红线)。
 用法:
@@ -181,6 +185,101 @@ def chain_features(H, rel_ranges, w=32, stride=16):
 # evaluation helpers
 # ---------------------------------------------------------------------------
 
+def cascade_chain(Hs, rel, w=32, stride=8):
+    """S6 谱级联: 每层滑窗 α 序列 → 梯度 → 层间相关 + 步边界局部同步。
+
+    Hs: list of (R,d) —— 同一条链在各存储层的 token 隐状态。
+    Returns None (链太短) 或 {"pair": {(i,j): ρ}, "sync": (T,) 每步入口边界的局部
+    层间同步 (±2w token 邻域内 α 梯度的平均成对相关)}。"""
+    R = len(Hs[0])
+    if R < 3 * w:
+        return None
+    starts = np.arange(0, R - w + 1, stride)
+    A = np.full((len(starts), len(Hs)), np.nan)
+    for li, H in enumerate(Hs):
+        for si, s in enumerate(starts):
+            A[si, li] = spectral_alpha(H[s:s + w])
+    G = np.diff(A, axis=0)                      # (W-1, L) per-window alpha gradients
+    centers = starts[1:].astype(float) + w / 2.0 - stride / 2.0
+    L = len(Hs)
+
+    def _pair_corrs(M, min_n):
+        out = {}
+        for i in range(L):
+            for j in range(i + 1, L):
+                m = np.isfinite(M[:, i]) & np.isfinite(M[:, j])
+                if m.sum() >= min_n and np.std(M[m, i]) > 0 and np.std(M[m, j]) > 0:
+                    out[(i, j)] = float(np.corrcoef(M[m, i], M[m, j])[0, 1])
+                else:
+                    out[(i, j)] = float("nan")
+        return out
+
+    pair = _pair_corrs(G, min_n=8)
+    T = len(rel)
+    sync = np.full(T, np.nan)
+    for t in range(1, T):
+        p = float(rel[t][0])
+        sel = np.abs(centers - p) <= 2 * w
+        if sel.sum() >= 6:
+            cs = [v for v in _pair_corrs(G[sel], min_n=5).values() if np.isfinite(v)]
+            if cs:
+                sync[t] = float(np.mean(cs))
+    return {"pair": pair, "sync": sync}
+
+
+def run_cascade(crecs, layer_names):
+    """Aggregate S6 across chains. crecs: list of dicts with pair/sync/labels."""
+    lines = ["===== S6 spectral cascade (cross-layer alpha-gradient sync) ====="]
+    res = {}
+    # (a) ρ(layer distance) profile, pooled over chains
+    dist_vals = {}
+    for r in crecs:
+        for (i, j), v in r["pair"].items():
+            d = abs(layer_names[j] - layer_names[i])
+            dist_vals.setdefault(d, []).append(v)
+    prof = {}
+    for d in sorted(dist_vals):
+        v = np.asarray(dist_vals[d], float)
+        v = v[np.isfinite(v)]
+        if len(v):
+            prof[d] = {"mean_rho": float(v.mean()), "n": int(len(v))}
+            lines.append(f"  [S6a] rho(layer distance {d:2d}) = {v.mean():+.3f} (n={len(v)})")
+    res["rho_by_distance"] = prof
+    # (b) chain-level mean sync: correct vs error (bucket by n_tokens)
+    msync = np.array([np.nanmean(list(r["pair"].values())) for r in crecs])
+    yc = np.array([0 if r["correct"] else 1 for r in crecs])
+    ntok = np.array([r["ntok"] for r in crecs], float)
+    m = np.isfinite(msync)
+    if m.sum() >= 50 and len(np.unique(yc[m])) == 2:
+        res["chain_sync"] = {
+            "auroc": bdir(auroc(msync[m], yc[m])),
+            "bucket_ntok": bucket(msync[m], yc[m], ntok[m]),
+            "mean_correct": float(np.mean(msync[m & (yc == 0)])),
+            "mean_error": float(np.mean(msync[m & (yc == 1)])),
+            "n": int(m.sum())}
+        c = res["chain_sync"]
+        lines.append(f"  [S6b] chain mean sync: corr {c['mean_correct']:+.3f} err {c['mean_error']:+.3f} "
+                     f"| AUROC {c['auroc']:.3f} bucket(ntok) {c['bucket_ntok']:.3f}")
+    # (c) within-chain rank of local sync at the gold boundary (sign from detection)
+    Ys, Ss = [], []
+    for r in crecs:
+        okm = r["ok"] & np.isfinite(r["sync"])
+        Ys.append(r["y"][okm]); Ss.append(r["sync"][okm])
+    Yf = np.concatenate(Ys) if Ys else np.array([])
+    Sf = np.concatenate(Ss) if Ss else np.array([])
+    sign = 1.0
+    if len(Yf) >= 50 and len(np.unique(Yf)) == 2:
+        sign = 1.0 if auroc(Sf, Yf) >= 0.5 else -1.0
+    err = [r for r in crecs if (not r["correct"]) and r["ges"] >= 0]
+    t1, e1, pct, n = within_chain_rank([r["sync"] for r in err], [r["ges"] for r in err], sign)
+    res["gold_boundary_sync"] = {"top1": t1, "expected_top1": e1, "mean_pct": pct,
+                                 "n": n, "sign": sign}
+    if np.isfinite(t1):
+        lines.append(f"  [S6c] gold-boundary local (de)sync: top1 {t1:.3f} (exp {e1:.3f}) "
+                     f"pct {pct:.3f} n={n} sign={'+' if sign > 0 else '-'}")
+    return res, lines
+
+
 def eval_mask_from(y, correct):
     ok = np.ones(len(y), bool)
     if not correct:
@@ -318,6 +417,9 @@ def main():
                     help="model layers to analyze (default: all stored hidden layers)")
     ap.add_argument("--window", type=int, default=32)
     ap.add_argument("--stride", type=int, default=16)
+    ap.add_argument("--cascade_stride", type=int, default=8,
+                    help="S6 级联滑窗步长 (α 梯度序列的时间分辨率)")
+    ap.add_argument("--skip_cascade", action="store_true", help="跳过 S6 (省 ~一半时间)")
     ap.add_argument("--max_chains", type=int, default=0, help="0 = all (debug cap)")
     ap.add_argument("--output_dir", default="outputs/spectral_flow")
     args = ap.parse_args()
@@ -343,6 +445,7 @@ def main():
 
     N = len(ids) if not args.max_chains else min(args.max_chains, len(ids))
     per_layer_records = {L: [] for L in cols}
+    cascade_records = []
     n_missing = 0
     for i in range(N):
         shard = os.path.join(hidden_dir, _fn(ids[i]))
@@ -360,13 +463,25 @@ def main():
         correct = bool(ges[i] < 0)
         ok = eval_mask_from(y, correct)
         Hall = np.load(shard, mmap_mode="r")
+        Hs = {}
         for L, c in cols.items():
             H = np.asarray(Hall[:, c, :], dtype=np.float32)
+            Hs[L] = H
             steps, chain = chain_features(H, rel, w=args.window, stride=args.stride)
             per_layer_records[L].append({
                 "steps": steps, "chain": chain, "y": y, "ok": ok,
                 "pid": int(pid[i]), "correct": correct, "ges": int(ges[i]),
             })
+        if not args.skip_cascade and len(Hs) >= 2:
+            layer_sorted = sorted(Hs)
+            cas = cascade_chain([Hs[L] for L in layer_sorted], rel,
+                                w=args.window, stride=args.cascade_stride)
+            if cas is not None:
+                cascade_records.append({
+                    "pair": cas["pair"], "sync": cas["sync"], "y": y, "ok": ok,
+                    "correct": correct, "ges": int(ges[i]), "pid": int(pid[i]),
+                    "ntok": int(len(Hs[layer_sorted[0]])),
+                })
         if (i + 1) % 50 == 0:
             print(f"  processed {i + 1}/{N} chains")
     if n_missing:
@@ -381,6 +496,10 @@ def main():
         res, lines = run_layer(recs, L)
         all_res["layers"][str(L)] = res
         print("\n" + "\n".join(lines))
+    if cascade_records:
+        cres, clines = run_cascade(cascade_records, sorted(cols))
+        all_res["cascade"] = cres
+        print("\n" + "\n".join(clines))
     out_file = os.path.join(args.output_dir, f"{args.dataset}_flow.json")
     with open(out_file, "w", encoding="utf-8") as fh:
         json.dump(all_res, fh, indent=2, ensure_ascii=False,
