@@ -309,7 +309,15 @@ def load_full_npz(npz_path: str) -> dict:
     if cloud_feature_names is not None:
         cloud_feature_names = [str(n) for n in cloud_feature_names]
 
+    # sv_layers: 实际的层号（stepvec 第二维对应的层）
+    sv_layers = data.get('sv_layers', None)
+    if sv_layers is not None:
+        sv_layers = [int(l) for l in sv_layers]
+
     print(f"  Loaded {N} chains")
+    if sv_layers is not None:
+        print(f"  sv_layers (actual layer numbers): {sv_layers}")
+        print(f"  Use --layer_idx 0-{len(sv_layers)-1} to select layer")
     if stepvec is not None and len(stepvec) > 0:
         sample_idx = 0
         for idx in range(min(10, len(stepvec))):
@@ -334,6 +342,7 @@ def load_full_npz(npz_path: str) -> dict:
         'stepvec': stepvec,
         'stepcloud': stepcloud,
         'cloud_feature_names': cloud_feature_names,
+        'sv_layers': sv_layers,
         'labels': labels,
         'problem_ids': problem_ids,
         'N': N,
@@ -746,8 +755,9 @@ def main():
                          help='数据目录路径')
     parser.add_argument('--output_dir', default='./results/phase_instability',
                          help='输出目录')
-    parser.add_argument('--layer_idx', type=int, default=0, choices=range(0, 8),
-                         help='要分析的 stepvec 层索引 (0-7 对应 sv_layers)')
+    parser.add_argument('--layer_idx', type=int, default=0,
+                         help='stepvec 中的层索引 (0-7，对应 sv_layers 数组中的位置；'
+                              '运行时会显示实际层号)')
     parser.add_argument('--min_steps', type=int, default=2,
                          help='参与统计所需的最少有效步骤数（默认2，数学下限）')
     parser.add_argument('--kappa_threshold', type=float, default=0.5,
