@@ -19,6 +19,23 @@ class ChainData:
     step_ranges: np.ndarray = None  # (T,2) shard-relative [lo,hi) token slices per step (for per-step NTC)
 
 
+def step_eval_mask(c) -> np.ndarray:
+    """Step-level evaluation mask (True = step may be used in step-level metrics).
+
+    ProcessBench only certifies steps up to and including the FIRST error
+    (gold_error_step); later steps of an error chain are unjudged (and often
+    also wrong), so using them as negatives contaminates the negative class.
+    Error chains whose error step is not stored (y all zero, e.g. truncation)
+    are excluded entirely. Chain-level scoring is unaffected by this mask."""
+    ok = np.ones(len(c.y), bool)
+    if not c.correct:
+        if (c.y == 1).any():
+            ok[int(np.argmax(c.y == 1)) + 1:] = False
+        else:
+            ok[:] = False
+    return ok
+
+
 @dataclass
 class Flat:
     y: np.ndarray
@@ -28,6 +45,7 @@ class Flat:
     speed: np.ndarray
     repetition: np.ndarray
     kappa: np.ndarray
+    eval_ok: np.ndarray
 
 
 @dataclass
@@ -44,6 +62,7 @@ class StepTable:
             speed=cat(lambda c: c.speed),
             repetition=cat(lambda c: c.repetition),
             kappa=cat(lambda c: c.kappa),
+            eval_ok=cat(step_eval_mask),
         )
 
     def correct_chains(self):

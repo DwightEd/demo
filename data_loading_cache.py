@@ -240,7 +240,7 @@ def load_all_trajectories_cached(npz_path: str,
                 hidden = np.load(hidden_path, mmap_mode='r')  # 内存映射
             except:
                 trajectories.append(ReasoningTrajectory(
-                    idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 0), 0
+                    idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 1), 0
                 ))
                 continue
 
@@ -253,11 +253,12 @@ def load_all_trajectories_cached(npz_path: str,
                 if ranges is None:
                     continue
 
+                a0 = int(ranges[0][0])  # 绝对闭区间 -> 分片相对半开区间 (见 data_loading.py 注释)
                 for step_id, (start, end) in enumerate(ranges):
-                    if end <= start:
+                    if end < start:
                         continue
 
-                    H = hidden[start:end, layer_idx, :].copy()  # 只复制需要的部分
+                    H = hidden[int(start) - a0:int(end) - a0 + 1, layer_idx, :].copy()
                     geom = compute_step_geometry_ultra_fast(H, step_id, layer_id, n_top=10)
                     if geom:
                         layer_steps[step_id] = StepGeometry(**geom)
@@ -266,7 +267,7 @@ def load_all_trajectories_cached(npz_path: str,
                     steps[layer_id] = layer_steps
 
             traj = ReasoningTrajectory(
-                idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 0),
+                idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 1),
                 len(step_token_ranges[idx]) if step_token_ranges[idx] is not None else 0,
                 step_ranges=step_token_ranges[idx],
                 steps=steps,

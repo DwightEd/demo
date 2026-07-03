@@ -415,8 +415,8 @@ def main():
     metadata = {
         'subset': 'omnimath',
         'n_chains': len(data['problem_ids']),
-        'n_correct': int(np.sum(data['is_correct_strict'] == 0)),
-        'n_error': int(np.sum(data['is_correct_strict'] == 1)),
+        'n_correct': int(np.sum(data['is_correct_strict'] == 1)),  # npz约定: 1=correct
+        'n_error': int(np.sum(data['is_correct_strict'] == 0)),
     }
 
     # 分析每一层

@@ -19,18 +19,29 @@ def diagnose():
     npz_path = "/gz-data/research/demo/data/features/full_omnimath.npz"
 
     # 加载NPZ获取原始标签
+    # 约定（写入端 extract_features._pb_record）: is_correct_strict 1=correct, 0=error；
+    # 真值锚点是 gold_error_step: -1=全对, >=0=首错步。旧版本脚本按 0=correct 解读，
+    # 与被诊断的缓存共享同一个错误假设，构成恒真检查、永远诊断不出反转。
     data = np.load(npz_path, allow_pickle=True)
     is_correct_strict = data['is_correct_strict']
+    gold_error_step = data['gold_error_step'].astype(int) if 'gold_error_step' in data.files else None
 
     print("="*60)
     print("诊断is_correct判断")
     print("="*60)
 
+    if gold_error_step is not None:
+        agree = float(np.mean((is_correct_strict == 1) == (gold_error_step < 0)))
+        print(f"\n[锚点] P(is_correct_strict==1 <=> gold_error_step<0) = {agree:.3f} "
+              f"(应接近1.0；若接近0说明标签方向反了)")
+
     # 检查前5个chain的标签
     print("\n原始NPZ中的is_correct_strict:")
     for i in range(5):
         label = is_correct_strict[i]
-        print(f"  Chain {i}: is_correct_strict={label} ({'正确' if label == 0 else '错误' if label == 1 else '未知'})")
+        ges_str = f", gold_error_step={gold_error_step[i]}" if gold_error_step is not None else ""
+        print(f"  Chain {i}: is_correct_strict={label} "
+              f"({'正确' if label == 1 else '错误' if label == 0 else '未知'}{ges_str})")
 
     # 检查缓存中的is_correct
     cache_files = sorted(cache_dir.glob("chain_*.pkl"),
@@ -48,7 +59,7 @@ def diagnose():
         print(f"  Chain {chain_id}:")
         print(f"    NPZ标签: is_correct_strict={original_label}")
         print(f"    缓存is_correct: {cached_is_correct}")
-        print(f"    匹配? {('✓' if (original_label == 0) == cached_is_correct else '✗')}")
+        print(f"    匹配(1=correct约定)? {('✓' if (original_label == 1) == cached_is_correct else '✗ 缓存标签反转，需删除重建')}")
 
         # 检查第一个step的kappa
         if traj.has_layer(14):
@@ -66,8 +77,8 @@ def diagnose():
     n_correct_strict_1 = int(np.sum(is_correct_strict == 1))
 
     print(f"\nNPZ中:")
-    print(f"  is_correct_strict == 0 (正确): {n_correct_strict_0}")
-    print(f"  is_correct_strict == 1 (错误): {n_correct_strict_1}")
+    print(f"  is_correct_strict == 1 (正确): {n_correct_strict_1}")
+    print(f"  is_correct_strict == 0 (错误): {n_correct_strict_0}")
 
     # 统计缓存
     n_cached_correct = 0
@@ -85,9 +96,11 @@ def diagnose():
     print(f"  is_correct == True: {n_cached_correct}")
     print(f"  is_correct == False: {n_cached_error}")
 
-    # 检查是否匹配
+    # 检查是否匹配（1=correct 约定；若相等的是 ==0 那组说明缓存是用反转标签建的）
     print(f"\n匹配检查:")
-    print(f"  NPZ正确 vs 缓存正确: {'✓' if n_correct_strict_0 == n_cached_correct else '✗'}")
+    print(f"  NPZ正确(==1) vs 缓存正确: {'✓' if n_correct_strict_1 == n_cached_correct else '✗'}")
+    if n_correct_strict_0 == n_cached_correct != n_correct_strict_1:
+        print("  ⚠ 缓存正确数恰好等于 NPZ 的 ==0 组 —— 缓存按反转约定生成，删除 chain_*.pkl 重建")
 
 
 def check_kappa_values():

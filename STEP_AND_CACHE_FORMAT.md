@@ -258,7 +258,7 @@ data = np.load('full_omnimath.npz', allow_pickle=True)
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `problem_ids` | ndarray (n,) | 问题ID |
-| `is_correct_strict` | ndarray (n,) | 严格正确性标签 (0=正确, 1=错误) |
+| `is_correct_strict` | ndarray (n,) | 严格正确性标签 (**1=正确, 0=错误**；锚点 gold_error_step<0⟺正确；旧文档误记 0=正确) |
 | `step_token_ranges` | ndarray (n,) | 每个链的step token范围 |
 | `stepcloud` | ndarray (n,) | Step级别的特征云 |
 | `stepgeom` | ndarray (n,) | Step级别的几何特征 |

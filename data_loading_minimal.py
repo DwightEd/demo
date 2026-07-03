@@ -120,7 +120,7 @@ def process_single_chain_minimal(args) -> Optional[ReasoningTrajectory]:
         return ReasoningTrajectory(
             chain_id=idx,
             problem_id=int(problem_id),
-            is_correct=bool(is_correct == 0),
+            is_correct=bool(is_correct == 1),
             n_steps=0,
             step_ranges=[],
             steps={},
@@ -130,7 +130,7 @@ def process_single_chain_minimal(args) -> Optional[ReasoningTrajectory]:
         return ReasoningTrajectory(
             chain_id=idx,
             problem_id=int(problem_id),
-            is_correct=bool(is_correct == 0),
+            is_correct=bool(is_correct == 1),
             n_steps=0,
             step_ranges=[],
             steps={},
@@ -139,11 +139,12 @@ def process_single_chain_minimal(args) -> Optional[ReasoningTrajectory]:
     steps = {}
     for layer_idx, layer_id in enumerate(HIDDEN_LAYERS):
         layer_steps = {}
+        a0 = int(step_ranges[0][0])  # 绝对闭区间 -> 分片相对半开区间 (见 data_loading.py 注释)
         for step_id, (start, end) in enumerate(step_ranges):
-            if end <= start:
+            if end < start:
                 continue
 
-            H = hidden[start:end, layer_idx, :]
+            H = hidden[int(start) - a0:int(end) - a0 + 1, layer_idx, :]
             geom = compute_step_geometry_minimal(H, step_id, layer_id)
             if geom is not None:
                 layer_steps[step_id] = geom
@@ -154,7 +155,7 @@ def process_single_chain_minimal(args) -> Optional[ReasoningTrajectory]:
     return ReasoningTrajectory(
         chain_id=idx,
         problem_id=int(problem_id),
-        is_correct=bool(is_correct == 0),
+        is_correct=bool(is_correct == 1),
         n_steps=len(step_ranges),
         step_ranges=step_ranges,
         steps=steps,

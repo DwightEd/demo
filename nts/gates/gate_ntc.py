@@ -7,6 +7,7 @@ from .base import BaseGate, GateResult
 from ..core.registry import GATES
 from ..eval.metrics import auroc, bdir, bucket, spearman, bimodality_coeff
 from ..geom.ntc import participation_ratio, autocorr_tau
+from ..core.types import step_eval_mask
 
 
 @GATES.register("gate_ntc")
@@ -18,8 +19,11 @@ class GateNTC(BaseGate):
         for c in table.chains:
             if c.hidden_path is None or c.step_ranges is None:
                 continue
+            ok = step_eval_mask(c)  # unjudged post-first-error steps excluded
             H = np.load(c.hidden_path, mmap_mode="r")[:, c.hidden_col, :]
             for t, (a, b) in enumerate(c.step_ranges):
+                if not ok[t]:
+                    continue
                 seg = np.asarray(H[int(a):int(b)]); n = len(seg)
                 pr = participation_ratio(seg); tau = autocorr_tau(seg)
                 PR.append(pr); TAU.append(tau); TLEN.append(n)

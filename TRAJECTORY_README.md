@@ -184,7 +184,7 @@ L14_H4       trajectory_vs_stepwise  N/A        N/A        0.065       Δ=0.065 
 ### NPZ文件
 必须包含以下字段：
 - `problem_ids`: 问题ID数组
-- `is_correct_strict`: 正确性标签（0=correct, 1=error）
+- `is_correct_strict`: 正确性标签（**1=correct, 0=error**；写入端 extract_features._pb_record，真值锚点 gold_error_step<0 ⟺ correct。2026-07-03 前的文档/代码曾误记为 0=correct）
 - `stepcloud`: (N, T, 33, 9) 步骤特征数组
 - `step_token_ranges`: (N, T, 2) 每步的token范围
 

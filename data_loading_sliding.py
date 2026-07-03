@@ -179,7 +179,7 @@ def load_all_trajectories_sliding(npz_path: str,
             hidden = np.load(hidden_path, mmap_mode='r')
         except:
             trajectories.append(SlidingTrajectory(
-                idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 0), 0, 0, {}
+                idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 1), 0, 0, {}
             ))
             continue
 
@@ -213,7 +213,7 @@ def load_all_trajectories_sliding(npz_path: str,
         traj = SlidingTrajectory(
             idx,
             int(problem_ids[idx]),
-            bool(is_correct_strict[idx] == 0),
+            bool(is_correct_strict[idx] == 1),
             n_windows=sum(len(w) for w in windows_by_layer.values()),
             n_tokens=R,
             windows=windows_by_layer,

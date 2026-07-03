@@ -19,8 +19,8 @@ for key in data.keys():
 print("\n=== Metadata ===")
 print(f"  problem_ids shape: {data['problem_ids'].shape}")
 print(f"  is_correct_strict shape: {data['is_correct_strict'].shape}")
-print(f"  n_correct: {np.sum(data['is_correct_strict'] == 0)}")
-print(f"  n_error: {np.sum(data['is_correct_strict'] == 1)}")
+print(f"  n_correct: {np.sum(data['is_correct_strict'] == 1)}")  # npz约定: 1=correct
+print(f"  n_error: {np.sum(data['is_correct_strict'] == 0)}")
 
 if 'sv_layers' in data:
     print(f"  sv_layers: {data['sv_layers']}")

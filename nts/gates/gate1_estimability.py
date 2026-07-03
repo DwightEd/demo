@@ -8,6 +8,7 @@ from ..geom.reducer import fit_reducer
 from ..geom.bank import Bank
 from ..geom.tangent import local_tangent, chain_energies
 from ..geom.intrinsic_dim import twonn, principal_angle
+from ..core.types import step_eval_mask
 
 
 @GATES.register("gate1_estimability")
@@ -34,8 +35,16 @@ class Gate1(BaseGate):
         def fold_angle(null):
             data = red.copy()
             if null:
+                # structure-destroyed null: permute each COLUMN independently.
+                # This kills inter-dimension dependence (hence any low-dim manifold)
+                # while preserving per-dim marginals. NOTE the old null (row
+                # permutation + one global rotation) was a geometry-preserving
+                # transform — kNN graphs, tangent spaces and principal angles are
+                # invariant under isometries + relabeling, so null==real by
+                # construction and the gate killed spuriously.
                 rng = np.random.default_rng(7)
-                data = data[rng.permutation(len(data))] @ np.linalg.qr(rng.normal(size=(data.shape[1],) * 2))[0]
+                data = np.column_stack([data[rng.permutation(len(data)), j]
+                                        for j in range(data.shape[1])])
             g = np.arange(len(data)) % cfg.folds
             U = {}
             for fold in (0, 1):
@@ -55,7 +64,8 @@ class Gate1(BaseGate):
             bank = Bank(tf(Xt), cap=cfg.bank_cap)
             for i in te:
                 _, Nn, _ = chain_energies(tf(chains[i].vecs), bank, cfg.k, cfg.dloc)
-                m = np.isfinite(Nn); NN.append(Nn[m]); Y.append(chains[i].y[m])
+                m = np.isfinite(Nn) & step_eval_mask(chains[i])  # drop unjudged post-error steps
+                NN.append(Nn[m]); Y.append(chains[i].y[m])
         NN = np.concatenate(NN); Y = np.concatenate(Y)
         snr = NN[Y == 1].mean() / (NN[Y == 0].mean() + 1e-9) if (Y == 1).any() else float("nan")
         r.lines.append(f"  (c) normal-energy SNR (err/correct): {snr:.3f}")

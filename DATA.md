@@ -2,6 +2,15 @@
 
 Confirmed 2026-06-29 via `inspect_data.py`. `data/` is gitignored (big files live only on the box).
 
+## ⚠️ LABEL CONVENTION (red line, audited 2026-07-03)
+`is_correct_strict` / `is_correct`: **1 = correct, 0 = error** (writer: `extract_features._pb_record`).
+Ground-truth anchor: `gold_error_step < 0 ⟺ correct` (ProcessBench: -1 = all steps fine).
+The 7/1 trajectory pipeline (`data_loading*.py`, `validate_phase_instability.py`, `analyze_results.py`,
+`diagnose_results.py`, `validate_local.py` mock) had this INVERTED (assumed 0=correct) — fixed 2026-07-03;
+**any `chain_*.pkl` caches under `data/hidden/cache/` built before that date carry inverted `is_correct`
+and mis-sliced step windows (absolute-index + open-interval bug) and MUST be deleted and rebuilt.**
+The `nts/` package always used `gold_error_step` and was never affected.
+
 ## ✅ CANONICAL — use these
 
 ### Cross-problem · ProcessBench · full per-token hidden + κ + qvec

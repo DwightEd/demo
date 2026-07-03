@@ -19,7 +19,10 @@ def create_mock_npz(output_path: str, n_chains: int = 100, n_steps: int = 5):
     格式与full_*.npz一致：
     - stepcloud: (N, T, 33, 9) - T steps, 33 layers, 9 features
     - problem_ids: (N,)
-    - is_correct_strict: (N,) - 0=correct, 1=error
+    - is_correct_strict: (N,) - 1=correct, 0=error（与 extract_features._pb_record 一致；
+      旧版 mock 按 0=correct 生成，与真实数据相反，会使反转的消费端在本地测试中
+      互相自洽地"通过"，从而掩盖真实数据上的方向错误）
+    - gold_error_step: (N,) - -1=全对, >=0=首错步（ProcessBench 约定）
     - sv_layers: (33,) - 层索引
     """
     np.random.seed(42)
@@ -43,10 +46,12 @@ def create_mock_npz(output_path: str, n_chains: int = 100, n_steps: int = 5):
         # 提高eff_rank（index 2）
         stepcloud[i, :, :, 2] *= 1.5
 
-    # 元数据
+    # 元数据（写入端约定: is_correct_strict 1=correct; gold_error_step -1=全对）
     problem_ids = np.arange(N)
-    is_correct_strict = np.zeros(N, dtype=int)
-    is_correct_strict[error_indices] = 1
+    is_correct_strict = np.ones(N, dtype=int)
+    is_correct_strict[error_indices] = 0
+    gold_error_step = np.full(N, -1, dtype=int)
+    gold_error_step[error_indices] = np.random.randint(0, T, size=len(error_indices))
     sv_layers = np.arange(33)
 
     # 保存
@@ -55,6 +60,7 @@ def create_mock_npz(output_path: str, n_chains: int = 100, n_steps: int = 5):
         stepcloud=stepcloud,
         problem_ids=problem_ids,
         is_correct_strict=is_correct_strict,
+        gold_error_step=gold_error_step,
         sv_layers=sv_layers,
     )
 

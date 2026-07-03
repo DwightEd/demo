@@ -113,7 +113,7 @@ data = np.load('full_omnimath.npz', allow_pickle=True)
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `problem_ids` | ndarray (N,) | 问题ID |
-| `is_correct_strict` | ndarray (N,) | 正确性 (0=正确, 1=错误) |
+| `is_correct_strict` | ndarray (N,) | 正确性 (**1=正确, 0=错误**；旧文档误记 0=正确) |
 | `step_token_ranges` | ndarray (N,) object | **Step的token范围** |
 | `stepcloud` | ndarray (N,) object | Step级别的特征云 |
 | `stepgeom` | ndarray (N,) object | Step级别的几何特征 |

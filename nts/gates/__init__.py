@@ -4,5 +4,6 @@ from .gate2_nts_vs_rema import Gate2
 from .gate3_curvature import Gate3
 from .gate_cloud import GateCloud
 from .gate_ntc import GateNTC
+from .gate_localize import GateLocalize
 
-__all__ = ["Gate0", "Gate1", "Gate2", "Gate3", "GateCloud", "GateNTC"]
+__all__ = ["Gate0", "Gate1", "Gate2", "Gate3", "GateCloud", "GateNTC", "GateLocalize"]

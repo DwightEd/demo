@@ -27,6 +27,19 @@
     4. 已知问题 (combined_instability_score 中 `rank/max(rank,1)` 恒为1、
        geometric_deviation_score 的理论值域与实际值域不匹配) 按原样保留，
        不属于本次修改范围，详见函数内注释。
+    5. [bug修复][致命] 标签方向: full_*.npz 中 is_correct_strict 约定为 1=correct
+       (写入端 extract_features._pb_record: correct = final_answer_correct 或
+       label==-1)。原实现按 0=correct 解读，所有 AUROC / Cohen's d 方向整体反转
+       ——此前跑出的"全指标 AUC 0.4~0.5"实为 0.5~0.6 的镜像。已修复，并在
+       加载时用 gold_error_step 做方向一致性断言。
+    6. [新增] --vector_mode {raw,center,delta}: stepvec 是步内 token 云 exp-pool
+       的"位置"向量 h_t (extract_features.py:376-383)，同链各步共享巨大的公共
+       分量（表征各向异性 + massive activations），未中心化直接做方向统计会使
+       所有链的 concentration 饱和在 1 附近、无判别力。center=减链内均值，
+       delta=一阶差分 Δh_t (推荐，与 NTS 的位移几何一致)。raw 保留作对照。
+    7. [新增] 长度混杂基线: 报告 AUROC(T alone) 与各指标对 T 的 Spearman 相关。
+       effective_rank 上界是 min(T,d) 且错误链更长，任何指标的 AUROC 都必须
+       与长度基线同表解读（项目内 FINDINGS.md 的教训: 长度是首要混杂）。
 """
 
 from __future__ import annotations
@@ -294,6 +307,20 @@ def load_full_npz(npz_path: str) -> dict:
             RuntimeWarning,
         )
 
+    # 标签方向断言：写入端约定 1=correct，且 correct 应与 gold_error_step<0 基本一致
+    # （ProcessBench: gold_error_step=-1 表示全对）。若一致率低于 0.5 说明方向反了。
+    if 'gold_error_step' in data.files:
+        ges = data['gold_error_step'].astype(int)
+        if len(ges) == N:
+            agree = float(np.mean((labels == 1) == (ges < 0)))
+            print(f"  label check: P(is_correct_strict==1 <=> gold_error_step<0) = {agree:.3f}")
+            if agree < 0.5:
+                warnings.warn(
+                    "is_correct_strict 与 gold_error_step 方向相反——标签约定疑似反转，"
+                    "请核对写入端 extract_features._pb_record（应为 1=correct）。",
+                    RuntimeWarning,
+                )
+
     stepvec = data.get('stepvec', None)
     stepcloud = data.get('stepcloud', None)
 
@@ -391,6 +418,7 @@ def compute_chain_phase_metrics(
     drop_degenerate: bool = True,
     kappa_threshold: float = 0.5,
     rank_threshold: float = 3.0,
+    vector_mode: str = 'raw',
 ) -> dict:
     """计算单条链的相变不稳定性指标。
 
@@ -404,6 +432,10 @@ def compute_chain_phase_metrics(
             系统性偏低（零向量拉低均值合向量长度，但不贡献有效方向），
             这是原始实现未处理的隐藏偏差来源。
         kappa_threshold, rank_threshold: 透传给方案B的判定阈值
+        vector_mode: 'raw' = 原始池化位置向量 h_t（各向异性饱和，仅作对照）；
+            'center' = 减去链内均值，去掉同链各步共享的公共分量；
+            'delta' = 一阶差分 Δh_t = h_{t+1} − h_t，步间位移方向
+            （推荐，与 NTS 的位移几何一致；有效向量数变为 T−1）
 
     Returns:
         指标字典（在 compute_phase_instability_metrics 基础上附加
@@ -435,7 +467,17 @@ def compute_chain_phase_metrics(
             "——已跳过，而非静默回退到 layer 0（原实现的隐藏 bug）",
         )
 
-    vectors = stepvec[:, layer_idx, :]
+    vectors = np.asarray(stepvec[:, layer_idx, :], dtype=np.float64)
+
+    if vector_mode == 'center':
+        vectors = vectors - vectors.mean(axis=0, keepdims=True)
+    elif vector_mode == 'delta':
+        if len(vectors) < 2:
+            raise ChainSkipped("too_few_steps_for_delta",
+                               f"delta 模式需要 T>=2，实际 T={len(vectors)}")
+        vectors = np.diff(vectors, axis=0)
+    elif vector_mode != 'raw':
+        raise ValueError(f"未知 vector_mode: {vector_mode!r}（可选 raw/center/delta）")
 
     try:
         unit_vectors, valid_mask = normalize_vectors(vectors)
@@ -477,13 +519,14 @@ def compute_per_chain_metrics(
     drop_degenerate: bool = True,
     kappa_threshold: float = 0.5,
     rank_threshold: float = 3.0,
+    vector_mode: str = 'raw',
 ) -> list:
     """为所有链计算相变指标，附带完整的跳过原因统计。
 
     Args:
         data: load_full_npz 返回的数据字典
-        layer_idx / min_steps / drop_degenerate / kappa_threshold / rank_threshold:
-            透传给 compute_chain_phase_metrics
+        layer_idx / min_steps / drop_degenerate / kappa_threshold / rank_threshold /
+            vector_mode: 透传给 compute_chain_phase_metrics
 
     Returns:
         list of dict，每个包含一条链的指标和标签
@@ -520,6 +563,7 @@ def compute_per_chain_metrics(
                 drop_degenerate=drop_degenerate,
                 kappa_threshold=kappa_threshold,
                 rank_threshold=rank_threshold,
+                vector_mode=vector_mode,
             )
         except ChainSkipped as e:
             _log_skip(e.reason_code, e.detail, i)
@@ -543,7 +587,7 @@ def compute_per_chain_metrics(
         results.append({
             'chain_idx': i,
             'problem_id': pid,
-            'is_correct': bool(label_val == 0),  # 0=correct
+            'is_correct': bool(label_val == 1),  # npz约定: 1=correct (extract_features._pb_record)
             'metrics': metrics,
         })
 
@@ -566,6 +610,38 @@ def compute_per_chain_metrics(
 # --------------------------------------------------------------------------
 # 统计检验
 # --------------------------------------------------------------------------
+
+def compute_length_confound(results: list) -> dict:
+    """长度混杂诊断: AUROC(T alone) + 各指标与 T 的 Spearman 相关。
+
+    动机: 错误链往往更长，而 effective_rank 的上界是 min(T,d)、
+    concentration 也有机械的 T 依赖。若某指标的 AUROC 没有明显超过
+    AUROC(T alone)，或与 T 强相关，其"信号"很可能只是长度的代理
+    （本项目 FINDINGS.md 已证明长度是首要混杂，步级长度单独 AUROC≈0.71）。
+    """
+    if not results:
+        return {}
+
+    y_true = np.array([0 if r['is_correct'] else 1 for r in results])
+    T_used = np.array([r['metrics']['n_steps_used'] for r in results], dtype=np.float64)
+
+    out: dict = {}
+    if len(np.unique(y_true)) >= 2 and len(np.unique(T_used)) >= 2:
+        out['auroc_T_alone'] = float(roc_auc_score(y_true, T_used))
+    else:
+        out['auroc_T_alone'] = float('nan')
+
+    out['spearman_vs_T'] = {}
+    for key in CONTINUOUS_METRIC_KEYS:
+        vals = np.array([r['metrics'][key] for r in results], dtype=np.float64)
+        m = np.isfinite(vals) & np.isfinite(T_used)
+        if m.sum() >= 3:
+            rho = stats.spearmanr(vals[m], T_used[m]).statistic
+            out['spearman_vs_T'][key] = float(rho) if np.isfinite(rho) else float('nan')
+        else:
+            out['spearman_vs_T'][key] = float('nan')
+    return out
+
 
 def compute_auroc_scores(results: list) -> dict:
     """计算各指标的 AUROC (预测 error 的能力)。"""
@@ -767,6 +843,10 @@ def main():
     parser.add_argument('--keep_degenerate_vectors', action='store_true',
                          help='保留退化(零范数/NaN)向量参与计算（默认剔除；保留会使 '
                               'concentration 系统性偏低，仅用于复现旧行为/对比）')
+    parser.add_argument('--vector_mode', choices=['raw', 'center', 'delta'],
+                         default='delta',
+                         help='raw=原始池化位置向量（各向异性饱和，仅作对照）; '
+                              'center=减链内均值; delta=一阶差分位移 Δh_t（默认，推荐）')
 
     args = parser.parse_args()
 
@@ -779,6 +859,7 @@ def main():
     print(f"NPZ path: {npz_path}")
     print(f"Layer index: {args.layer_idx}")
     print(f"Min steps: {args.min_steps}")
+    print(f"Vector mode: {args.vector_mode}")
     print(f"退化向量处理: {'保留' if args.keep_degenerate_vectors else '剔除'}")
     print()
 
@@ -809,6 +890,7 @@ def main():
         drop_degenerate=not args.keep_degenerate_vectors,
         kappa_threshold=args.kappa_threshold,
         rank_threshold=args.rank_threshold,
+        vector_mode=args.vector_mode,
     )
 
     if len(results) == 0:
@@ -818,8 +900,12 @@ def main():
     print(f"Computed metrics for {len(results)} chains")
 
     test_results = run_statistical_tests(results)
+    length_confound = compute_length_confound(results)
 
-    output_file = os.path.join(args.output_dir, f'{args.dataset}_layer{args.layer_idx}_results.json')
+    output_file = os.path.join(
+        args.output_dir,
+        f'{args.dataset}_layer{args.layer_idx}_{args.vector_mode}_results.json',
+    )
 
     output = {
         'dataset': args.dataset,
@@ -828,11 +914,14 @@ def main():
         'kappa_threshold': args.kappa_threshold,
         'rank_threshold': args.rank_threshold,
         'drop_degenerate': not args.keep_degenerate_vectors,
+        'vector_mode': args.vector_mode,
+        'label_convention': 'is_correct_strict: 1=correct (extract_features._pb_record)',
         'npz_path': npz_path,
         'n_chains': len(results),
         'n_correct': len([r for r in results if r['is_correct']]),
         'n_error': len([r for r in results if not r['is_correct']]),
         'test_results': test_results,
+        'length_confound': length_confound,
         'per_chain_results': results,
     }
 
@@ -874,6 +963,16 @@ def main():
         if np.isfinite(auroc):
             sig_str = "*" if test_results[key].get('significant', False) else ""
             print(f"  - {key:30s}: {auroc:.4f}{sig_str}")
+
+    if length_confound:
+        t_auroc = length_confound.get('auroc_T_alone', float('nan'))
+        print(f"\n长度混杂基线 (必读，与上表同表解读):")
+        if np.isfinite(t_auroc):
+            print(f"  - {'AUROC(T alone)':30s}: {t_auroc:.4f}   <- 任何指标至少要打过它")
+        for k, v in length_confound.get('spearman_vs_T', {}).items():
+            if np.isfinite(v):
+                flag = "  <- 与T强相关，疑似长度代理" if abs(v) > 0.6 else ""
+                print(f"  - Spearman({k[:22]:22s}, T): {v:+.3f}{flag}")
 
     significant_metrics = [k for k, v in test_results.items() if v.get('significant', False)]
 

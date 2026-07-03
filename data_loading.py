@@ -230,10 +230,18 @@ def compute_all_layers_geometry(hidden: np.ndarray,
     """
     all_geometry = {}
 
+    # step_token_ranges 是"绝对、闭区间" [start, end]（extract_features.py 用 H_l[a:b+1] 取步窗口），
+    # 而 hidden shard 只存 response 段：第 0 行对应绝对位置 a0=首步 start
+    # （extract_features.py:431 `hs[c][a0:b1+1]`；nts/data/loader.py 同此换算）。
+    # 这里统一换算成"分片相对、半开区间"再切片。原实现直接用绝对索引+开区间切分片，
+    # 所有步骤窗口错位 prompt 长度、且丢掉每步最后一个 token。
+    a0 = int(step_ranges[0][0])
+    rel_ranges = [(int(s) - a0, int(e) - a0 + 1) for s, e in step_ranges]
+
     for layer_idx, layer_id in enumerate(HIDDEN_LAYERS):
         layer_geometry = {}
 
-        for step_id, (start, end) in enumerate(step_ranges):
+        for step_id, (start, end) in enumerate(rel_ranges):
             if end <= start:
                 continue
 
@@ -359,7 +367,7 @@ def load_all_trajectories(npz_path: str,
         traj = ReasoningTrajectory(
             chain_id=i,
             problem_id=int(problem_ids[i]),
-            is_correct=bool(is_correct_strict[i] == 0),
+            is_correct=bool(is_correct_strict[i] == 1),  # npz约定: 1=correct (extract_features._pb_record)
             n_steps=len(ranges),
             step_ranges=ranges,
             hidden=hidden,

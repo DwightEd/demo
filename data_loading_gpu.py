@@ -277,12 +277,14 @@ def compute_chain_geometry_gpu_batch(hidden: np.ndarray, step_ranges, n_top=10):
     for layer_idx, layer_id in enumerate(HIDDEN_LAYERS):
         layer_results = {}
 
+        a0 = int(step_ranges[0][0])  # 绝对闭区间 -> 分片相对半开区间 (见 data_loading.py 注释)
         for step_id, (start, end) in enumerate(step_ranges):
-            if end <= start or end > n_tokens_total:
+            lo, hi = int(start) - a0, int(end) - a0 + 1
+            if hi <= lo or hi > n_tokens_total:
                 continue
 
             # 在GPU上提取该step的数据
-            H_step = H_norm_gpu[start:end, layer_idx, :]
+            H_step = H_norm_gpu[lo:hi, layer_idx, :]
 
             if H_step.shape[0] == 0:
                 continue
@@ -292,7 +294,7 @@ def compute_chain_geometry_gpu_batch(hidden: np.ndarray, step_ranges, n_top=10):
             # 一阶矩（GPU）
             mu = H_step.mean(axis=0)
             kappa = float(cp.linalg.norm(mu))
-            norm_val = float(hidden_gpu[start:end, layer_idx, :].mean())
+            norm_val = float(hidden_gpu[lo:hi, layer_idx, :].mean())
 
             # Scatter matrix（GPU）
             S = (H_step.T @ H_step) / n_tokens
@@ -359,14 +361,14 @@ def _compute_single_chain(args):
         hidden = np.load(hidden_path, mmap_mode='r')
     except:
         return ReasoningTrajectory(
-            idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 0), 0
+            idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 1), 0
         )
 
     ranges = step_token_ranges[idx]
 
     if ranges is None:
         return ReasoningTrajectory(
-            idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 0), 0
+            idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 1), 0
         )
 
     # 使用GPU批量计算（优化）
@@ -384,7 +386,7 @@ def _compute_single_chain(args):
                     steps[layer_id] = layer_steps
 
             return ReasoningTrajectory(
-                idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 0),
+                idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 1),
                 len(ranges),
                 step_ranges=ranges,
                 steps=steps,
@@ -398,11 +400,12 @@ def _compute_single_chain(args):
     for layer_idx, layer_id in enumerate(HIDDEN_LAYERS):
         layer_steps = {}
 
+        a0 = int(ranges[0][0])  # 绝对闭区间 -> 分片相对半开区间 (见 data_loading.py 注释)
         for step_id, (start, end) in enumerate(ranges):
-            if end <= start:
+            if end < start:
                 continue
 
-            H = hidden[start:end, layer_idx, :].copy()
+            H = hidden[int(start) - a0:int(end) - a0 + 1, layer_idx, :].copy()
             geom = compute_step_geometry_cpu(H, step_id, layer_id, n_top=10)
 
             if geom:
@@ -412,7 +415,7 @@ def _compute_single_chain(args):
             steps[layer_id] = layer_steps
 
     return ReasoningTrajectory(
-        idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 0),
+        idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 1),
         len(ranges),
         step_ranges=ranges,
         steps=steps,

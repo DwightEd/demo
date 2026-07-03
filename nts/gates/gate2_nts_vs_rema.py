@@ -31,12 +31,23 @@ class Gate2(BaseGate):
             r.lines.append(f"    NTS over [REMA+kappa+conf]: +{mean:.3f} [{lo:+.3f},{hi:+.3f}] {'SIG' if sig else 'ns'}")
             return sig
 
-        full_sig = block(np.ones(len(f.y), bool), "ALL")
+        # Common eval support: (a) unjudged post-first-error steps excluded; (b) all
+        # compared signals must be finite on the same steps — NTS/NTS-resid are NaN at
+        # t=0 by construction (displacement needs an anchor) while REMA/kappa are not,
+        # so without this the head-to-head AUROCs are computed on different populations
+        # (and gold_error_step==0 errors silently vanish from NTS only).
+        support = np.isfinite(nts) & np.isfinite(rema)
+        if not np.all(np.isnan(f.kappa)):
+            support &= np.isfinite(kap)
+        ok = f.eval_ok & support
+        r.lines.append(f"  eval mask: {int(ok.sum())}/{len(f.y)} steps kept "
+                       f"(post-error + t=0/common-support masked) err {int(f.y[ok].sum())}/{int(f.y.sum())}")
+        full_sig = block(ok, "ALL")
         if np.all(np.isnan(f.kappa)):
             r.lines.append("  [coherent-but-wrong] skipped (kappa/resultant unavailable in this npz)")
             cbw_sig = False
         else:
-            kmed = np.median(f.kappa[f.y == 0]); cbw = f.kappa >= kmed
+            kmed = np.median(f.kappa[(f.y == 0) & ok]); cbw = (f.kappa >= kmed) & ok
             cbw_sig = block(cbw, "coherent-but-wrong (kappa>=median)")
         r.kill = not (full_sig or cbw_sig)
         return r

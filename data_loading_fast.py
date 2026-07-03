@@ -199,7 +199,7 @@ def _compute_single_chain(args):
         hidden = np.load(hidden_path, mmap_mode='r')
     except Exception as e:
         return ReasoningTrajectory(
-            idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 0), 0
+            idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 1), 0
         )
 
     # 计算特征
@@ -208,17 +208,18 @@ def _compute_single_chain(args):
 
     if ranges is None or len(ranges) == 0:
         return ReasoningTrajectory(
-            idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 0), 0
+            idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 1), 0
         )
 
+    a0 = int(ranges[0][0])  # ranges 为绝对闭区间; shard 第0行 = 绝对位置 a0 (见 data_loading.py 注释)
     for layer_idx, layer_id in enumerate(HIDDEN_LAYERS):
         layer_steps = {}
 
         for step_id, (start, end) in enumerate(ranges):
-            if end <= start:
+            if end < start:
                 continue
 
-            H = hidden[start:end, layer_idx, :].copy()
+            H = hidden[int(start) - a0:int(end) - a0 + 1, layer_idx, :].copy()
             geom = compute_step_geometry_fast(H, step_id, layer_id, n_top=10)
 
             if geom:
@@ -228,7 +229,7 @@ def _compute_single_chain(args):
             steps[layer_id] = layer_steps
 
     traj = ReasoningTrajectory(
-        idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 0),
+        idx, int(problem_ids[idx]), bool(is_correct_strict[idx] == 1),
         len(ranges),
         step_ranges=ranges,
         steps=steps,

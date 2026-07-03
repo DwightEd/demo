@@ -46,7 +46,7 @@ def load_npz_data(npz_path: str) -> tuple[list, list, list]:
     for i in range(N):
         chain = {
             'problem_id': int(problem_ids[i]),
-            'is_correct': bool(labels[i] == 0),  # 0=correct, 1=error
+            'is_correct': bool(labels[i] == 1),  # npz约定: 1=correct (extract_features._pb_record)
         }
 
         # 尝试加载stepgeom
