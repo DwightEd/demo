@@ -109,6 +109,15 @@ python scripts/run_gate.py gate=gate3 data=gsm8k
 且 F1 至少可与 GeoReason 报告的无监督基线段位可比。达不到 → 定位故事降级为
 辅助证据，主故事回到链级 NTS 检测。
 
+## 4.5 Phase 2' — 谱流验证（2026-07-03 追加；闸门 0–3 全 KILL 后的新主线候选）
+
+闸门判决（gsm8k+math）：REMA≈0.52 → off-manifold 家族整体无信号，NTS/SGFS 按预案 3 撤下；
+唯一存活信号 = 步内 token 云方向集中度 κ（步级 0.779/bucket 0.715；定位 exact 0.449 vs 随机 0.267）。
+新主线候选："推理的谱流"——窗口化 Gram 谱 + 一阶矩 + 时间序作为统一对象，
+κ 是一阶矩投影、α（Spectral Geometry of Thought 斜率）/PR/eff_rank 是谱形状投影。
+`spectral_flow.py` 验证 S1–S5（检测增量 / 步内再收缩 / 链内秩定位（构造上免长度混杂）/
+层剖面 / 相位形状），运行：`python spectral_flow.py --dataset gsm8k`。
+
 ## 5. Phase 3 — 条件推进（闸门 2 过才做）
 
 1. **跨数据集迁移**：gsm8k bank/阈值 → math/omnimath zero-shot，掉幅 ≤0.10（提案关b）。
