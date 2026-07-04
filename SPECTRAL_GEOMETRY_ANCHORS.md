@@ -269,3 +269,104 @@ total directional energy = mean-direction energy + residual scatter energy
 文章表述建议：
 
 > We treat κ not as the final geometric signal, but as the rank-one mean component in a directional moment decomposition. Failures that κ cannot separate should appear in the residual scatter spectrum and higher-order Gram structure.
+
+---
+
+## 10. 扩展路线：多通道机制相变审计
+
+只沿几何谱继续堆标量不够。更强的研究问题应当是：
+
+```text
+推理首错发生时，hidden geometry、step flow、attention、logits uncertainty、方向锚定这些通道如何共同改变？
+这些改变是同一种失败模式，还是可分型的机制综合征？
+```
+
+对应脚本：
+
+```text
+mechanism_phase_audit.py
+```
+
+它把已有 `full_*.npz` 中的信号组织成几个机制通道：
+
+| 通道 | 代表信号 | 机制读法 |
+|---|---|---|
+| geometry | `resultant`, `coherence`, `cloud_D`, `geom_ae`, `step_direction_jump` | step 内表征是否从健康推理态发散 |
+| uncertainty / logits | `tok_U_D`, `tok_U_C` 的 step mean/var | 模型是否知道自己不稳，还是 confident wrong |
+| attention / flow | `stepattn` 中的 `q_frac`, `sink_frac`, `attn_entropy` | 当前 step 是否仍从题设和前文取信息 |
+| anchor | `q_align`, `d_q_align_bad` | 当前推理方向是否偏离 question anchor |
+| dynamics | `d_*`, `cz_*` | 不是看静态水平，而是看首错前后的跳变和因果异常 |
+| mismatch | `flow_geometry_mismatch`, `confident_geom_bad`, `coherent_anchor_drift` | 把报警器升级为失败分型器 |
+
+该脚本输出四类证据：
+
+1. **event study**：把每条错误链按 gold first-error step 对齐，观察 `t=-3...+3` 的通道轨迹；
+2. **within-chain localization**：在同一条链内部，错误步是否是某个信号最异常的位置，避免只做跨题 AUROC；
+3. **OOF group increments**：比较 `confounds`、`geometry`、`uncertainty`、`attention`、`all`，看通道组合是否真的超过长度、位置、文本密度；
+4. **syndrome counts**：统计首错步属于低 κ 发散、高不确定、confident low-kappa、anchor drift、flow break、coherent wrong 等哪类。
+
+运行方式：
+
+```bash
+python mechanism_phase_audit.py --selftest --boot 100
+python mechanism_phase_audit.py /path/to/full_gsm8k.npz --layer 14 --boot 500
+python mechanism_phase_audit.py --dataset gsm8k --data_dir /gz-data/research/demo/data --layer 14 --boot 500
+```
+
+解释原则：
+
+- 如果 `geometry` 强但 `uncertainty` 弱，说明模型内部表征坏了但 logits 未必承认错误，这是干预价值最高的区域；
+- 如果 `attention/flow` 强于 geometry，故事更接近 StepFlow 的 memory / carry-forward break；
+- 如果 `geometry + uncertainty` 已经饱和，而 `attention` 没有增量，说明当前数据的错误更像局部状态发散，不是前文传播断裂；
+- 如果 `mismatch` 类特征有效，文章可以从“检测错误”上升到“识别错误病理并选择干预”。
+
+这条线的目标不是把所有东西压成一个分数，而是找出首错步的动态机制指纹：何时是几何相变，何时是信息流断裂，何时是 confident wrong，何时需要 verifier 而不是继续桥接。
+
+注意：这一节是扩展路线，不是本文的原始谱假设主线。主线仍然是 `alpha` 谱压缩、base/instruct 反转、跨层谱级联和 step 边界谱标点。
+
+---
+
+## 11. 核心谱假设的直接验证路线
+
+本项目当前真正要围绕的三个谱假设是：
+
+1. **Reasoning alpha compression**：推理任务中 `alpha` 更低，表示进入更少但更协同的主导方向；模型越强，该压缩越明显。
+2. **Instruction reversal**：base 模型中常见 reasoning alpha 低于 factual recall；instruction-tuned 后该关系可能翻转，说明微调改变了内部调用和组织知识的通道。
+3. **Spectral cascade and punctuation**：token/layer 级局部同步随层距指数衰减；推理任务同步更弱；相变信号与 step boundary 对齐，形成“谱标点”。
+
+当前 ProcessBench `full_*.npz` 数据只包含推理链和错误步骤标签，因此：
+
+- 可以直接检验：step-native `alpha`、`d_alpha`、跨层 `alpha` delta 相关、层距衰减、gold first-error boundary 的谱跳变定位；
+- 不能直接检验：reasoning vs factual recall 的任务对照、base vs instruct 的谱反转、能力 scaling；
+- 这些不能从 GSM8K 错误定位数据里硬讲，必须补 matched factual-recall hidden 和 matched base/instruct hidden。
+
+对应脚本：
+
+```text
+spectral_hypothesis_audit.py
+```
+
+该脚本刻意不引入 attention/logits，只做谱主线：
+
+| 模块 | 输出 | 对应假设 |
+|---|---|---|
+| step-native alpha | `alpha_mean`, `compression_score_low_alpha`, `d_alpha_mean` | H1 的本地动态版本 |
+| boundary punctuation | `phase_jump_l2`, `phase_desync_layer_std`, within-chain top1 | H3 的 step 标点 |
+| cascade decay | `rho_by_distance`, `exp_decay_fit_abs_rho` | H3 的层距衰减 |
+| testability report | `H1/H2 status` | 明确哪些外部 claim 还缺对照数据 |
+
+运行方式：
+
+```bash
+python spectral_hypothesis_audit.py --selftest
+python spectral_hypothesis_audit.py --dataset gsm8k --data_dir /gz-data/research/demo/data --layers 10 14 18 22
+python spectral_hypothesis_audit.py /path/to/full_gsm8k.npz --hidden_dir /path/to/hidden/gsm8k --layers 10 14 18 22
+```
+
+解释红线：
+
+- `spectral_alpha` 的本地实现是 raw exponent；为贴合“lower alpha = stronger compression”的叙事，脚本同时保存 `compression_score_low_alpha = -alpha_mean`，但结论必须报告 raw direction；
+- 如果 `phase_jump_l2` 在 gold boundary 上 top1 明显高于随机期望，可以写“首错边界出现 step-native 谱标点”；
+- 如果 `rho_by_distance` 随层距单调或指数衰减，才支持“局部协调、逐步传递，而非整网共振”；
+- 如果只有错误定位上的 alpha 差异，不能写成“推理任务比事实回忆更压缩”；
+- 如果没有 base/instruct 成对数据，不能写 instruction reversal，只能写成待验证假设。
