@@ -602,3 +602,118 @@ intervention: re-anchor, verifier, regenerate suffix, or ask model to bridge the
 ```
 
 如果 v3 不能超过 `anchor_uncertainty`，则不要急着上 HMM；应回到信号抽取层面，重点补 attention/logits/loss/verifier traces，寻找真正能解释“为什么这一步错”的机制通道。
+
+---
+
+## 14. Prompt-anchor 连通性：从 cosine anchor 到几何 lookback / 超图
+
+当前 `anchor_uncertainty` 的强度不能过度解释。它里面的 `anchor_loss` 来自：
+
+```text
+anchor_loss_t = 1 - q_align_t
+q_align_t = cosine(step_direction_t, qvec_layer)
+```
+
+也就是说，它本质上是 step pooled direction 与 question/prompt baseline vector 的余弦相似度。它不是 attention lookback ratio，也没有直接建模“当前 token 是否仍在读取题设”。因此它能说明“隐藏方向是否偏离题设基向量”，但不能说明：
+
+- 当前 token 是否真的回看 prompt；
+- 题设里的数字/变量/约束是否仍与当前推理片段连通；
+- 自然生成中是否存在无需强制分步骤也能发现的 latent boundary。
+
+新的工作假设：
+
+```text
+错误推理不是只在一个 step 标量上发散，
+而是 response token 流与 prompt / 题设约束之间的连通性发生局部断裂。
+这种断裂可以用 attention lookback、hidden 几何 lookback、以及 token-level 超图/图割共同读取。
+```
+
+### 14.1 两种 lookback
+
+| 通道 | 读法 | 当前状态 |
+|---|---|---|
+| attention lookback | `q_frac` / prompt attention mass，类似 lookback ratio | 如果 `stepattn` 存在，可直接用；已有 `attn_audit.py` 可做增量测试 |
+| hidden-geometry lookback | response token/window hidden 与 `qvec` 的几何连接强度 | 当前缺口；可直接用 hidden shard + `qvec` 计算 |
+
+hidden-geometry lookback 不等同于 attention。它问的是：当前生成片段的表示是否仍落在题设诱导的方向/子空间附近。这个信号可以在没有 attention 的情况下运行，也能和 attention lookback 做正交性检验。
+
+### 14.2 超图/图读法先做非参数诊断
+
+数据量还不适合一上来训练 Hypergraph Neural Network。更合适的是先把超图作为结构化读法：
+
+```text
+nodes:
+  response token windows, plus one virtual prompt node
+
+edges / hyperedges:
+  temporal edges          邻近窗口的顺序连接
+  hidden-neighbor edges   hidden centroid 近邻连接
+  prompt-anchor edges     window centroid 到 qvec 的连接
+  optional step labels    只用于验证，不用于构图
+
+scores:
+  prompt_degree_ratio     当前窗口有多少连接回 prompt anchor
+  local_conductance       相邻 token windows 之间的局部连通性
+  boundary_break          局部图割变强 / 跨边界连接变弱
+  anchor_drop             prompt-anchor strength 的突降
+```
+
+这对应一个 boundary-free 问题：不强制 prompt 输出 “Step 1/2/3”，只在自然 token 流上滑窗构图，然后问无监督边界分数能否贴近已有 step boundary；已有 step label 只作为验证标尺。
+
+### 14.3 分阶段代码路线
+
+**Phase A：非参数 prompt-anchor 超图诊断**
+
+新增脚本：
+
+```text
+hypergraph_anchor_audit.py
+```
+
+输入：
+
+```text
+full_*.npz + data/hidden/<dataset>/<id>.npy
+```
+
+输出：
+
+```text
+1. step/gold-error AUROC：
+   anchor_mean, anchor_min, prompt_degree_ratio, hidden_jump, boundary_break
+
+2. high-divergence / high-break subset：
+   是否能在“正确也会发散”的区域区分错误漂移
+
+3. boundary-free step-boundary recovery：
+   不使用 step label 构图，只用 step label 检查边界分数是否贴近真实 step start
+
+4. within-chain first-error localization：
+   判断首错是否落在 prompt-anchor 断裂或图割异常附近
+```
+
+成功判据：
+
+- hidden-geometry lookback 对 `anchor_loss/q_align` 有增量，或至少在 residualized localization 中保留；
+- boundary score 在 step boundary recovery 上明显高于随机；
+- first-error 附近出现 anchor-drop / graph-cut 异常；
+- 如果有 attention，attention lookback 与 geometry lookback 低相关且组合增益为正。
+
+**Phase B：自然生成边界**
+
+在不要求模型分步骤的 prompt style 上重抽样，保留 token hidden / logits / attention。用 Phase A 的 boundary score 自动切出 latent segments，再把 segments 映射回 verifier / intervention。
+
+**Phase C：状态与干预**
+
+只有当 Phase A/B 证明边界和 prompt-anchor 断裂稳定存在时，再进入轻量状态模型：
+
+```text
+healthy_reading -> grounded_transform -> unanchored_drift -> transition_break
+```
+
+干预不再对整条链重写，而是在自动边界后的 suffix 上执行：
+
+- re-anchor to prompt constraints；
+- regenerate suffix from last stable boundary；
+- verify only the current latent segment；
+- ask for a bridge between two disconnected segments。
