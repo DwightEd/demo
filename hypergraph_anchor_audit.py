@@ -15,6 +15,13 @@ Construction for one chain/layer:
   prompt-anchor edges    window centroid to qvec similarity
 
 Existing step labels are used only for evaluation, not for graph construction.
+
+The optional hypergraph export follows the local `hypergraph-hallucination`
+project's object schema:
+
+  x, he_incidence_index, he_attr, he_mark, he_member_counts, y_token, response_idx
+
+but replaces attention-derived hyperedges with hidden-geometry hyperedges.
 """
 from __future__ import annotations
 
@@ -22,6 +29,7 @@ import argparse
 import json
 import math
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -30,6 +38,11 @@ import numpy as np
 
 from hidden_io import _fn, load_chain
 from mechanism_phase_audit import auroc, bdir, finite_json, safe_mean, safe_std
+
+try:  # Optional: remote GPU env usually has torch; local Windows env may not.
+    import torch
+except ImportError:  # pragma: no cover - depends on the machine
+    torch = None
 
 
 EPS = 1e-9
@@ -47,6 +60,7 @@ class ChainResult:
     boundary_features: Dict[str, np.ndarray]
     boundary_pos: np.ndarray
     step_starts: np.ndarray
+    hypergraph_stats: Dict[str, object]
 
 
 def unit(x: np.ndarray) -> np.ndarray:
@@ -194,6 +208,267 @@ def build_graph(
     return W
 
 
+def _as_numpy(x):
+    if torch is not None and hasattr(x, "detach"):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+
+def _maybe_tensor(x, *, dtype=None):
+    if torch is None:
+        arr = np.asarray(x)
+        return arr.astype(dtype) if dtype is not None else arr
+    if dtype in (np.int64, int, "long"):
+        return torch.as_tensor(x, dtype=torch.long)
+    return torch.as_tensor(x, dtype=torch.float32)
+
+
+def add_hyperedge(
+    node_lists: List[np.ndarray],
+    attrs: List[List[float]],
+    marks: List[List[float]],
+    members: Sequence[int],
+    weights: Sequence[float],
+    *,
+    kind: float,
+    prompt_edge: bool,
+) -> None:
+    uniq = np.asarray(sorted(set(int(x) for x in members)), int)
+    if len(uniq) < 2:
+        return
+    w = np.asarray(weights, float)
+    w = w[np.isfinite(w)]
+    mean_w = float(w.mean()) if len(w) else 0.0
+    max_w = float(w.max()) if len(w) else mean_w
+    node_lists.append(uniq)
+    attrs.append([max(0.0, min(1.0, mean_w)), max(0.0, min(1.0, max_w)), max(0.0, min(1.0, kind))])
+    marks.append([1.0, 0.0] if prompt_edge else [0.0, 1.0])
+
+
+def project_hypergraph_object(
+    C: np.ndarray,
+    spread: np.ndarray,
+    anchor: np.ndarray,
+    prompt_ratio: np.ndarray,
+    W: np.ndarray,
+    windows: Sequence[Tuple[int, int]],
+    rel: np.ndarray,
+    boundary_features: Dict[str, np.ndarray],
+    *,
+    gold: int,
+    correct: bool,
+    top_k: int,
+    min_prompt_edge: float,
+    source_id: int,
+) -> Dict[str, object]:
+    """Build a hypergraph-hallucination-compatible object from hidden geometry.
+
+    The local project constructs one hyperedge per response-token attention row.
+    Here we use hidden geometry instead:
+      - prompt-anchor hyperedges: virtual prompt node + one response window
+      - temporal hyperedges: adjacent response windows
+      - neighbor hyperedges: one window plus its strongest hidden-neighbor windows
+    """
+    n = len(C)
+    prompt_node = 0
+    response_idx = 1
+    if n == 0:
+        x = np.zeros((1, 8), np.float32)
+        return {
+            "source_id": int(source_id),
+            "response_idx": int(response_idx),
+            "token_ids": np.arange(1, dtype=np.int64),
+            "x": _maybe_tensor(x),
+            "he_incidence_index": _maybe_tensor(np.zeros((2, 0), np.int64), dtype=np.int64),
+            "he_attr": _maybe_tensor(np.zeros((0, 3), np.float32)),
+            "he_mark": _maybe_tensor(np.zeros((0, 2), np.float32)),
+            "he_member_counts": _maybe_tensor(np.zeros((0,), np.float32)),
+            "y_token": _maybe_tensor(np.zeros((1,), np.float32)),
+        }
+
+    deg = W[:n, :].sum(axis=1)
+    mids = np.asarray([(a + b) / 2.0 for a, b in windows], float)
+    denom = max(1.0, float(max(b for _, b in windows)))
+    prev_jump = np.zeros(n, float)
+    prev_break = np.zeros(n, float)
+    if n > 1:
+        hj = np.asarray(boundary_features.get("hidden_jump", np.zeros(n - 1)), float)
+        bb = np.asarray(boundary_features.get("boundary_break", np.zeros(n - 1)), float)
+        prev_jump[1:] = np.nan_to_num(hj, nan=0.0)
+        prev_break[1:] = np.nan_to_num(bb, nan=0.0)
+
+    prompt_x = np.array([[1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0]], np.float32)
+    node_x = np.column_stack(
+        [
+            np.zeros(n, float),  # prompt flag
+            np.nan_to_num(anchor, nan=0.0),
+            np.nan_to_num(prompt_ratio, nan=0.0),
+            np.nan_to_num(spread, nan=0.0),
+            deg / max(float(np.nanmax(deg)) if np.isfinite(deg).any() else 1.0, EPS),
+            mids / denom,
+            prev_jump,
+            prev_break,
+        ]
+    ).astype(np.float32)
+    x = np.vstack([prompt_x, node_x])
+
+    node_lists: List[np.ndarray] = []
+    attrs: List[List[float]] = []
+    marks: List[List[float]] = []
+
+    # Prompt-anchor hyperedges.  These are the hidden-geometry analogue of the
+    # project's prompt->response attention hyperedges.
+    for i in range(n):
+        w = float(W[i, n])
+        if np.isfinite(w) and w >= min_prompt_edge:
+            add_hyperedge(
+                node_lists,
+                attrs,
+                marks,
+                [prompt_node, response_idx + i],
+                [w],
+                kind=0.0,
+                prompt_edge=True,
+            )
+
+    # Temporal response hyperedges.
+    for i in range(n - 1):
+        w = float(W[i, i + 1])
+        if np.isfinite(w) and w > 0:
+            add_hyperedge(
+                node_lists,
+                attrs,
+                marks,
+                [response_idx + i, response_idx + i + 1],
+                [w],
+                kind=0.5,
+                prompt_edge=False,
+            )
+
+    # Hidden-neighbor row hyperedges, mirroring attention-row hyperedges.
+    k = min(max(1, int(top_k)), max(1, n - 1))
+    simW = W[:n, :n].copy()
+    np.fill_diagonal(simW, 0.0)
+    for i in range(n):
+        order = np.argsort(simW[i])[::-1]
+        nbrs = [j for j in order if simW[i, j] > 0][:k]
+        if not nbrs:
+            continue
+        members = [response_idx + i] + [response_idx + int(j) for j in nbrs]
+        weights = [float(simW[i, j]) for j in nbrs]
+        add_hyperedge(node_lists, attrs, marks, members, weights, kind=1.0, prompt_edge=False)
+
+    if node_lists:
+        he_nodes, he_ids = [], []
+        for he_id, members in enumerate(node_lists):
+            he_nodes.extend(members.tolist())
+            he_ids.extend([he_id] * len(members))
+        he_incidence_index = np.vstack([np.asarray(he_nodes, np.int64), np.asarray(he_ids, np.int64)])
+        he_attr = np.asarray(attrs, np.float32)
+        he_mark = np.asarray(marks, np.float32)
+        he_member_counts = np.asarray([len(m) for m in node_lists], np.float32)
+    else:
+        he_incidence_index = np.zeros((2, 0), np.int64)
+        he_attr = np.zeros((0, 3), np.float32)
+        he_mark = np.zeros((0, 2), np.float32)
+        he_member_counts = np.zeros((0,), np.float32)
+
+    y_token = np.zeros(n + 1, np.float32)
+    if (not correct) and 0 <= gold < len(rel):
+        lo, hi = int(rel[gold, 0]), int(rel[gold, 1])
+        for i, (a, b) in enumerate(windows):
+            if min(hi, b) - max(lo, a) > 0:
+                y_token[response_idx + i] = 1.0
+
+    return {
+        "source_id": int(source_id),
+        "response_idx": int(response_idx),
+        "token_ids": _maybe_tensor(np.arange(n + 1, dtype=np.int64), dtype=np.int64),
+        "x": _maybe_tensor(x),
+        "he_incidence_index": _maybe_tensor(he_incidence_index, dtype=np.int64),
+        "he_attr": _maybe_tensor(he_attr),
+        "he_mark": _maybe_tensor(he_mark),
+        "he_member_counts": _maybe_tensor(he_member_counts),
+        "y_token": _maybe_tensor(y_token),
+        "window_ranges": np.asarray(windows, np.int64),
+        "step_ranges_rel": np.asarray(rel, np.int64),
+        "gold_step": int(gold),
+        "schema_source": "adapted_from_hypergraph_hallucination",
+    }
+
+
+def hypergraph_schema_stats(obj: Dict[str, object]) -> Dict[str, object]:
+    x = _as_numpy(obj["x"])
+    he_index = _as_numpy(obj["he_incidence_index"])
+    he_attr = _as_numpy(obj["he_attr"])
+    he_mark = _as_numpy(obj["he_mark"])
+    he_count = _as_numpy(obj["he_member_counts"])
+    y = _as_numpy(obj["y_token"])
+    valid = (
+        x.ndim == 2
+        and he_index.ndim == 2
+        and he_index.shape[0] == 2
+        and he_attr.ndim == 2
+        and he_mark.ndim == 2
+        and len(he_attr) == len(he_mark) == len(he_count)
+        and len(y) == len(x)
+        and (he_index.shape[1] == 0 or (he_index[0].min() >= 0 and he_index[0].max() < len(x)))
+        and (he_index.shape[1] == 0 or (he_index[1].min() >= 0 and he_index[1].max() < len(he_attr)))
+    )
+    return {
+        "valid": bool(valid),
+        "n_nodes": int(x.shape[0]) if x.ndim == 2 else 0,
+        "node_dim": int(x.shape[1]) if x.ndim == 2 else 0,
+        "n_hyperedges": int(he_attr.shape[0]) if he_attr.ndim == 2 else 0,
+        "he_attr_dim": int(he_attr.shape[1]) if he_attr.ndim == 2 and he_attr.size else (int(he_attr.shape[1]) if he_attr.ndim == 2 else 0),
+        "n_incidence": int(he_index.shape[1]) if he_index.ndim == 2 else 0,
+        "prompt_edges": int((he_mark[:, 0] > he_mark[:, 1]).sum()) if he_mark.ndim == 2 and len(he_mark) else 0,
+        "response_edges": int((he_mark[:, 1] >= he_mark[:, 0]).sum()) if he_mark.ndim == 2 and len(he_mark) else 0,
+        "positive_nodes": int(np.nan_to_num(y).sum()),
+        "response_idx": int(obj.get("response_idx", 0)),
+    }
+
+
+def numpy_message_passing_smoke(obj: Dict[str, object]) -> Dict[str, object]:
+    """Numpy equivalent of the project's node->hyperedge->node sanity path."""
+    x = np.asarray(_as_numpy(obj["x"]), np.float32)
+    he_index = np.asarray(_as_numpy(obj["he_incidence_index"]), np.int64)
+    he_attr = np.asarray(_as_numpy(obj["he_attr"]), np.float32)
+    he_count = np.asarray(_as_numpy(obj["he_member_counts"]), np.float32)
+    if x.ndim != 2 or he_index.shape[1] == 0 or len(he_attr) == 0:
+        return {"ok": False, "reason": "empty graph"}
+    node_ids = he_index[0]
+    he_ids = he_index[1]
+    agg = np.zeros((len(he_attr), x.shape[1]), np.float32)
+    np.add.at(agg, he_ids, x[node_ids])
+    agg = agg / np.maximum(he_count[:, None], EPS)
+    out = np.zeros_like(x)
+    np.add.at(out, node_ids, agg[he_ids])
+    deg = np.bincount(node_ids, minlength=len(x)).astype(np.float32)[:, None]
+    out = out / np.maximum(deg, EPS)
+    return {
+        "ok": bool(np.isfinite(out).all()),
+        "mean_update_norm": float(np.linalg.norm(out, axis=1).mean()),
+        "max_update_norm": float(np.linalg.norm(out, axis=1).max()),
+    }
+
+
+def save_project_hypergraph(obj: Dict[str, object], path_no_ext: str) -> str:
+    if torch is not None:
+        path = f"{path_no_ext}.pt"
+        torch.save(obj, path)
+        return path
+    path = f"{path_no_ext}.npz"
+    payload = {}
+    for k, v in obj.items():
+        if isinstance(v, (str, int, float, bool)):
+            payload[k] = np.asarray(v)
+        else:
+            payload[k] = _as_numpy(v)
+    np.savez_compressed(path, **payload)
+    return path
+
+
 def local_boundary_scores(
     C: np.ndarray,
     anchor: np.ndarray,
@@ -306,6 +581,9 @@ def analyze_chain(
     rel: np.ndarray,
     qv: np.ndarray,
     *,
+    source_id: int,
+    gold: int,
+    correct: bool,
     layer_col: int,
     window: int,
     stride: int,
@@ -314,7 +592,8 @@ def analyze_chain(
     prompt_gamma: float,
     nn_gamma: float,
     boundary_span: int,
-) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], np.ndarray, np.ndarray]:
+    min_prompt_edge: float,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], np.ndarray, np.ndarray, Dict[str, object], Dict[str, object]]:
     H = np.asarray(H_all[:, layer_col, :], np.float32)
     windows = make_windows(len(H), window, stride)
     C, spread = window_cloud(H, windows)
@@ -334,7 +613,25 @@ def analyze_chain(
         span=boundary_span,
     )
     sfeats = score_steps(rel, windows, anchor, spread, prompt_ratio, bpos, bfeats)
-    return sfeats, bfeats, bpos, np.asarray([r[0] for r in rel], float)
+    hg = project_hypergraph_object(
+        C,
+        spread,
+        anchor,
+        prompt_ratio,
+        W,
+        windows,
+        rel,
+        bfeats,
+        gold=gold,
+        correct=correct,
+        top_k=top_k,
+        min_prompt_edge=min_prompt_edge,
+        source_id=source_id,
+    )
+    stats = hypergraph_schema_stats(hg)
+    smoke = numpy_message_passing_smoke(hg)
+    stats["message_passing_smoke"] = smoke
+    return sfeats, bfeats, bpos, np.asarray([r[0] for r in rel], float), hg, stats
 
 
 def qvec_for_chain(z, i: int, layer: int) -> Optional[np.ndarray]:
@@ -369,6 +666,16 @@ def load_results(npz_path: str, hidden_dir: str, dataset: str, args: argparse.Na
     out: List[ChainResult] = []
     missing_hidden = 0
     missing_qvec = 0
+    exported = 0
+    export_dir = ""
+    if args.export_hypergraphs:
+        export_dir = args.export_dir or os.path.join(
+            args.output_dir,
+            f"project_hypergraphs_{dataset}_L{args.layer}",
+        )
+        if os.path.exists(export_dir) and args.overwrite_export:
+            shutil.rmtree(export_dir)
+        os.makedirs(export_dir, exist_ok=True)
     for i in range(N):
         H = load_hidden_any(hidden_dir, ids[i], i, dataset)
         if H is None:
@@ -381,10 +688,14 @@ def load_results(npz_path: str, hidden_dir: str, dataset: str, args: argparse.Na
         rr = rel_ranges(np.asarray(ranges[i], int), int(H.shape[0]))
         if len(rr) == 0:
             continue
-        sfeats, bfeats, bpos, starts = analyze_chain(
+        correct = bool(ges[i] < 0)
+        sfeats, bfeats, bpos, starts, hg, hg_stats = analyze_chain(
             H,
             rr,
             qv,
+            source_id=i,
+            gold=int(ges[i]),
+            correct=correct,
             layer_col=lc,
             window=args.window,
             stride=args.stride,
@@ -393,19 +704,25 @@ def load_results(npz_path: str, hidden_dir: str, dataset: str, args: argparse.Na
             prompt_gamma=args.prompt_gamma,
             nn_gamma=args.nn_gamma,
             boundary_span=args.boundary_span,
+            min_prompt_edge=args.min_prompt_edge,
         )
+        if args.export_hypergraphs and (args.export_limit <= 0 or exported < args.export_limit):
+            saved = save_project_hypergraph(hg, os.path.join(export_dir, f"hypergraph_{dataset}_{i:06d}"))
+            hg_stats["saved_path"] = saved
+            exported += 1
         out.append(
             ChainResult(
                 idx=i,
                 group=int(groups[i]),
                 gold=int(ges[i]),
-                correct=bool(ges[i] < 0),
+                correct=correct,
                 n_steps=len(rr),
                 n_tokens=int(H.shape[0]),
                 step_features=sfeats,
                 boundary_features=bfeats,
                 boundary_pos=bpos,
                 step_starts=starts,
+                hypergraph_stats=hg_stats,
             )
         )
     meta = {
@@ -418,6 +735,11 @@ def load_results(npz_path: str, hidden_dir: str, dataset: str, args: argparse.Na
         "n_loaded": int(len(out)),
         "missing_hidden": int(missing_hidden),
         "missing_qvec": int(missing_qvec),
+        "export_hypergraphs": bool(args.export_hypergraphs),
+        "export_dir": export_dir,
+        "exported_hypergraphs": int(exported),
+        "export_format": "pt" if torch is not None else "npz",
+        "torch_available": bool(torch is not None),
         "window": args.window,
         "stride": args.stride,
         "top_k": args.top_k,
@@ -575,6 +897,29 @@ def event_study(chains: Sequence[ChainResult], names: Sequence[str], *, window: 
     return out
 
 
+def summarize_hypergraph_stats(chains: Sequence[ChainResult]) -> Dict[str, object]:
+    stats = [c.hypergraph_stats for c in chains if c.hypergraph_stats]
+    if not stats:
+        return {}
+    smoke_ok = [
+        bool(s.get("message_passing_smoke", {}).get("ok", False))
+        for s in stats
+    ]
+    return {
+        "schema": "hypergraph-hallucination-compatible",
+        "n_graphs": int(len(stats)),
+        "valid_graphs": int(sum(bool(s.get("valid", False)) for s in stats)),
+        "message_passing_smoke_ok": int(sum(smoke_ok)),
+        "mean_nodes": safe_mean([s.get("n_nodes", np.nan) for s in stats]),
+        "mean_hyperedges": safe_mean([s.get("n_hyperedges", np.nan) for s in stats]),
+        "mean_incidence": safe_mean([s.get("n_incidence", np.nan) for s in stats]),
+        "mean_prompt_edges": safe_mean([s.get("prompt_edges", np.nan) for s in stats]),
+        "mean_response_edges": safe_mean([s.get("response_edges", np.nan) for s in stats]),
+        "mean_positive_nodes": safe_mean([s.get("positive_nodes", np.nan) for s in stats]),
+        "first_saved_path": next((s.get("saved_path") for s in stats if s.get("saved_path")), ""),
+    }
+
+
 def run(npz: str, hidden_dir: str, dataset: str, args: argparse.Namespace) -> Dict[str, object]:
     chains, meta = load_results(npz, hidden_dir, dataset, args)
     names = [
@@ -605,6 +950,7 @@ def run(npz: str, hidden_dir: str, dataset: str, args: argparse.Namespace) -> Di
         "localization": localization_table(chains, names, top=args.top),
         "boundary_recovery": boundary_recovery(chains, bnames, tolerance=args.tolerance),
         "event_study": event_study(chains, names[:8], window=args.event_window),
+        "project_hypergraph": summarize_hypergraph_stats(chains),
     }
     return res
 
@@ -635,6 +981,19 @@ def print_result(res: Dict[str, object]) -> None:
     )
     if meta.get("missing_hidden") or meta.get("missing_qvec"):
         print(f"missing hidden {meta.get('missing_hidden')} | missing qvec {meta.get('missing_qvec')}")
+    hg = res.get("project_hypergraph", {})
+    if hg:
+        print(
+            "project hypergraph: "
+            f"valid {hg.get('valid_graphs')}/{hg.get('n_graphs')} | "
+            f"mp-smoke {hg.get('message_passing_smoke_ok')}/{hg.get('n_graphs')} | "
+            f"mean nodes {hg.get('mean_nodes'):.1f} | mean hyperedges {hg.get('mean_hyperedges'):.1f} | "
+            f"format {meta.get('export_format')}"
+        )
+        if meta.get("export_hypergraphs"):
+            print(f"exported {meta.get('exported_hypergraphs')} hypergraphs to {meta.get('export_dir')}")
+            if hg.get("first_saved_path"):
+                print(f"first saved: {hg.get('first_saved_path')}")
     print_rows(res["overall_features"], label="Step/gold-error prompt-anchor scores")
     print_rows(res["high_break_features"], label="High-boundary-break subset scores")
     print_rows(res["boundary_recovery"], label="Boundary-free step-boundary recovery")
@@ -733,11 +1092,16 @@ def main() -> None:
     ap.add_argument("--temporal_weight", type=float, default=0.75)
     ap.add_argument("--prompt_gamma", type=float, default=2.0)
     ap.add_argument("--nn_gamma", type=float, default=2.0)
+    ap.add_argument("--min_prompt_edge", type=float, default=0.05)
     ap.add_argument("--boundary_span", type=int, default=2)
     ap.add_argument("--tolerance", type=float, default=10.0)
     ap.add_argument("--event_window", type=int, default=3)
     ap.add_argument("--top", type=int, default=20)
     ap.add_argument("--output_dir", default="outputs/hypergraph_anchor")
+    ap.add_argument("--export_hypergraphs", action="store_true")
+    ap.add_argument("--export_dir", default="")
+    ap.add_argument("--export_limit", type=int, default=0, help="0 means export all loaded chains")
+    ap.add_argument("--overwrite_export", action="store_true")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 

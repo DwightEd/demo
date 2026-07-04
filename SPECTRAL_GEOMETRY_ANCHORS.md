@@ -717,3 +717,75 @@ healthy_reading -> grounded_transform -> unanchored_drift -> transition_break
 - regenerate suffix from last stable boundary；
 - verify only the current latent segment；
 - ask for a bridge between two disconnected segments。
+
+### 14.4 适配 `hypergraph-hallucination`
+
+本地项目 `D:\projects\research\hypergraph-hallucination` 的核心数据格式是：
+
+```text
+x                    # node features
+he_incidence_index   # [2, incidence] = node id, hyperedge id
+he_attr              # hyperedge attributes
+he_mark              # prompt->response vs response->response mark
+he_member_counts
+y_token
+response_idx
+```
+
+原项目的 `processed_hypergraph.py` 用 attention row 构造 response token 的超边；本项目暂时不能假设 attention 总是存在，因此 v1 适配为 hidden-geometry hypergraph：
+
+```text
+node 0:
+  virtual prompt/question node
+
+node 1..N:
+  response sliding-window nodes
+
+hyperedges:
+  prompt-anchor edge     [prompt node, response window]
+  temporal edge          [window_i, window_{i+1}]
+  hidden-neighbor edge   [window_i, top-k hidden-neighbor windows]
+```
+
+节点特征使用小维度诊断向量，而不是 4096 维 hidden 原向量：
+
+```text
+prompt_flag,
+geom_anchor_cos,
+prompt_degree_ratio,
+window_spread,
+normalized_degree,
+relative_position,
+prev_hidden_jump,
+prev_boundary_break
+```
+
+这样做有三个原因：
+
+1. 数据少，先避免直接训练大 HGN；
+2. 保留几何可解释性；
+3. 远端若有 `torch` / `torch_geometric`，导出的 `.pt` 可以接原项目的 HypergraphLayer / HyperCHARM；本地无 `torch` 时导出 `.npz` 并做 schema + numpy message-passing smoke test。
+
+验证命令：
+
+```bash
+python hypergraph_anchor_audit.py --selftest --top 10
+python hypergraph_anchor_audit.py --selftest --top 5 --export_hypergraphs --export_limit 3 --overwrite_export
+```
+
+当前本地验证结果：
+
+```text
+project hypergraph: valid 80/80
+message-passing smoke: 80/80
+mean nodes: 18.4
+mean hyperedges: 51.1
+export format on local Windows: npz, because torch is unavailable
+```
+
+下一步判断标准：
+
+- 如果真实数据上 `boundary_recovery.hidden_jump` 能恢复自然/人工 step boundary，说明无需强制分步骤也能发现 latent segment；
+- 如果 `geom_anchor_loss / prompt_degree_ratio / entry_anchor_drop` 在 first-error localization 中保留，说明 prompt-anchor 断裂是机制候选；
+- 如果导出的超图喂给原项目 HyperCHARM 后相对 `anchor_uncertainty` 有增量，才考虑进入训练式超图模型；
+- 如果无增量，则保留超图作为诊断/边界发现工具，而不是主 detector。
