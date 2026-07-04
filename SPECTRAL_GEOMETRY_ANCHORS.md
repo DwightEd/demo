@@ -789,3 +789,74 @@ export format on local Windows: npz, because torch is unavailable
 - 如果 `geom_anchor_loss / prompt_degree_ratio / entry_anchor_drop` 在 first-error localization 中保留，说明 prompt-anchor 断裂是机制候选；
 - 如果导出的超图喂给原项目 HyperCHARM 后相对 `anchor_uncertainty` 有增量，才考虑进入训练式超图模型；
 - 如果无增量，则保留超图作为诊断/边界发现工具，而不是主 detector。
+
+### 14.5 完整 token-level HyperCHARM 训练版
+
+前面的 `hypergraph_anchor_audit.py` 只是非参数诊断：它构图、导出兼容 schema、做 message-passing smoke test，并没有训练超图模型。为了真正检验“超图模型能否从 token hidden 中挖出非手工信号”，新增完整训练脚本：
+
+```text
+hypergraph_token_hgn.py
+```
+
+对照本地 `D:\projects\research\hypergraph-hallucination` 原项目：
+
+| 项 | 原项目实现 | 本项目完整训练版 |
+|---|---|---|
+| 构图输入 | `attention` `[L,H,seq,seq]` | hidden shards `[R,4,4096]` + `qvec` |
+| 节点 | token nodes | virtual prompt node + response token nodes |
+| 节点特征 `x` | self-attention diagonal `[seq, L*H]` | selected multi-layer token hidden directions，可选拼接 anchor/spread/jump 诊断量 |
+| 超边 | response token/head 的 attention row，阈值选 members | prompt-anchor、causal temporal、hidden-neighbor hyperedges |
+| `he_attr` | mean attention, max attention, head id | mean weight, max weight, edge kind, causal age/span |
+| `he_mark` | prompt-cross vs response-only | prompt-anchor vs response-only |
+| 预测粒度 | `train_hypergraph.py` 为 node/token logits；`train_hyper_newresponse.py` 为 graph-level | node/token logits，再聚合回 step first-error |
+| loss | `BCEWithLogitsLoss(pos_weight)`，只在 response nodes 上算 | 同样使用 BCE + pos_weight，但只在 correct/pre-error/gold-error token 上算；post-error token mask 掉 |
+| 消息传递 | `node2edge([x_node, he_mark]) -> mean per hyperedge -> edge2node([he_attr, agg]) -> mean per node -> LayerNorm -> residual` | 保持同一 HyperCHARM 机制 |
+| 验证 | token AUROC/AUPR 或 response graph AUROC/AUPR | GroupKFold-by-chain OOF：token AUROC/AUPR、step AUROC/AUPR、graph AUROC/AUPR、within-chain first-error top1 |
+
+关键设计选择：
+
+```text
+1. 不再使用 window 节点作为主训练对象，而是每个 response token 一个节点；
+2. 默认读取多层 hidden：layers 10,14,18,22；
+3. 默认 `x_mode=hidden_diag`：完整 hidden direction + 我们已知可用的 anchor/spread/jump 诊断通道；
+4. 支持 `x_mode=hidden` / `diag` 做消融，判断模型能力来自 full hidden 还是手工信号；
+5. 默认 `--causal`，hidden-neighbor 只连向过去 token，避免把未来信息泄漏进实时检测；
+6. step 标签只用于 y/mask/evaluation，不用于构图。
+```
+
+训练命令：
+
+```bash
+python hypergraph_token_hgn.py --dataset gsm8k --data_dir /gz-data/research/demo/data --layers 10,14,18,22 --x_mode hidden_diag --folds 5 --epochs 30 --batch_size 1 --hidden_dim 128 --gnn_layers 2 --output_dir outputs/hypergraph_hgn
+```
+
+必要消融：
+
+```bash
+python hypergraph_token_hgn.py --dataset gsm8k --data_dir /gz-data/research/demo/data --x_mode diag --folds 5 --epochs 30 --output_dir outputs/hypergraph_hgn
+python hypergraph_token_hgn.py --dataset gsm8k --data_dir /gz-data/research/demo/data --x_mode hidden --folds 5 --epochs 30 --output_dir outputs/hypergraph_hgn
+python hypergraph_token_hgn.py --dataset gsm8k --data_dir /gz-data/research/demo/data --x_mode hidden_diag --no-causal --folds 5 --epochs 30 --output_dir outputs/hypergraph_hgn
+```
+
+解释标准：
+
+- 如果 `hidden_diag > diag`，说明 full multi-layer hidden 中确实有超出手工 anchor/spread/jump 的可学习结构；
+- 如果 `hidden ≈ hidden_diag` 且超过 `diag`，说明超图模型主要从 hidden 表征本身挖信号，而不是复述我们给的标量；
+- 如果 `diag` 已经等于 `hidden_diag`，超图训练没有证明新表征，只是非线性组合已有标量；
+- 如果 `--no-causal` 明显更强，必须标记为 offline upper bound，不能用于实时检测主张；
+- 如果 step-level / localization 不升，只 graph-level 升，说明模型只学到链难度或全局错误倾向，不满足首错定位目标。
+
+当前本地验证：
+
+```text
+python -m py_compile hypergraph_token_hgn.py  # passed
+python hypergraph_token_hgn.py --help         # passed
+local selftest/train not run: Windows env has no torch; run on GPU server
+```
+
+后续研究与优化建议：
+
+1. 先在 GSM8K 跑 `diag / hidden / hidden_diag / hidden_diag --no-causal` 四组，确认是否存在真正的 full-hidden 增量；
+2. 若有增量，再扩展到 MATH / OmniMath，检查是否在困难集更明显；
+3. 若只有 graph AUROC 提升而 step/localization 不升，说明超图模型学到的是难度，不是动态推理失败；
+4. 若 causal 模型有效，再接入在线干预；若只有 non-causal 有效，只能作为事后分析或 verifier。
