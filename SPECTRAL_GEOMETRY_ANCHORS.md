@@ -804,7 +804,7 @@ hypergraph_token_hgn.py
 |---|---|---|
 | 构图输入 | `attention` `[L,H,seq,seq]` | hidden shards `[R,4,4096]` + `qvec` |
 | 节点 | token nodes | virtual prompt node + response token nodes |
-| 节点特征 `x` | self-attention diagonal `[seq, L*H]` | selected multi-layer token hidden directions，可选拼接 anchor/spread/jump 诊断量 |
+| 节点特征 `x` | self-attention diagonal `[seq, L*H]` | selected multi-layer token hidden；默认保留 raw hidden 幅度 + unit direction，可选拼接 anchor/spread/jump 诊断量 |
 | 超边 | response token/head 的 attention row，阈值选 members | prompt-anchor、causal temporal、hidden-neighbor hyperedges |
 | `he_attr` | mean attention, max attention, head id | mean weight, max weight, edge kind, causal age/span |
 | `he_mark` | prompt-cross vs response-only | prompt-anchor vs response-only |
@@ -818,8 +818,8 @@ hypergraph_token_hgn.py
 ```text
 1. 不再使用 window 节点作为主训练对象，而是每个 response token 一个节点；
 2. 默认读取多层 hidden：layers 10,14,18,22；
-3. 默认 `x_mode=hidden_diag`：完整 hidden direction + 我们已知可用的 anchor/spread/jump 诊断通道；
-4. 支持 `x_mode=hidden` / `diag` 做消融，判断模型能力来自 full hidden 还是手工信号；
+3. 默认 `x_mode=hidden_diag --hidden_form both`：raw hidden 幅度 + unit direction + 我们已知可用的 anchor/spread/jump 诊断通道；
+4. 支持 `x_mode=hidden` / `diag` 与 `hidden_form=raw|unit|both` 做消融，判断模型能力来自 full hidden、方向几何还是手工信号；
 5. 默认 `--causal`，hidden-neighbor 只连向过去 token，避免把未来信息泄漏进实时检测；
 6. step 标签只用于 y/mask/evaluation，不用于构图。
 ```
@@ -827,21 +827,24 @@ hypergraph_token_hgn.py
 训练命令：
 
 ```bash
-python hypergraph_token_hgn.py --dataset gsm8k --data_dir /gz-data/research/demo/data --layers 10,14,18,22 --x_mode hidden_diag --folds 5 --epochs 30 --batch_size 1 --hidden_dim 128 --gnn_layers 2 --output_dir outputs/hypergraph_hgn
+python hypergraph_token_hgn.py --dataset gsm8k --data_dir /gz-data/research/demo/data --layers 10,14,18,22 --x_mode hidden_diag --hidden_form both --folds 5 --epochs 30 --batch_size 1 --hidden_dim 128 --gnn_layers 2 --output_dir outputs/hypergraph_hgn
 ```
 
 必要消融：
 
 ```bash
 python hypergraph_token_hgn.py --dataset gsm8k --data_dir /gz-data/research/demo/data --x_mode diag --folds 5 --epochs 30 --output_dir outputs/hypergraph_hgn
-python hypergraph_token_hgn.py --dataset gsm8k --data_dir /gz-data/research/demo/data --x_mode hidden --folds 5 --epochs 30 --output_dir outputs/hypergraph_hgn
-python hypergraph_token_hgn.py --dataset gsm8k --data_dir /gz-data/research/demo/data --x_mode hidden_diag --no-causal --folds 5 --epochs 30 --output_dir outputs/hypergraph_hgn
+python hypergraph_token_hgn.py --dataset gsm8k --data_dir /gz-data/research/demo/data --x_mode hidden --hidden_form raw --folds 5 --epochs 30 --output_dir outputs/hypergraph_hgn
+python hypergraph_token_hgn.py --dataset gsm8k --data_dir /gz-data/research/demo/data --x_mode hidden --hidden_form unit --folds 5 --epochs 30 --output_dir outputs/hypergraph_hgn
+python hypergraph_token_hgn.py --dataset gsm8k --data_dir /gz-data/research/demo/data --x_mode hidden --hidden_form both --folds 5 --epochs 30 --output_dir outputs/hypergraph_hgn
+python hypergraph_token_hgn.py --dataset gsm8k --data_dir /gz-data/research/demo/data --x_mode hidden_diag --hidden_form both --no-causal --folds 5 --epochs 30 --output_dir outputs/hypergraph_hgn
 ```
 
 解释标准：
 
-- 如果 `hidden_diag > diag`，说明 full multi-layer hidden 中确实有超出手工 anchor/spread/jump 的可学习结构；
-- 如果 `hidden ≈ hidden_diag` 且超过 `diag`，说明超图模型主要从 hidden 表征本身挖信号，而不是复述我们给的标量；
+- 如果 `hidden_diag/both > diag`，说明 full multi-layer hidden 中确实有超出手工 anchor/spread/jump 的可学习结构；
+- 如果 `hidden/raw` 强于 `hidden/unit`，说明幅度/能量通道有信息；如果 `hidden/unit` 强，说明几何方向本身更关键；
+- 如果 `hidden/both ≈ hidden_diag/both` 且超过 `diag`，说明超图模型主要从 hidden 表征本身挖信号，而不是复述我们给的标量；
 - 如果 `diag` 已经等于 `hidden_diag`，超图训练没有证明新表征，只是非线性组合已有标量；
 - 如果 `--no-causal` 明显更强，必须标记为 offline upper bound，不能用于实时检测主张；
 - 如果 step-level / localization 不升，只 graph-level 升，说明模型只学到链难度或全局错误倾向，不满足首错定位目标。

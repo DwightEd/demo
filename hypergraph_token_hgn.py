@@ -271,6 +271,7 @@ def build_node_features(
     q: Optional[np.ndarray],
     *,
     x_mode: str,
+    hidden_form: str,
     local_radius: int,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray], np.ndarray]:
     H = np.asarray(H, np.float32)
@@ -279,9 +280,13 @@ def build_node_features(
     Uflat = U.reshape(R, L * D) / math.sqrt(max(1, L))
     if q is None:
         qU = np.zeros((L, D), np.float32)
+        q_raw = np.zeros((L, D), np.float32)
     else:
-        qU = unit_rows(np.asarray(q, np.float32))
+        q_raw = np.asarray(q, np.float32)
+        qU = unit_rows(q_raw)
     qflat = qU.reshape(L * D) / math.sqrt(max(1, L))
+    raw_flat = H.reshape(R, L * D) / math.sqrt(max(1, L))
+    q_raw_flat = q_raw.reshape(L * D) / math.sqrt(max(1, L))
 
     anchor_by_layer = np.einsum("rld,ld->rl", U, qU)
     spread_by_layer = local_spread(U, local_radius)
@@ -305,15 +310,27 @@ def build_node_features(
     ).astype(np.float32)
     prompt_diag = np.array([[1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]], np.float32)
 
+    if hidden_form == "unit":
+        hidden_resp = Uflat
+        hidden_prompt = qflat[None, :]
+    elif hidden_form == "raw":
+        hidden_resp = raw_flat
+        hidden_prompt = q_raw_flat[None, :]
+    elif hidden_form == "both":
+        hidden_resp = np.column_stack([raw_flat, Uflat])
+        hidden_prompt = np.column_stack([q_raw_flat[None, :], qflat[None, :]])
+    else:
+        raise SystemExit(f"unknown --hidden_form {hidden_form}")
+
     if x_mode == "hidden":
-        x_resp = Uflat.astype(np.float32)
-        x_prompt = qflat[None, :].astype(np.float32)
+        x_resp = hidden_resp.astype(np.float32)
+        x_prompt = hidden_prompt.astype(np.float32)
     elif x_mode == "diag":
         x_resp = diag
         x_prompt = prompt_diag
     elif x_mode == "hidden_diag":
-        x_resp = np.column_stack([Uflat, diag]).astype(np.float32)
-        x_prompt = np.column_stack([qflat[None, :], prompt_diag]).astype(np.float32)
+        x_resp = np.column_stack([hidden_resp, diag]).astype(np.float32)
+        x_prompt = np.column_stack([hidden_prompt, prompt_diag]).astype(np.float32)
     else:
         raise SystemExit(f"unknown --x_mode {x_mode}")
 
@@ -580,6 +597,7 @@ class ReasoningHypergraphDataset:
         *,
         layers: Sequence[int],
         x_mode: str,
+        hidden_form: str,
         local_radius: int,
         top_k: int,
         temporal_radius: int,
@@ -597,6 +615,7 @@ class ReasoningHypergraphDataset:
         self.layer_cols = layer_indices(hidden_layers, layers)
         self.layers = [hidden_layers[i] for i in self.layer_cols]
         self.x_mode = x_mode
+        self.hidden_form = hidden_form
         self.local_radius = int(local_radius)
         self.top_k = int(top_k)
         self.temporal_radius = int(temporal_radius)
@@ -648,7 +667,13 @@ class ReasoningHypergraphDataset:
         H = np.asarray(H_all[:, self.layer_cols, :], np.float32)
         q = qvec_for_chain(self.z, i, self.layers, allow_missing=self.allow_missing_qvec)
         rr = rel_ranges(np.asarray(self.ranges[i], int), int(H.shape[0]))
-        x, token_stats, sim_repr = build_node_features(H, q, x_mode=self.x_mode, local_radius=self.local_radius)
+        x, token_stats, sim_repr = build_node_features(
+            H,
+            q,
+            x_mode=self.x_mode,
+            hidden_form=self.hidden_form,
+            local_radius=self.local_radius,
+        )
         he_index, he_attr, he_mark, he_count = build_hyperedges(
             sim_repr,
             token_stats,
@@ -979,6 +1004,7 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
         "dataset": stem,
         "layers": parse_layers(args.layers),
         "x_mode": args.x_mode,
+        "hidden_form": args.hidden_form,
         "local_radius": args.local_radius,
         "top_k": args.top_k,
         "temporal_radius": args.temporal_radius,
@@ -1008,6 +1034,7 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
             "error_chains": int(labels.sum()),
             "layers": parse_layers(args.layers),
             "x_mode": args.x_mode,
+            "hidden_form": args.hidden_form,
             "causal": bool(args.causal),
             "top_k": int(args.top_k),
             "temporal_radius": int(args.temporal_radius),
@@ -1086,7 +1113,7 @@ def print_result(res: Dict[str, object]) -> None:
     print(f"\n===== hypergraph token HGN | {os.path.basename(meta['npz'])} =====")
     print(
         f"chains {meta['n_seen']} | error chains {meta['error_chains']} | "
-        f"layers {meta['layers']} | x_mode {meta['x_mode']} | causal {meta['causal']}"
+        f"layers {meta['layers']} | x_mode {meta['x_mode']} | hidden_form {meta['hidden_form']} | causal {meta['causal']}"
     )
     for k in [
         "oof_node_auroc",
@@ -1111,6 +1138,7 @@ def main() -> None:
     ap.add_argument("--hidden_dir", default=None)
     ap.add_argument("--layers", default="10,14,18,22")
     ap.add_argument("--x_mode", choices=["hidden", "diag", "hidden_diag"], default="hidden_diag")
+    ap.add_argument("--hidden_form", choices=["raw", "unit", "both"], default="both")
     ap.add_argument("--causal", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--top_k", type=int, default=8)
     ap.add_argument("--temporal_radius", type=int, default=8)
