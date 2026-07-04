@@ -975,7 +975,7 @@ def inspect_original_implementation() -> Dict[str, object]:
         },
         "this_script_changes": {
             "nodes": "virtual prompt node + response tokens",
-            "x": "selected multi-layer hidden directions, optionally concatenated with anchor/spread/jump diagnostics",
+            "x": "selected multi-layer raw hidden and/or unit directions, optionally concatenated with anchor/spread/jump diagnostics",
             "hyperedges": "prompt-anchor, causal temporal, and hidden-neighbor hyperedges",
             "label": "tokens in gold first-error step; post-error tokens masked out",
             "evaluation": "token OOF + step aggregation + within-chain first-error localization",
@@ -1046,7 +1046,8 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
         "aggregate": aggregate,
     }
     os.makedirs(args.output_dir, exist_ok=True)
-    out_name = f"{stem}_layers-{args.layers.replace(',', '-')}_{args.x_mode}"
+    causal_tag = "causal" if args.causal else "noncausal"
+    out_name = f"{stem}_layers-{args.layers.replace(',', '-')}_{args.x_mode}_{args.hidden_form}_{causal_tag}"
     if args.max_chains:
         out_name += f"_n{args.max_chains}"
     out_path = os.path.join(args.output_dir, f"{out_name}.json")
