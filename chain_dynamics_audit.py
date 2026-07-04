@@ -40,7 +40,16 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise SystemExit("chain_dynamics_audit.py needs scikit-learn") from exc
 
-from mechanism_phase_audit import Chain, auroc, bdir, finite_json, load_chains, safe_mean, safe_std
+from mechanism_phase_audit import (
+    Chain,
+    auroc,
+    bdir,
+    cluster_boot_increment,
+    finite_json,
+    load_chains,
+    safe_mean,
+    safe_std,
+)
 
 
 EPS = 1e-9
@@ -172,6 +181,63 @@ def finite_count(chains: Sequence[Chain], name: str) -> int:
     return int(sum(np.isfinite(arr(c, name)).sum() for c in chains))
 
 
+def rolling_pattern_arrays(x: np.ndarray, *, window: int) -> Dict[str, np.ndarray]:
+    """Causal window shape around a score, not a future-looking recovery label."""
+    v = np.asarray(x, float)
+    n = len(v)
+    z = causal_z(v)
+    drift = np.full(n, np.nan)
+    rise = np.full(n, np.nan)
+    volatility = np.full(n, np.nan)
+    persistence = np.full(n, np.nan)
+    for t in range(n):
+        lo = max(0, t - window + 1)
+        seg = v[lo : t + 1]
+        sf = seg[np.isfinite(seg)]
+        if len(sf) == 0 or not np.isfinite(v[t]):
+            continue
+        drift[t] = float(v[t] - sf[0])
+        volatility[t] = float(np.std(sf)) if len(sf) >= 2 else 0.0
+        if len(sf) >= 2:
+            d = np.diff(sf)
+            rise[t] = float(np.mean(np.maximum(d, 0.0)))
+        else:
+            rise[t] = 0.0
+        zseg = z[lo : t + 1]
+        zseg = zseg[np.isfinite(zseg)]
+        if len(zseg):
+            persistence[t] = float(np.mean(zseg > 1.0))
+    return {
+        "drift": drift,
+        "rise": rise,
+        "vol": volatility,
+        "persist": persistence,
+    }
+
+
+def add_trajectory_pattern_features(
+    chains: Sequence[Chain],
+    sources: Sequence[str],
+    *,
+    window: int,
+    min_finite: int,
+) -> List[str]:
+    """Add short causal trajectory-shape summaries for sequence-level tests."""
+    made: List[str] = []
+    sources = [nm for nm in dict.fromkeys(sources) if finite_count(chains, nm) >= min_finite]
+    for nm in sources:
+        slug = feature_slug(nm)
+        names = {k: f"pat_{slug}_{k}_w{window}" for k in ("drift", "rise", "vol", "persist")}
+        for c in chains:
+            pats = rolling_pattern_arrays(arr(c, nm), window=window)
+            for k, out_name in names.items():
+                c.features[out_name] = pats[k]
+        for out_name in names.values():
+            if finite_count(chains, out_name) >= min_finite:
+                made.append(out_name)
+    return made
+
+
 def choose_obs(chains: Sequence[Chain], requested: Optional[str], *, min_finite: int) -> List[str]:
     if requested:
         return [x.strip() for x in requested.split(",") if x.strip()]
@@ -188,6 +254,16 @@ def short_name(name: str) -> str:
         "geom_ae": "ae",
         "cloud_D": "cloudD",
     }.get(name, name.replace(" ", "_"))
+
+
+def feature_slug(name: str) -> str:
+    slug = name
+    slug = slug.replace("transition_surprise__", "ts__")
+    slug = slug.replace("transition_cusum__", "tc__")
+    out = []
+    for ch in slug:
+        out.append(ch if ch.isalnum() else "_")
+    return "_".join([p for p in "".join(out).split("_") if p])
 
 
 def obs_label(obs: Sequence[str]) -> str:
@@ -573,23 +649,81 @@ def add_control_residuals(
     return {"features": made, "controls": list(controls), "folds": int(n_splits)}
 
 
+def group_score(chains: Sequence[Chain], names: Sequence[str], *, folds: int) -> Optional[Dict[str, object]]:
+    names = [nm for nm in names if finite_count(chains, nm) >= 30]
+    if not names:
+        return None
+    X, y, g, _, _ = flatten_labeled(chains, names)
+    if X.shape[1] == 0:
+        return None
+    s = oof_logit(X, y, g, folds)
+    m = np.isfinite(s)
+    return {
+        "features": list(names),
+        "score": s,
+        "y": y,
+        "groups": g,
+        "auroc": auroc(s[m], y[m]) if m.any() else float("nan"),
+        "n": int(m.sum()),
+    }
+
+
 def group_table(chains: Sequence[Chain], groups: Dict[str, Sequence[str]], *, folds: int):
     out = {}
     for label, names in groups.items():
-        names = [nm for nm in names if finite_count(chains, nm) >= 30]
-        if not names:
+        scored = group_score(chains, names, folds=folds)
+        if scored is None:
             continue
-        X, y, g, _, _ = flatten_labeled(chains, names)
-        if X.shape[1] == 0:
-            continue
-        s = oof_logit(X, y, g, folds)
-        m = np.isfinite(s)
         out[label] = {
-            "features": list(names),
-            "auroc": auroc(s[m], y[m]) if m.any() else float("nan"),
-            "n": int(m.sum()),
+            "features": scored["features"],
+            "auroc": scored["auroc"],
+            "n": scored["n"],
         }
     return out
+
+
+def group_increment_table(
+    chains: Sequence[Chain],
+    groups: Dict[str, Sequence[str]],
+    *,
+    baseline: str,
+    folds: int,
+    n_boot: int,
+    seed: int = 0,
+):
+    scored = {}
+    for label, names in groups.items():
+        val = group_score(chains, names, folds=folds)
+        if val is not None and val["n"] >= 30:
+            scored[label] = val
+    if baseline not in scored:
+        return []
+    base = scored[baseline]
+    rows = []
+    for j, (label, val) in enumerate(scored.items()):
+        if label == baseline:
+            continue
+        inc = cluster_boot_increment(
+            val["score"],
+            base["score"],
+            val["y"],
+            val["groups"],
+            n_boot=n_boot,
+            seed=seed + j,
+        )
+        rows.append(
+            {
+                "group": label,
+                "baseline": baseline,
+                "auroc": val["auroc"],
+                "baseline_auroc": base["auroc"],
+                "increment": inc,
+                "features": val["features"],
+                "n": val["n"],
+            }
+        )
+    rows.sort(key=lambda r: np.nan_to_num(r["increment"]["point"], nan=-999), reverse=True)
+    return rows
 
 
 def within_chain_rank(chains: Sequence[Chain], feature: str, sign: float):
@@ -728,6 +862,20 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
         ridge=args.ridge,
     )
     residual_names = residual_info["features"]
+    pattern_sources = [
+        "spread",
+        "anchor_loss",
+        "uncertainty",
+        "unanchored_divergence",
+        "confident_divergence",
+        "transition_surprise",
+    ]
+    pattern_names = add_trajectory_pattern_features(
+        chains,
+        pattern_sources,
+        window=args.pattern_window,
+        min_finite=args.min_finite,
+    )
 
     groups = {
         "static": ["spread", "logN", "pos"],
@@ -735,9 +883,40 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
         "dynamic_online": ["spread", "d_spread", "cz_spread", "spread_cusum", "unanchored_cusum", "confident_cusum", "transition_surprise", "transition_cusum", "logN", "pos"],
         "transition_ablation": ["spread", "logN", "pos"] + transition_feature_names,
         "control_residual": residual_names,
+        "trajectory_pattern": ["spread", "anchor_loss", "uncertainty", "logN", "pos"] + pattern_names,
+        "sequence_state": [
+            "spread",
+            "anchor_loss",
+            "uncertainty",
+            "d_spread",
+            "cz_spread",
+            "unanchored_cusum",
+            "confident_cusum",
+            "transition_surprise",
+            "transition_cusum",
+            "logN",
+            "pos",
+        ]
+        + pattern_names,
         "offline_recovery": ["spread", "next_recovery_1", f"next_recovery_{args.recovery_horizon}", "logN", "pos"],
     }
-    all_names = list(dict.fromkeys(static + dynamic + residual_names))
+    all_names = list(dict.fromkeys(static + dynamic + residual_names + pattern_names))
+    causal_names = [
+        nm
+        for nm in dict.fromkeys(
+            [
+                "d_spread",
+                "cz_spread",
+                "unanchored_cusum",
+                "confident_cusum",
+                "transition_surprise",
+                "transition_cusum",
+            ]
+            + pattern_names
+        )
+        if finite_count(chains, nm) >= 30
+    ]
+    group_scores = group_table(chains, groups, folds=args.folds)
     res = {
         "meta": {**meta, "chain_dynamic_layer": args.layer},
         "hypotheses": {
@@ -751,15 +930,40 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
         "transition_models": transition_models,
         "primary_transition_model": next(iter(transition_models.values()), {}),
         "control_residualization": residual_info,
+        "trajectory_pattern_features": pattern_names,
         "overall_features": feature_table(chains, all_names, top=args.top),
         "high_spread_features": feature_table(chains, all_names, high_spread_q=args.high_spread_q, top=args.top),
         "control_residual_features": feature_table(chains, residual_names, top=args.top),
         "transition_ablation_features": feature_table(chains, transition_feature_names, top=args.top),
         "localization": localization_table(chains, all_names, top=args.top),
-        "group_oof": group_table(chains, groups, folds=args.folds),
+        "residual_localization": localization_table(chains, residual_names, top=args.top),
+        "causal_pattern_localization": localization_table(chains, causal_names, top=args.top),
+        "group_oof": group_scores,
+        "group_increments_vs_anchor_uncertainty": group_increment_table(
+            chains,
+            groups,
+            baseline="anchor_uncertainty",
+            folds=args.folds,
+            n_boot=args.n_boot,
+        ),
         "event_study": event_study(
             chains,
-            [nm for nm in ("spread", "d_spread", "next_recovery_1", "anchor_loss", "uncertainty", "unanchored_divergence", "confident_divergence", "transition_surprise", "transition_cusum") if finite_count(chains, nm) >= 20],
+            [
+                nm
+                for nm in (
+                    "spread",
+                    "d_spread",
+                    "next_recovery_1",
+                    "anchor_loss",
+                    "uncertainty",
+                    "unanchored_divergence",
+                    "confident_divergence",
+                    "transition_surprise",
+                    "transition_cusum",
+                )
+                + tuple(pattern_names[:8])
+                if finite_count(chains, nm) >= 20
+            ],
             window=args.event_window,
         ),
     }
@@ -799,9 +1003,28 @@ def print_result(res: Dict[str, object]) -> None:
         gain = r["top1"] - r["expected_top1"]
         print(f"  {r['feature']:26s} top1 {r['top1']:.3f} exp {r['expected_top1']:.3f} gain {gain:+.3f} n={r['n']}")
 
+    print("\nResidualized localization:")
+    for r in res.get("residual_localization", [])[:8]:
+        gain = r["top1"] - r["expected_top1"]
+        print(f"  {r['feature']:26s} top1 {r['top1']:.3f} exp {r['expected_top1']:.3f} gain {gain:+.3f} n={r['n']}")
+
+    print("\nCausal/pattern localization:")
+    for r in res.get("causal_pattern_localization", [])[:8]:
+        gain = r["top1"] - r["expected_top1"]
+        print(f"  {r['feature']:26s} top1 {r['top1']:.3f} exp {r['expected_top1']:.3f} gain {gain:+.3f} n={r['n']}")
+
     print("\nOOF groups:")
     for k, v in res["group_oof"].items():
         print(f"  {k:20s} AUROC {v['auroc']:.3f} n={v['n']} features={len(v['features'])}")
+
+    print("\nOOF increments vs anchor_uncertainty:")
+    for r in res.get("group_increments_vs_anchor_uncertainty", [])[:8]:
+        inc = r["increment"]
+        sig = "SIG" if inc.get("sig") else "ns"
+        print(
+            f"  {r['group']:20s} {r['baseline_auroc']:.3f}->{r['auroc']:.3f} "
+            f"inc {inc['point']:+.3f} [{inc['lo']:+.3f},{inc['hi']:+.3f}] {sig}"
+        )
 
     print("\nOnline transition alarms:")
     for label, model in res.get("transition_models", {}).items():
@@ -948,7 +1171,9 @@ def main() -> None:
     ap.add_argument("--lam", type=float, default=0.8)
     ap.add_argument("--kref", type=float, default=0.25)
     ap.add_argument("--eps_list", default="0.05,0.10,0.20")
+    ap.add_argument("--pattern_window", type=int, default=3)
     ap.add_argument("--event_window", type=int, default=3)
+    ap.add_argument("--n_boot", type=int, default=200)
     ap.add_argument("--top", type=int, default=20)
     ap.add_argument("--output_dir", default="outputs/chain_dynamics")
     ap.add_argument("--selftest", action="store_true")

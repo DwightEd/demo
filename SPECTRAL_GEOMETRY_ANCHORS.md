@@ -518,3 +518,87 @@ intervention = state-conditioned action
 ```
 
 如果 v2 仍然只剩 `spread/resultant` 有效，则不应升级复杂模型，应回到数据/信号抽取层面寻找更有机制性的 anchor 或 flow 信号。
+
+### 13.2 v2 三数据集结果：哪些方向现在可行
+
+目前 `chain_dynamics_audit.py` v2 已在 GSM8K / MATH / OmniMath 的 L14 上跑出完整结果。结论不是“找到几个好标量”，而是更具体：
+
+```text
+错误推理的可检测性主要来自：
+1. 发散程度 spread/resultant；
+2. 发散是否失去题设锚定 anchor；
+3. 发散时是否伴随不确定性/校准变化 uncertainty；
+4. 当前状态转移是否不像正确链的健康转移 transition_surprise。
+```
+
+但这些信号的地位不同。
+
+| 方向 | 当前证据 | 判断 |
+|---|---|---|
+| `spread/resultant` | GSM8K 约 0.77，MATH/OmniMath 约 0.70；仍是最强单轴之一 | **可作为基线，不是创新点**。它太接近 κ/resultant 主信号，只能说明错误更发散。 |
+| `anchor_uncertainty` 组合 | OOF group 在三数据集都最稳：GSM8K 0.811，MATH 0.781，OmniMath 0.809 | **最可行的主方向**。故事应从“发散是否仍被锚定、是否被模型感知”展开。 |
+| `transition_surprise` | GSM8K high-divergence subset 中最好，残差化后约 0.742；MATH/OmniMath 只有约 0.63/0.62 | **可行但数据集依赖**。它更像区分“健康探索 vs 错误漂移”的二级机制，而不是全局最强 detector。 |
+| `uncertainty` | 在 MATH/OmniMath 的 high-divergence subset 中很强，约 0.675/0.663 | **可行**。复杂题里错误发散更像 calibration/uncertainty 问题，而不只是几何问题。 |
+| online alarm | FPR 约 0.20 时 recall 多在 0.44--0.50，median delay 0--1 step，early warning 约 0.2--0.3 | **可作为实时 guard 的雏形**，但还不是强 early-warning。 |
+| raw localization/CUSUM | `pos top1=1.0`，CUSUM 与时间天然相关 | **必须去混杂**。未经位置控制的定位结果不能作为机制证据。 |
+| spectral alpha/cascade | 当前数据只能做 step/gold-error 审阅，不能测试 reasoning vs factual recall 或 base/instruct reversal | **外部锚点，不是本项目可直接复用的 claim**。 |
+
+因此，当前可讲的研究主线应是：
+
+```text
+错误不是简单的“低 κ / 高 spread”，而是推理链进入一种
+unanchored + miscalibrated + transition-surprising 的坏动态状态。
+正确推理也会发散，但更可能保持题设锚定、带有不确定性提示，并能回到健康转移轨道。
+```
+
+这条主线比“找到一组标量”更强，因为它把每一步放回完整链中看：同样发散，健康探索和错误漂移应有不同的路径形状。
+
+### 13.3 下一步优化：从标量表走向状态轨迹
+
+当前 v2 仍然过于手工，主要问题是：
+
+1. 多数表仍是 step-level 标量 AUROC，容易退化为 feature hunting。
+2. `pos/logN` 是强混杂，尤其 localization 表中 `pos` 过强。
+3. `transition_surprise` 只是一阶 Gaussian Markov residual，还不是隐状态模型。
+4. online alarm 只是阈值触发，没有把不同坏状态映射到不同干预动作。
+
+下一版代码要先做三件事，作为进入 HMM/HSMM/LRSM 之前的门槛：
+
+| 优化 | 目的 | 成功判据 |
+|---|---|---|
+| residualized localization | 去掉 `logN/pos` 后看首错步是否仍能被定位 | 残差化表中 dynamic/transition/pattern 信号仍高于随机期望 |
+| trajectory pattern features | 不只看当前标量，而看最近窗口的 drift/rise/volatility/persistence | `trajectory_pattern` 或 `sequence_state` OOF 显著超过 `anchor_uncertainty` |
+| group increment test | 不只报告 AUROC，而报告相对强基线的 cluster bootstrap 增量 | `anchor_uncertainty -> sequence_state` 的增量稳定为正 |
+
+对应代码组织为 `chain_dynamics_audit.py` v3：
+
+```text
+pat_<signal>_drift_wK      # 最近 K 步当前值相对窗口起点的漂移
+pat_<signal>_rise_wK       # 最近 K 步正向爬升强度
+pat_<signal>_vol_wK        # 最近 K 步波动
+pat_<signal>_persist_wK    # 最近 K 步处于异常 causal-z 的比例
+
+residual_localization      # 只看 score - E(score | logN, pos)
+causal_pattern_localization
+group_increments_vs_anchor_uncertainty
+```
+
+如果 v3 显示 `sequence_state` 稳定超过 `anchor_uncertainty`，再进入 latent state model：
+
+```text
+z_t in {
+  stable,
+  healthy_explore,
+  recovery,
+  unanchored_drift,
+  confident_wrong,
+  transition_break
+}
+
+emission: spread / anchor_loss / uncertainty / transition_surprise / pattern features
+transition: p(z_t | z_{t-1})
+online risk: P(bad state | y_<=t)
+intervention: re-anchor, verifier, regenerate suffix, or ask model to bridge the broken step
+```
+
+如果 v3 不能超过 `anchor_uncertainty`，则不要急着上 HMM；应回到信号抽取层面，重点补 attention/logits/loss/verifier traces，寻找真正能解释“为什么这一步错”的机制通道。
