@@ -60,6 +60,15 @@ class TransitionModel:
     score_sd: float
 
 
+CORE_TRANSITION_OBS = [
+    ("spread",),
+    ("spread", "uncertainty"),
+    ("spread", "anchor_loss"),
+    ("spread", "anchor_loss", "uncertainty"),
+    ("spread", "anchor_loss", "uncertainty", "step_direction_jump"),
+]
+
+
 def arr(c: Chain, name: str) -> np.ndarray:
     return np.asarray(c.features.get(name, np.full(c.n_steps, np.nan)), float)
 
@@ -170,6 +179,32 @@ def choose_obs(chains: Sequence[Chain], requested: Optional[str], *, min_finite:
     return [nm for nm in candidates if finite_count(chains, nm) >= min_finite]
 
 
+def short_name(name: str) -> str:
+    return {
+        "spread": "spread",
+        "anchor_loss": "anchor",
+        "uncertainty": "unc",
+        "step_direction_jump": "jump",
+        "geom_ae": "ae",
+        "cloud_D": "cloudD",
+    }.get(name, name.replace(" ", "_"))
+
+
+def obs_label(obs: Sequence[str]) -> str:
+    return "_".join(short_name(x) for x in obs)
+
+
+def parse_obs_grid(spec: Optional[str]) -> List[List[str]]:
+    if not spec:
+        return [list(x) for x in CORE_TRANSITION_OBS]
+    out = []
+    for block in spec.split(";"):
+        names = [x.strip() for x in block.split(",") if x.strip()]
+        if names:
+            out.append(names)
+    return out
+
+
 def zscore_matrix(X: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> np.ndarray:
     return (np.asarray(X, float) - mu) / np.maximum(sd, EPS)
 
@@ -268,6 +303,8 @@ def fit_crossfit_transition(
     chains: Sequence[Chain],
     obs: Sequence[str],
     *,
+    prefix: str,
+    alias: bool,
     folds: int,
     ridge: float,
     eps_list: Sequence[float],
@@ -277,13 +314,23 @@ def fit_crossfit_transition(
     idx = np.arange(len(chains))
     groups = np.array([c.group for c in chains])
     n_splits = min(int(folds), len(np.unique(groups)))
+    surprise_feature = f"transition_surprise__{prefix}"
+    cusum_feature = f"transition_cusum__{prefix}"
     transition = [np.full(c.n_steps, np.nan) for c in chains]
     transition_cusum = [np.full(c.n_steps, np.nan) for c in chains]
     fold_of: Dict[int, int] = {}
     calibration: Dict[int, Dict[str, np.ndarray]] = {}
     controls = [nm for nm in ("logN", "pos") if finite_count(chains, nm) >= len(chains)]
     if n_splits < 2 or not obs:
-        return {"obs": list(obs), "controls": controls, "folds": 0, "online": []}
+        return {
+            "prefix": prefix,
+            "obs": list(obs),
+            "controls": controls,
+            "folds": 0,
+            "surprise_feature": surprise_feature,
+            "cusum_feature": cusum_feature,
+            "online": [],
+        }
 
     for fold, (tr, te) in enumerate(GroupKFold(n_splits=n_splits).split(idx[:, None], idx, groups)):
         model = fit_transition_model(chains, tr, obs, controls, ridge=ridge)
@@ -310,8 +357,11 @@ def fit_crossfit_transition(
             fold_of[i] = fold
 
     for i, c in enumerate(chains):
-        c.features["transition_surprise"] = transition[i]
-        c.features["transition_cusum"] = transition_cusum[i]
+        c.features[surprise_feature] = transition[i]
+        c.features[cusum_feature] = transition_cusum[i]
+        if alias:
+            c.features["transition_surprise"] = transition[i]
+            c.features["transition_cusum"] = transition_cusum[i]
 
     online_rows = []
     for method in ("single", "cusum"):
@@ -326,7 +376,7 @@ def fit_crossfit_transition(
             for i, c in enumerate(chains):
                 if i not in fold_of:
                     continue
-                score = c.features["transition_surprise"] if method == "single" else c.features["transition_cusum"]
+                score = c.features[surprise_feature] if method == "single" else c.features[cusum_feature]
                 alarm = first_alarm(score, thresholds.get(fold_of[i], float("inf")))
                 if c.correct:
                     n_correct += 1
@@ -351,7 +401,19 @@ def fit_crossfit_transition(
                     "n_correct": int(n_correct),
                 }
             )
-    return {"obs": list(obs), "controls": controls, "folds": int(n_splits), "online": online_rows}
+    return {
+        "prefix": prefix,
+        "obs": list(obs),
+        "controls": controls,
+        "folds": int(n_splits),
+        "surprise_feature": surprise_feature,
+        "cusum_feature": cusum_feature,
+        "support": {
+            "surprise_finite": finite_count(chains, surprise_feature),
+            "cusum_finite": finite_count(chains, cusum_feature),
+        },
+        "online": online_rows,
+    }
 
 
 def flatten_labeled(chains: Sequence[Chain], names: Sequence[str], *, high_spread_q: Optional[float] = None):
@@ -434,6 +496,81 @@ def oof_logit(X: np.ndarray, y: np.ndarray, groups: np.ndarray, folds: int) -> n
         clf.fit(X[tr], y[tr])
         pred[te] = clf.predict_proba(X[te])[:, 1]
     return pred
+
+
+def candidate_label(c: Chain, t: int) -> Optional[int]:
+    if c.correct or t < c.gold:
+        return 0
+    if t == c.gold:
+        return 1
+    return None
+
+
+def add_control_residuals(
+    chains: Sequence[Chain],
+    names: Sequence[str],
+    controls: Sequence[str],
+    *,
+    folds: int,
+    ridge: float,
+    suffix: str = "_resid_ctrl",
+) -> Dict[str, object]:
+    """Cross-fit feature residuals after removing logN/position from non-error steps.
+
+    The fit uses only y=0 candidate steps in the training fold, then scores held-out
+    chains. This keeps gold-error steps from defining their own nuisance baseline.
+    """
+    names = [nm for nm in dict.fromkeys(names) if finite_count(chains, nm) >= 30]
+    controls = [nm for nm in controls if finite_count(chains, nm) >= 30]
+    idx = np.arange(len(chains))
+    groups = np.array([c.group for c in chains])
+    n_splits = min(int(folds), len(np.unique(groups)))
+    made = []
+    if n_splits < 2 or not names or not controls:
+        return {"features": made, "controls": list(controls), "folds": 0}
+
+    for nm in names:
+        out_name = f"{nm}{suffix}"
+        for c in chains:
+            c.features[out_name] = np.full(c.n_steps, np.nan)
+        for tr, te in GroupKFold(n_splits=n_splits).split(idx[:, None], idx, groups):
+            Xtr, ytr = [], []
+            for i in tr:
+                c = chains[i]
+                for t in range(c.n_steps):
+                    lab = candidate_label(c, t)
+                    if lab != 0:
+                        continue
+                    x = np.array([arr(c, ctl)[t] for ctl in controls], float)
+                    val = arr(c, nm)[t]
+                    if np.isfinite(val) and np.all(np.isfinite(x)):
+                        Xtr.append(x)
+                        ytr.append(val)
+            if len(ytr) < max(20, 4 * (len(controls) + 1)):
+                continue
+            Xtr = np.asarray(Xtr, float)
+            ytr = np.asarray(ytr, float)
+            mu = Xtr.mean(axis=0)
+            sd = Xtr.std(axis=0) + EPS
+            Ztr = (Xtr - mu) / sd
+            Dtr = np.column_stack([Ztr, np.ones(len(Ztr))])
+            reg = ridge * np.eye(Dtr.shape[1])
+            reg[-1, -1] = 0.0
+            beta = np.linalg.solve(Dtr.T @ Dtr + reg, Dtr.T @ ytr)
+            for i in te:
+                c = chains[i]
+                for t in range(c.n_steps):
+                    if candidate_label(c, t) is None:
+                        continue
+                    x = np.array([arr(c, ctl)[t] for ctl in controls], float)
+                    val = arr(c, nm)[t]
+                    if np.isfinite(val) and np.all(np.isfinite(x)):
+                        z = (x - mu) / sd
+                        pred = float(np.r_[z, 1.0] @ beta)
+                        c.features[out_name][t] = float(val - pred)
+        if finite_count(chains, out_name) >= 30:
+            made.append(out_name)
+    return {"features": made, "controls": list(controls), "folds": int(n_splits)}
 
 
 def group_table(chains: Sequence[Chain], groups: Dict[str, Sequence[str]], *, folds: int):
@@ -523,16 +660,42 @@ def resolve_npz(args: argparse.Namespace) -> str:
 def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
     chains, meta = load_chains(npz, layer=args.layer, max_chains=args.max_chains)
     add_chain_dynamic_features(chains, recovery_horizon=args.recovery_horizon, lam=args.lam, kref=args.kref)
-    obs = choose_obs(chains, args.obs, min_finite=args.min_finite)
-    transition = fit_crossfit_transition(
-        chains,
-        obs,
-        folds=args.folds,
-        ridge=args.ridge,
-        eps_list=[float(x) for x in args.eps_list.split(",")],
-        lam=args.lam,
-        kref=args.kref,
-    )
+    if args.obs:
+        obs_grid = [choose_obs(chains, args.obs, min_finite=args.min_finite)]
+    else:
+        obs_grid = []
+        for obs in parse_obs_grid(args.obs_grid):
+            ok = [nm for nm in obs if finite_count(chains, nm) >= args.min_finite]
+            if len(ok) == len(obs):
+                obs_grid.append(ok)
+        auto = choose_obs(chains, None, min_finite=args.min_finite)
+        if auto and auto not in obs_grid:
+            obs_grid.append(auto)
+    # Keep the central hypothesis first if available: divergence + anchor + uncertainty.
+    preferred = ["spread", "anchor_loss", "uncertainty"]
+    obs_grid = sorted(obs_grid, key=lambda x: 0 if x == preferred else 1)
+
+    transition_models = {}
+    transition_feature_names: List[str] = []
+    eps_values = [float(x) for x in args.eps_list.split(",")]
+    for i, obs in enumerate(obs_grid):
+        prefix = obs_label(obs)
+        transition = fit_crossfit_transition(
+            chains,
+            obs,
+            prefix=prefix,
+            alias=(i == 0),
+            folds=args.folds,
+            ridge=args.ridge,
+            eps_list=eps_values,
+            lam=args.lam,
+            kref=args.kref,
+        )
+        transition_models[prefix] = transition
+        transition_feature_names.extend([transition["surprise_feature"], transition["cusum_feature"]])
+
+    if transition_feature_names and "transition_surprise" not in transition_feature_names:
+        transition_feature_names.extend(["transition_surprise", "transition_cusum"])
 
     static = ["spread", "resultant", "uncertainty", "anchor_loss", "step_direction_jump", "logN", "pos"]
     dynamic = [
@@ -547,14 +710,34 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
         "confident_cusum",
         "transition_surprise",
         "transition_cusum",
-    ]
+    ] + transition_feature_names
+
+    residual_source = [
+        "spread",
+        "unanchored_divergence",
+        "confident_divergence",
+        "d_spread",
+        "cz_spread",
+        "spread_cusum",
+    ] + transition_feature_names
+    residual_info = add_control_residuals(
+        chains,
+        residual_source,
+        ["logN", "pos"],
+        folds=args.folds,
+        ridge=args.ridge,
+    )
+    residual_names = residual_info["features"]
+
     groups = {
         "static": ["spread", "logN", "pos"],
         "anchor_uncertainty": ["spread", "anchor_loss", "uncertainty", "logN", "pos"],
         "dynamic_online": ["spread", "d_spread", "cz_spread", "spread_cusum", "unanchored_cusum", "confident_cusum", "transition_surprise", "transition_cusum", "logN", "pos"],
+        "transition_ablation": ["spread", "logN", "pos"] + transition_feature_names,
+        "control_residual": residual_names,
         "offline_recovery": ["spread", "next_recovery_1", f"next_recovery_{args.recovery_horizon}", "logN", "pos"],
     }
-    all_names = list(dict.fromkeys(static + dynamic))
+    all_names = list(dict.fromkeys(static + dynamic + residual_names))
     res = {
         "meta": {**meta, "chain_dynamic_layer": args.layer},
         "hypotheses": {
@@ -565,9 +748,13 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
         },
         "n_chains": len(chains),
         "n_error_chains": int(sum(not c.correct for c in chains)),
-        "transition_model": transition,
+        "transition_models": transition_models,
+        "primary_transition_model": next(iter(transition_models.values()), {}),
+        "control_residualization": residual_info,
         "overall_features": feature_table(chains, all_names, top=args.top),
         "high_spread_features": feature_table(chains, all_names, high_spread_q=args.high_spread_q, top=args.top),
+        "control_residual_features": feature_table(chains, residual_names, top=args.top),
+        "transition_ablation_features": feature_table(chains, transition_feature_names, top=args.top),
         "localization": localization_table(chains, all_names, top=args.top),
         "group_oof": group_table(chains, groups, folds=args.folds),
         "event_study": event_study(
@@ -592,10 +779,20 @@ def print_result(res: Dict[str, object]) -> None:
     meta = res["meta"]
     print(f"\n===== chain dynamics audit | {os.path.basename(meta['npz'])} | L{meta['layer']} =====")
     print(f"chains {res['n_chains']} | error chains {res['n_error_chains']}")
-    tm = res["transition_model"]
-    print(f"transition obs={tm.get('obs')} controls={tm.get('controls')} folds={tm.get('folds')}")
+    tm = res.get("primary_transition_model", {})
+    print(f"primary transition obs={tm.get('obs')} controls={tm.get('controls')} folds={tm.get('folds')}")
+    if res.get("transition_models"):
+        print("transition ablations:")
+        for k, v in res["transition_models"].items():
+            sup = v.get("support", {})
+            print(
+                f"  {k:36s} obs={v.get('obs')} "
+                f"finite={sup.get('surprise_finite', 0)}"
+            )
     print_rows(res["overall_features"], label="Overall step/gold-error scores")
     print_rows(res["high_spread_features"], label="High-divergence subset scores")
+    print_rows(res.get("transition_ablation_features", []), label="Transition ablation scores")
+    print_rows(res.get("control_residual_features", []), label="Control-residualized scores")
 
     print("\nWithin-chain localization:")
     for r in res["localization"][:12]:
@@ -607,11 +804,12 @@ def print_result(res: Dict[str, object]) -> None:
         print(f"  {k:20s} AUROC {v['auroc']:.3f} n={v['n']} features={len(v['features'])}")
 
     print("\nOnline transition alarms:")
-    for r in tm.get("online", []):
-        print(
-            f"  {r['method']:6s} eps {r['eps']:.2f} FPR {r['fpr']:.3f} "
-            f"recall {r['recall']:.3f} delay {r['median_delay']:+.1f} early {r['early_warn']:.3f}"
-        )
+    for label, model in res.get("transition_models", {}).items():
+        for r in model.get("online", []):
+            print(
+                f"  {label:24s} {r['method']:6s} eps {r['eps']:.2f} FPR {r['fpr']:.3f} "
+                f"recall {r['recall']:.3f} delay {r['median_delay']:+.1f} early {r['early_warn']:.3f}"
+            )
 
 
 def _object_array(xs: Sequence[object]) -> np.ndarray:
@@ -715,11 +913,18 @@ def assert_selftest(res: Dict[str, object]) -> None:
     if rows.get("transition_surprise", {}).get("auroc_bestdir", 0.0) < 0.8:
         raise SystemExit("selftest failed: transition_surprise did not recover injected transition failure")
     high = {r["feature"]: r for r in res["high_spread_features"]}
-    if high.get("unanchored_divergence", {}).get("auroc_bestdir", 0.0) < 0.8:
-        raise SystemExit("selftest failed: unanchored_divergence did not separate high-spread failures")
+    if high.get("transition_surprise", {}).get("auroc_bestdir", 0.0) < 0.8:
+        raise SystemExit("selftest failed: transition_surprise did not separate high-spread failures")
+    resid = {r["feature"]: r for r in res.get("control_residual_features", [])}
+    best_resid = max(
+        [r.get("auroc_bestdir", 0.0) for name, r in resid.items() if name.startswith("transition_surprise")],
+        default=0.0,
+    )
+    if best_resid < 0.8:
+        raise SystemExit("selftest failed: control-residualized transition_surprise is too weak")
     loc = {r["feature"]: r for r in res["localization"]}
-    if loc.get("transition_surprise", {}).get("top1", 0.0) < 0.6:
-        raise SystemExit("selftest failed: transition_surprise did not localize gold steps")
+    if loc.get("transition_cusum", {}).get("top1", 0.0) < 0.6:
+        raise SystemExit("selftest failed: transition_cusum did not localize gold steps")
 
 
 def main() -> None:
@@ -732,6 +937,11 @@ def main() -> None:
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--ridge", type=float, default=1e-3)
     ap.add_argument("--obs", default=None, help="comma-separated transition observations; default auto-select")
+    ap.add_argument(
+        "--obs_grid",
+        default=None,
+        help="semicolon-separated transition obs sets, e.g. 'spread;spread,uncertainty;spread,anchor_loss,uncertainty'",
+    )
     ap.add_argument("--min_finite", type=int, default=50)
     ap.add_argument("--recovery_horizon", type=int, default=2)
     ap.add_argument("--high_spread_q", type=float, default=0.70)

@@ -472,3 +472,49 @@ python chain_dynamics_audit.py /path/to/full_gsm8k.npz --layer 14
 - 如果 high-spread subset 中 `transition_surprise` 或 `unanchored_divergence` 仍有效，才说明我们区分了“健康发散”和“错误发散”；
 - 如果只有 `spread` 有效，故事仍只是 κ/resultant 的复述；
 - 如果 online FPR/recall 曲线可用，才进入干预实验：不同状态触发 re-anchor、truncate/regenerate、verifier 或 StepFlow-style bridge。
+
+### 13.1 现阶段优化建议
+
+GSM8K 首次结果显示：整体上 `spread/resultant` 仍最强，但在 high-divergence subset 中 `transition_surprise` 明显超过单纯 `spread`。这说明链级动态方向有价值，但当前方法还只是第一版，需要先做以下优化，再考虑 HMM/HSMM/LRSM。
+
+| 问题 | 风险 | 当前优化 |
+|---|---|---|
+| 默认 transition model 太宽 | 多个 obs 同时进入导致支撑集变小，难判断哪一轴有效 | 加 `--obs_grid`，默认比较 `spread`, `spread+uncertainty`, `spread+anchor`, `spread+anchor+uncertainty`, `+jump` |
+| position 混杂 | `pos` 在 within-chain 中过强，CUSUM 天然随时间积累 | 给关键分数加 `*_resid_ctrl`，用 cross-fit 线性模型去掉 `logN/pos` |
+| 正确推理也会发散 | 全局 AUROC 可能只复述 κ/resultant | 单独报告 high-spread subset，检验“健康发散 vs 错误发散” |
+| online 与 offline 混用 | `next_recovery_*` 看未来，不能实时干预 | 输出分为 online causal scores 与 offline mechanism scores |
+| 方法过于手工 | 组合如 `z(spread)+z(anchor)` 只是粗读法 | 用 ablation 先确定有效轴，再升级到 latent state model |
+
+`chain_dynamics_audit.py` v2 的组织：
+
+```text
+1. 构造链级状态轴：
+   spread, d_spread, anchor_loss, uncertainty, confident/unanchored composites
+
+2. 多个健康转移模型并行：
+   y_t = A [y_{t-1}, logN_t, pos_t, 1] + noise
+   transition_surprise__<obs-set>
+
+3. 关键分数去混杂：
+   score_resid_ctrl = score - E(score | logN, pos)
+
+4. 三个读数表：
+   overall_features
+   high_spread_features
+   control_residual_features
+
+5. online risk curve：
+   per-chain FPR / recall / delay / early_warn
+```
+
+下一步若 v2 结果支持 dynamic axes，再进入 LRSM：
+
+```text
+z_t in {stable, healthy_explore, recovery, unanchored_drift, confident_wrong, post_error}
+p(z_t | z_{t-1})        # HMM/HSMM transition
+p(y_t | z_t)            # emission over spread/anchor/uncertainty/flow/spectrum
+alarm = P(bad state | y_<=t)
+intervention = state-conditioned action
+```
+
+如果 v2 仍然只剩 `spread/resultant` 有效，则不应升级复杂模型，应回到数据/信号抽取层面寻找更有机制性的 anchor 或 flow 信号。
