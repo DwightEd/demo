@@ -883,6 +883,41 @@ validation AUPR 大致在 0.31--0.50
 
 关于 fold：当前脚本默认 `--folds 5`，使用 GroupKFold；不是写死，可以改成 `--folds 3` 做 smoke。每个 outer fold 的 train 部分再按 group 随机切约 `--val_frac 0.15` 做 validation。
 
+完整 GSM8K 结果：
+
+```text
+===== hypergraph token HGN | full_gsm8k.npz =====
+chains 395 | error chains 205 | layers [10, 14, 18, 22]
+x_mode hidden_diag | hidden_form both | causal True
+
+oof_node_auroc        0.6905
+oof_node_aupr         0.3990
+oof_step_auroc        0.7602
+oof_step_aupr         0.3602
+oof_graph_auroc       0.6778
+oof_graph_aupr        0.6831
+oof_loc_top1          0.8539
+oof_loc_expected_top1 0.4629
+```
+
+解释：
+
+- `OOF` 表示每个样本只在自己所在 outer fold 的 held-out test split 上被预测，再把 5 个 fold 拼起来评估；不是训练集效果。
+- 训练目标只有 token-level `BCEWithLogitsLoss(pos_weight)`，并用 validation node AUPR early stopping；`step / graph / localization` 都不是训练目标，而是测试时从 token risk 聚合得到的评估。
+- `oof_node_auroc/aupr`：token 是否属于 gold first-error step 的风险预测。它最细，但标签噪声最大，因为 step 内所有 token 被同标。
+- `oof_step_auroc/aupr`：把一个 step 内 token risk max/mean pooling 成 step risk，再判断哪个 step 是 first-error。这是最贴近当前 first-error detection 的指标。
+- `oof_graph_auroc/aupr`：把整条链的 step risk 再取 max，判断这条链是否有错。它更像 chain-level detector，不是定位。
+- `oof_loc_top1`：在有错误链里，gold first-error step 的分数是否排第一。这个数高，说明模型会把风险集中到首错附近；但它不处理 correct chain，因此不能单独作为实时 detector 指标。
+
+结论：
+
+```text
+超图 HGN 的 step AUROC 约 0.76，localization top1 很高，但 node/graph 指标一般；
+考虑到 node_dim=32778、训练成本高、相对 anchor_uncertainty/sequence 标量增量有限，
+它暂不应作为论文主线。它的价值是证明 hidden token graph 中确实有可定位信息，
+但主线应转向更轻量、更可解释、可实时干预的 anchored-flow 机制。
+```
+
 ### 15.2 主线重新定义
 
 主线不再是“找更复杂模型”，而是验证一个更有机制感的命题：
@@ -957,3 +992,359 @@ python mainline_validation_suite.py --datasets gsm8k,math,omnimath --layers 10,1
 2. 如果 online alarm 可用但 AUROC 增量有限，优先做局部干预实验，而不是继续调 detector；
 3. 如果某数据集只靠 uncertainty 强，说明复杂题中模型“知道自己不稳”，要区分 uncertainty-aware failure 与 confident wrong failure；
 4. 若 residualized localization 仍强，再考虑 latent state model；否则 HMM/EM 只会把混杂包装成状态。
+
+---
+
+## 16. AAAI27 主线草案：AnchorFlow / Causal Anchor-Transport Field
+
+### 16.1 为什么不能停在现有标量
+
+目前起作用的量大致是：
+
+| 量 | 当前含义 | 问题 |
+|---|---|---|
+| `spread/resultant` | 当前 step token hidden 是否发散 | 正确困难推理也会发散；容易只是难度信号 |
+| `anchor_loss = 1 - cos(step_direction, qvec)` | step direction 是否偏离 prompt/question 基向量 | 只是单一 cosine，不能表达题设中的多个约束 |
+| `uncertainty / EDIS-like entropy` | 模型 logits 是否不稳定或没把握 | EDIS 等前人已经做了动态不确定性；且 confident wrong 会漏 |
+| `transition_surprise` | 当前状态转移是否不像正确链 | 目前只是一阶 Gaussian/Markov residual |
+| `CUSUM` | 在线累计异常 | 是报警机制，不是推理机制 |
+| `hypergraph HGN` | 从 token hidden graph 学 risk | 结果有定位信息，但成本高、增量不足 |
+
+因此论文不能写成“我们组合了一堆标量”。更好的定位是：这些标量只是一个更高阶对象的投影读数。
+
+### 16.2 核心命题
+
+```text
+Reasoning errors emerge as online breaks in a prompt-anchored transport field.
+
+错误推理不是 uncertainty/spread/anchor_loss 单独变大，
+而是当前生成轨迹与题目约束锚点之间的连通性发生相变：
+正确困难推理可以发散，但仍会在题设约束之间传输、回锚和恢复；
+错误推理则表现为 anchor mass collapse、constraint detachment、
+wrong-anchor takeover 或 transition break。
+```
+
+工作名暂定：
+
+```text
+AnchorFlow
+或
+CAPF: Causal Anchor-Transport Phase Field
+```
+
+### 16.3 相关工作定位
+
+已调研到的相邻工作：
+
+| 工作 | 它做什么 | 我们避开的同质化 | 我们可接住的空白 |
+|---|---|---|---|
+| EDIS: Diagnosing LLM Reasoning via Entropy Dynamics | token entropy 的 burst/peak-valley/variance，trajectory-level reasoning quality | 不复刻 entropy spike score | 做 first-error / boundary-level hidden geometry break，尤其 confident-wrong |
+| Reasoning Fails Where Step Flow Breaks / StepFlow | attention-gradient step saliency，发现 Shallow Lock-in / Deep Decay，并 test-time repair | 不直接照搬 step-saliency/OEB/SMI | 用 prompt anchors + hidden transport 解释“哪类约束断流”，并做局部 repair |
+| Lookback Lens | attention lookback ratio 检测上下文幻觉 | 不只用 attention ratio 当分类器 | 把 attention lookback 作为 anchor transport 的一个观测通道 |
+| ProcessBench / PRM | 监督式 step first-error 或 step reward | 不训练普通 PRM 复述标签 | 用 hidden/attention/logit 在线信号定位首错，PRM 只作 evaluator/verifier |
+| Thought-ICS | 强制 thought boundary 后 self-localize + backtrack resample | 不依赖人工 step prompt | 做 boundary-free latent phase discovery，再局部 replay |
+| MTI / CCD | 高熵/低置信 token 上做 test-time intervention | 不把高熵 token 当唯一触发器 | 设计 dual trigger：uncertainty trigger + anchor-flow break trigger |
+| PRISM | semantic flow + hidden latent regime 的诊断 | 不停在事后诊断 | 加在线报警和局部干预闭环 |
+
+这条线的差异化：从“标量异常检测”转成“prompt-relative structured field + boundary-free discovery + targeted repair”。
+
+### 16.4 数学对象
+
+从 prompt 中抽取 anchor 集合：
+
+```text
+A = {a_1, ..., a_K}
+```
+
+anchor 类型：
+
+```text
+entity/value anchor       数字、实体、变量
+constraint anchor         条件、限制、否定词
+operator anchor           比较、加减乘除、计数、比例、递推关系
+target anchor             最终问题目标
+commitment anchor         前面已生成并被认为稳定的中间结论
+```
+
+对生成到 token/window `t` 的 hidden states：
+
+```text
+X_t^l = [h_{t-w}^l, ..., h_t^l]
+```
+
+构造 hidden 到 anchor 的传输矩阵：
+
+```text
+C_ij^l(t) = 1 - cos(W_h h_i^l, W_a a_j^l)
+Pi_t^l = Sinkhorn(C_t^l, epsilon)
+z_t^l = colsum(Pi_t^l) in Delta^K
+```
+
+解释：
+
+```text
+Pi_t^l    当前 token/window 的表示质量如何分配到题设 anchors
+z_t^l     当前推理状态在 anchor simplex 上的位置
+G_t       anchor-anchor co-activation graph
+C_t       anchor complex / topology，表示哪些约束被共同激活
+```
+
+已有标量变成投影：
+
+```text
+spread              hidden cloud 的局部体积投影
+anchor_loss          K=1 的退化 anchor transport
+uncertainty/EDIS     logits 侧的不稳定投影
+transition_surprise  z_t / G_t 动力学残差的粗近似
+CUSUM                phase break 的报警器，而不是机制本身
+```
+
+### 16.5 算法模块
+
+**A. Prompt Anchor Parser**
+
+MVP 先用规则 + LLM parser：
+
+```text
+输入：question / prompt
+输出：anchor spans, anchor roles, anchor text, token indices
+```
+
+后续可训练轻量 tagger。必须保存 anchor 到 prompt token span 的映射，方便 attention lookback 和 intervention。
+
+**B. Anchor Transport Encoder**
+
+输入：
+
+```text
+per-token hidden states
+prompt anchor hidden states
+optional attention maps
+logits / entropy traces
+```
+
+输出：
+
+```text
+Pi_t, z_t, anchor coverage, anchor entropy,
+constraint detachment, wrong-anchor takeover,
+anchor transition residual, topology break score
+```
+
+MVP 不必先上神经网络，可先用 Sinkhorn/softmax cosine transport + 手工 phase metrics。
+
+**C. Boundary-Free Phase Discovery**
+
+不用强制输出 Step 1/2/3，在自然 token 流上做 change point：
+
+```text
+phase_jump_t =
+  ||z_t - z_{t-1}||
+  + graph_distance(G_t, G_{t-1})
+  + topo_break(C_t, C_{t-1})
+  + hidden_transition_residual_t
+```
+
+已有 `step_token_ranges` 只作为 evaluation，不用于发现边界。
+
+**D. Dual-Trigger Online Detector**
+
+两类触发器：
+
+```text
+uncertainty trigger:
+  entropy/EDIS/logit evidence 发现局部不确定
+
+anchor-flow trigger:
+  anchor coverage 下降、constraint detachment、transition break、
+  confident wrong = anchor-flow break with low entropy
+```
+
+检测输出不是单一 risk，而是状态：
+
+```text
+healthy_exploration
+grounded_compression
+unanchored_drift
+confident_wrong
+transition_break
+recovery
+```
+
+**E. Targeted Local Repair**
+
+不要整条重跑，做局部干预：
+
+```text
+prompt repair:
+  在当前边界插入短 re-anchor prompt，重申缺失约束/目标
+
+micro-replay:
+  从最近 clean latent boundary 生成 2-4 个短 continuation，只替换局部 step
+
+attention repair:
+  提高当前 token 对关键 anchor span 的 lookback / KV contribution
+
+hidden repair:
+  将当前 hidden 朝缺失 anchor subspace 做小幅 steering
+
+verifier repair:
+  只验证当前 latent segment，而不是整条 CoT
+```
+
+核心评价不只是 AUROC，而是：
+
+```text
+wrong-to-right flip rate
+correct-to-wrong damage rate
+token overhead
+repair scope length
+early warning delay
+```
+
+### 16.6 实验设计
+
+**实验 1：AnchorFlow 是否超过现有标量**
+
+对比：
+
+```text
+spread/resultant
+anchor_loss cosine
+uncertainty / EDIS
+transition_surprise
+scalar fusion / sequence_state
+hypergraph HGN
+AnchorFlow metrics
+```
+
+指标：
+
+```text
+step first-error AUROC/AUPR
+within-chain first-error top1
+residualized localization after logN/pos
+high-spread subset AUROC
+confident-wrong subset AUROC
+cross-dataset transfer
+```
+
+**实验 2：Entropy spike vs Geometry break 对齐**
+
+目标：证明不是 EDIS 复刻。
+
+```text
+在错误链上对齐 gold first-error step/token boundary；
+比较 EDIS spike、entropy mean、anchor-flow break、hidden transition residual 谁更早/更准；
+重点筛 confident-wrong: low entropy but wrong。
+```
+
+**实验 3：Boundary-free step discovery**
+
+不用 step label 切分，只用 token trajectory 的 phase break：
+
+```text
+boundary F1 / tolerance-hit
+phase purity
+与人工 step_token_ranges 的 mutual information
+first-error token interval overlap
+```
+
+**实验 4：Counterfactual step injection**
+
+从正确 CoT 中注入微错误：
+
+```text
+number swap
+operator swap
+constraint deletion
+wrong intermediate value
+```
+
+看 anchor-flow break 是否锁定注入点，避免只做自然错误相关性。
+
+**实验 5：局部干预闭环**
+
+在 detector 标记的位置做 repair：
+
+```text
+random repair
+highest entropy repair
+highest anchor_loss repair
+highest CUSUM repair
+StepFlow-style saliency repair
+AnchorFlow repair
+```
+
+报告：
+
+```text
+final accuracy gain
+wrong-to-right flip rate
+correct-to-wrong damage
+tokens per solved improvement
+repair locality
+```
+
+### 16.7 消融
+
+必要消融：
+
+```text
+full AnchorFlow
+no multi-anchor: 单 qvec cosine
+no transport: independent anchor cosines
+no topology: 只用 z_t，不用 G_t/C_t
+no attention lookback
+no logits/EDIS
+no transition dynamics
+no boundary-free discovery: 使用人工 step boundary
+no causal repair: 只检测不干预
+random anchors
+wrong anchors / shuffled prompt anchors
+```
+
+最关键的判据：
+
+```text
+如果 no topology 后 early-warning 下降，说明不是 anchor_loss 的复杂包装；
+如果 no causal repair 后 detection 还行但 intervention 失败，说明因果干预是独立贡献；
+如果 random anchors 接近 full，则 anchor parser/transport 没有机制意义，必须重做。
+```
+
+### 16.8 最小可行版本
+
+MVP 不需要一开始实现所有复杂模块：
+
+```text
+1. anchor parser:
+   规则/LLM 抽取 numbers/entities/goal/conditions
+
+2. transport:
+   用已有 hidden shards + anchor span hidden 计算 cosine/Sinkhorn transport
+
+3. metrics:
+   anchor coverage, anchor entropy, target mass, constraint detachment,
+   transition residual, phase break
+
+4. validation:
+   接入 mainline_validation_suite，比较 anchor_uncertainty / sequence_state / AnchorFlow
+
+5. intervention:
+   先做 prompt repair 和 micro-replay，不做 hidden/attention steering
+```
+
+MVP 成功条件：
+
+```text
+step AUROC 相对 anchor_uncertainty 或 sequence_state 稳定 +0.03；
+confident-wrong subset 有明显增量；
+boundary-free phase break 能恢复 step boundary；
+prompt repair 在 flagged wrong traces 上显著高于 random/high-entropy repair。
+```
+
+如果检测增量不足但干预有效，也可以把论文定位成：
+
+```text
+not a better score, but a better intervention trigger.
+```
