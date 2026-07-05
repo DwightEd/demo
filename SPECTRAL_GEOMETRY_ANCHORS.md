@@ -1574,3 +1574,214 @@ single qvec anchor + raw cloud_V volume + hand-written z-score formula
             length-residualized anchored logdet/effective-rank, phase break
   validation = residualized AUROC + within-chain residual localization + online alarm + prompt repair
 ```
+
+---
+
+## 18. AnchorFlow v1 代码启动：multi-anchor transport scaffold
+
+新增代码：
+
+```text
+anchorflow/
+  data.py
+  anchors.py
+  anchor_repr.py
+  transport.py
+  eval.py
+  residualize.py
+
+anchorflow_anchor_audit.py
+
+tests/test_anchorflow_anchors.py
+tests/test_anchorflow_transport.py
+tests/test_anchorflow_residualize.py
+```
+
+第一版目标：
+
+```text
+不再继续在旧 audit 脚本里堆标量；
+先把 multi-anchor transport field 的数据流、消融和评估协议搭起来。
+```
+
+### 18.1 当前实现
+
+`anchorflow/data.py`：
+
+```text
+读取 full_*.npz；
+构造 Trace；
+保留 stepvec/qvec/steps_text/step_token_ranges/logN/pos/spread/anchor_loss/U_D_mean；
+默认 post-error mask；
+按 problem_id 做 group-aware evaluation。
+```
+
+`anchorflow/anchors.py`：
+
+```text
+规则解析 prompt anchors:
+  goal
+  number
+  entity
+  constraint
+```
+
+如果当前 npz 没有 prompt text，则使用 fallback anchors，并在结果中显式标记。
+
+`anchorflow/anchor_repr.py`：
+
+```text
+当前没有 prompt-span hidden 时：
+  使用 qvec partition fallback anchor bank
+
+这只是 plumbing/ablation scaffold；
+不能作为 semantic AnchorFlow claim。
+```
+
+`anchorflow/transport.py`：
+
+```text
+step hidden -> anchor bank softmax transport
+
+输出：
+  af_anchor_entropy
+  af_anchor_coverage
+  af_goal_mass / af_number_mass / af_constraint_mass / af_core_mass
+  af_detach / af_core_detach
+  af_transport_jump
+  af_phase_score / af_phase_cusum
+```
+
+`anchorflow_anchor_audit.py` 同时跑：
+
+```text
+real/fallback AnchorFlow
+random anchors
+shuffled-kind anchors
+anchor_uncertainty baseline
+residualized-over-[logN,pos] feature table
+high-spread subset
+confident/low-entropy subset
+within-chain localization
+OOF group AUROC + cluster bootstrap increment
+```
+
+### 18.2 本地验证
+
+已通过：
+
+```bash
+python -m py_compile anchorflow\__init__.py anchorflow\data.py anchorflow\anchors.py anchorflow\anchor_repr.py anchorflow\transport.py anchorflow\eval.py anchorflow\residualize.py anchorflow_anchor_audit.py
+python -m pytest tests\test_anchorflow_anchors.py tests\test_anchorflow_transport.py tests\test_anchorflow_residualize.py -q
+python anchorflow_anchor_audit.py --help
+python anchorflow_anchor_audit.py --selftest --output_dir outputs/anchorflow_anchor_selftest --folds 3 --n_boot 20 --top 12
+```
+
+本地 selftest 结果：
+
+```text
+bank modes: {'q_partition_fallback': 90}
+anchor stats: 4 fallback anchors per chain
+anchor_uncertainty AUROC 1.000
+transport_only AUROC 1.000
+random_transport AUROC 0.939
+shuffled_kind_transport AUROC 1.000
+```
+
+解释：
+
+```text
+selftest 只说明代码链路、OOF、消融输出正常；
+synthetic 数据中 q_align/spread/entropy 本来就是注入强信号，不能视为真实研究结果。
+
+shuffled-kind_transport 没降，说明 fallback anchors 没有语义 kind；
+这是预期结果，也再次说明：真正的 AnchorFlow 必须补 prompt text + prompt-span hidden anchor。
+```
+
+### 18.3 远端第一轮命令
+
+先 smoke：
+
+```bash
+cd /gz-data/research/demo
+git pull
+
+python anchorflow_anchor_audit.py \
+  --dataset gsm8k \
+  --data_dir /gz-data/research/demo/data \
+  --hidden_dir /gz-data/research/demo/data/hidden \
+  --layer 14 \
+  --max_chains 120 \
+  --folds 3 \
+  --n_boot 50 \
+  --output_dir outputs/anchorflow_smoke
+```
+
+正式 L14：
+
+```bash
+for d in gsm8k math omnimath; do
+  python anchorflow_anchor_audit.py \
+    --dataset $d \
+    --data_dir /gz-data/research/demo/data \
+    --hidden_dir /gz-data/research/demo/data/hidden \
+    --layer 14 \
+    --folds 5 \
+    --n_boot 200 \
+    --output_dir outputs/anchorflow_l14
+done
+```
+
+多层：
+
+```bash
+for d in gsm8k math omnimath; do
+  for l in 10 14 18 22; do
+    python anchorflow_anchor_audit.py \
+      --dataset $d \
+      --data_dir /gz-data/research/demo/data \
+      --hidden_dir /gz-data/research/demo/data/hidden \
+      --layer $l \
+      --folds 5 \
+      --n_boot 200 \
+      --output_dir outputs/anchorflow_layers
+  done
+done
+```
+
+### 18.4 结果判读
+
+当前 v1 的最低成功线：
+
+```text
+transport_plus_anchor_uncertainty > anchor_uncertainty
+且 random_transport / shuffled-kind_transport 明显下降。
+```
+
+如果 `bank_modes` 仍全是 `q_partition_fallback`：
+
+```text
+这轮只能算 scaffold validation；
+不能写 semantic prompt-anchor claim。
+下一步必须补 prompt 原文、token offsets、prompt-span hidden vectors。
+```
+
+如果真实 prompt anchors 可用且：
+
+```text
+real AnchorFlow > random/shuffled anchors
+residualized feature table 仍有增量
+high-spread/confident subset 有优势
+```
+
+才继续推进 phase / online / intervention。
+
+### 18.5 后续优化建议
+
+```text
+1. 把 prompt/question 文本写入 full_*.npz，或在 audit 中按 problem_id 重建 prompt；
+2. 保存 tokenizer offset mapping 或 prompt token span；
+3. 用 prompt-span hidden mean 替代 q_partition_fallback；
+4. 加 anchored information volume，但只在 transport anchors 真实可用后做；
+5. 在 phase_audit 前先做 random/shuffled anchor kill test。
+```
