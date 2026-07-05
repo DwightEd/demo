@@ -20,6 +20,7 @@ import json
 import math
 import os
 import tempfile
+import time
 from types import SimpleNamespace
 from typing import Dict, Iterable, List, Optional, Sequence
 
@@ -236,10 +237,11 @@ def write_markdown(path: str, summaries: Sequence[Dict]) -> None:
 
 
 def print_summary(summaries: Sequence[Dict]) -> None:
-    print("\n===== mainline validation suite =====")
+    print("\n===== mainline validation suite =====", flush=True)
     print(
         f"{'dataset':10s} {'L':>3s} {'anchor':>7s} {'seq':>7s} {'inc':>8s} "
-        f"{'high-spread':>18s} {'loc+':>7s} {'alarm':>24s} {'recommendation':>30s}"
+        f"{'high-spread':>18s} {'loc+':>7s} {'alarm':>24s} {'recommendation':>30s}",
+        flush=True,
     )
     for s in summaries:
         alarm = s.get("online_alarm", {}) or {}
@@ -252,7 +254,8 @@ def print_summary(summaries: Sequence[Dict]) -> None:
             f"{s['sequence_state_increment']:+8.3f} "
             f"{str(s.get('best_high_spread_feature') or '-')[:18]:>18s} "
             f"{s['best_residual_loc_gain']:+7.3f} "
-            f"{alarm_txt[:24]:>24s} {s['recommendation']:>30s}"
+            f"{alarm_txt[:24]:>24s} {s['recommendation']:>30s}",
+            flush=True,
         )
 
 
@@ -263,15 +266,38 @@ def run_suite(args: argparse.Namespace) -> Dict[str, object]:
 
     full_results: Dict[str, object] = {}
     summaries: List[Dict] = []
+    partial_json_path = os.path.join(args.output_dir, "mainline_validation_partial.json")
+    partial_md_path = os.path.join(args.output_dir, "mainline_validation_partial.md")
     for dataset in datasets:
         for layer in layers:
             npz = resolve_npz(args.data_dir, dataset)
             chain_args = make_chain_args(args, dataset=dataset, layer=layer)
-            print(f"\n[mainline] running {dataset} L{layer}: {npz}")
+            t0 = time.time()
+            print(f"\n[mainline] running {dataset} L{layer}: {npz}", flush=True)
             res = run_chain_dynamics(npz, chain_args)
             key = f"{dataset}_L{layer}"
             full_results[key] = res
-            summaries.append(summarize_result(dataset, layer, res, max_fpr=args.max_alarm_fpr))
+            summary = summarize_result(dataset, layer, res, max_fpr=args.max_alarm_fpr)
+            summaries.append(summary)
+            print(f"[mainline] finished {dataset} L{layer} in {time.time() - t0:.1f}s", flush=True)
+            print_summary([summary])
+            partial = {
+                "meta": {
+                    "datasets": datasets,
+                    "layers": layers,
+                    "data_dir": args.data_dir,
+                    "folds": args.folds,
+                    "max_chains": args.max_chains,
+                    "max_alarm_fpr": args.max_alarm_fpr,
+                    "partial": True,
+                },
+                "summaries": summaries,
+                "results": full_results if args.keep_full_results else {},
+            }
+            with open(partial_json_path, "w", encoding="utf-8") as fh:
+                json.dump(finite_json(partial), fh, indent=2, ensure_ascii=False)
+            write_markdown(partial_md_path, summaries)
+            print(f"[mainline] partial saved: {partial_json_path}", flush=True)
 
     out = {
         "meta": {
