@@ -863,3 +863,97 @@ local selftest/train not run: Windows env has no torch; run on GPU server
 2. 若有增量，再扩展到 MATH / OmniMath，检查是否在困难集更明显；
 3. 若只有 graph AUROC 提升而 step/localization 不升，说明超图模型学到的是难度，不是动态推理失败；
 4. 若 causal 模型有效，再接入在线干预；若只有 non-causal 有效，只能作为事后分析或 verifier。
+
+---
+
+## 15. 回到主线：轻量 reasoning-flow 验证套件
+
+### 15.1 超图支线的阶段性判断
+
+`hypergraph_token_hgn.py` 的完整训练版已经能跑起来，但从 GSM8K 前几折看，收益和代价不匹配：
+
+```text
+node_dim = 32778
+fold validation node AUROC 大致在 0.70--0.80
+validation AUPR 大致在 0.31--0.50
+训练时间显著高于标量/序列方法
+```
+
+这说明超图模型目前更像一个重型读法，而不是主线 detector。它可以保留为上界或辅助诊断，但不应继续围绕它做主要叙事。尤其如果 step-level / within-chain localization 没有明显超过 `anchor_uncertainty`，就不能声称它挖到了新的动态推理机制。
+
+关于 fold：当前脚本默认 `--folds 5`，使用 GroupKFold；不是写死，可以改成 `--folds 3` 做 smoke。每个 outer fold 的 train 部分再按 group 随机切约 `--val_frac 0.15` 做 validation。
+
+### 15.2 主线重新定义
+
+主线不再是“找更复杂模型”，而是验证一个更有机制感的命题：
+
+```text
+推理失败不是单纯的 hidden spread 变大，
+而是 constraint-grounded flow 在在线生成过程中发生断裂：
+正确困难推理可以发散，但它应保持题设锚定、可恢复、且状态转移像健康推理；
+错误推理则表现为 unanchored drift / confident wrong / transition break。
+```
+
+现有 `anchor_loss = 1 - cosine(step_direction, qvec)` 只是最低阶近似。它有效说明方向对了，但太粗；后续应升级为多约束 anchor field、attention/logit traces、latent boundary 与局部干预。
+
+### 15.3 新增验证脚本
+
+新增：
+
+```text
+mainline_validation_suite.py
+```
+
+它复用 `chain_dynamics_audit.py` 的核心统计，不重复造指标，只做统一批量验证和摘要。每个 dataset/layer 输出：
+
+```text
+anchor_uncertainty AUROC
+sequence_state AUROC
+sequence_state over anchor_uncertainty 的 OOF cluster-bootstrap increment
+dynamic_online / transition_ablation 增量
+high-spread subset 中最强特征
+residualized localization gain
+online alarm 在指定 FPR 下的 recall / delay
+recommendation: promote_sequence_state / intervention_ready / do_not_overfit / needs_signal_redesign
+```
+
+成功判据：
+
+1. `sequence_state` 若不能稳定超过 `anchor_uncertainty`，不要急着上 HMM/超图/大模型；
+2. high-spread subset 必须能区分健康发散与错误发散，否则只是复述 κ/resultant；
+3. residualized localization 必须去掉 `logN/pos` 后仍有 gain；
+4. online alarm 必须报告 FPR、recall、delay，不能只报 step AUROC；
+5. 若 detection 增量有限，应把创新集中到 constraint anchor field 与局部干预，而不是继续堆分类器。
+
+### 15.4 运行命令
+
+本地自测：
+
+```bash
+python mainline_validation_suite.py --selftest --output_dir outputs/mainline_validation_selftest --n_boot 30 --folds 3
+```
+
+远端主线 smoke：
+
+```bash
+python mainline_validation_suite.py --datasets gsm8k --layers 14 --data_dir /gz-data/research/demo/data --max_chains 120 --folds 3 --n_boot 50 --output_dir outputs/mainline_validation_smoke
+```
+
+远端正式验证：
+
+```bash
+python mainline_validation_suite.py --datasets gsm8k,math,omnimath --layers 14 --data_dir /gz-data/research/demo/data --folds 5 --n_boot 200 --keep_full_results --output_dir outputs/mainline_validation
+```
+
+多层稳健性：
+
+```bash
+python mainline_validation_suite.py --datasets gsm8k,math,omnimath --layers 10,14,18,22 --data_dir /gz-data/research/demo/data --folds 5 --n_boot 200 --keep_full_results --output_dir outputs/mainline_validation_layers
+```
+
+下一步优化：
+
+1. 如果 `sequence_state` 没有显著增量，转向 signal redesign：multi-anchor hidden geometry、attention lookback、logit/loss trace、verifier trace；
+2. 如果 online alarm 可用但 AUROC 增量有限，优先做局部干预实验，而不是继续调 detector；
+3. 如果某数据集只靠 uncertainty 强，说明复杂题中模型“知道自己不稳”，要区分 uncertainty-aware failure 与 confident wrong failure；
+4. 若 residualized localization 仍强，再考虑 latent state model；否则 HMM/EM 只会把混杂包装成状态。
