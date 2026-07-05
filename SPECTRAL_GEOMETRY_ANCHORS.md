@@ -1785,3 +1785,85 @@ high-spread/confident subset 有优势
 4. 加 anchored information volume，但只在 transport anchors 真实可用后做；
 5. 在 phase_audit 前先做 random/shuffled anchor kill test。
 ```
+
+### 18.6 L14 真实数据结果：fallback AnchorFlow 没有新增量
+
+远端已跑三数据集 L14：
+
+```text
+gsm8k, math, omnimath
+bank_modes: {'q_partition_fallback': all chains}
+anchor stats: exactly 4 fallback anchors per chain
+```
+
+OOF group summary：
+
+| dataset | anchor_uncertainty | transport_only | inc | transport_plus_anchor_uncertainty | inc | random_transport | shuffled_kind_transport |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| GSM8K | 0.811 | 0.766 | -0.045 SIG | 0.813 | +0.002 ns | 0.709 | 0.760 |
+| MATH | 0.781 | 0.715 | -0.066 SIG | 0.785 | +0.003 ns | 0.683 | 0.715 |
+| OmniMath | 0.809 | 0.744 | -0.065 SIG | 0.810 | +0.001 ns | 0.730 | 0.744 |
+
+结果分析：
+
+```text
+1. transport_only 显著弱于 anchor_uncertainty；
+2. transport_plus_anchor_uncertainty 基本等于 baseline，增量为 +0.001--+0.003 且 ns；
+3. random_transport 明显更差，说明 stepvec/qvec-derived transport scaffold 不是纯随机；
+4. shuffled_kind_transport 与 transport_only 几乎一致，说明当前 fallback anchors 没有真实 kind semantics；
+5. high-spread 和 confident/low-entropy subset 里，主要仍是 spread/logN/U_D_mean 起作用；
+6. residualized-over-[logN,pos] 后，U_D_mean 最稳，AnchorFlow fallback 特征明显变弱；
+7. localization 中 pos top1=1.0，phase_cusum 的高 top1 不能解释为真实相变定位。
+```
+
+核心判断：
+
+```text
+新的 fallback transport 尝试作为 detector 失败；
+但它没有证伪真正 AnchorFlow，因为这一轮根本没有 prompt semantic anchors。
+```
+
+更准确的表述是：
+
+```text
+q_partition_fallback transport = qvec 的结构化重包装；
+它能从 hidden direction 中读到一点非随机信息，
+但没有超过 spread/entropy/anchor_uncertainty baseline，
+也没有通过 shuffled-kind semantic kill test。
+```
+
+保留下来的可用发现：
+
+```text
+1. spread/resultant 仍是最稳定的 geometry base signal；
+2. U_D_mean 在 residualized 和 high-spread subset 中比预期更强，EDIS-style uncertainty 不能被忽略；
+3. anchor_uncertainty 的强度主要来自 spread + uncertainty + q_align 的组合，而不是多 anchor 机制；
+4. random_transport 下降说明 token hidden direction 里确实有结构，但目前读法不够语义化；
+5. pos 偏置极强，任何 phase/localization claim 必须 residualize 或改用 early-warning/delay 评估。
+```
+
+后续研究方向：
+
+```text
+不要继续优化 q_partition_fallback。
+下一步必须先补数据/抽取：
+  prompt/question text
+  tokenizer offsets
+  prompt token span
+  prompt-span hidden vectors per anchor
+
+只有真实 anchor vectors 可用后，才重新跑：
+  real AnchorFlow vs random anchors vs shuffled anchors
+  real AnchorFlow vs single qvec
+  numbers-only / constraints-only / goal-only ablation
+```
+
+优化建议：
+
+```text
+1. 在 extract_features.py 的 npz 中保存 question/prompt；
+2. 保存 prompt token boundary a0 和 offset mapping，至少保存 anchor token spans；
+3. 新增 anchorflow_prompt_extract.py 或扩展 extract_features.py，输出 prompt anchor hidden bank；
+4. 在 anchorflow_anchor_audit.py 中把 bank_mode=q_partition_fallback 标为 scaffold-only；
+5. 下一版若 shuffled-kind 仍不降，立刻停止 AnchorFlow semantic claim。
+```
