@@ -58,11 +58,11 @@ Before building heavier models, run the new data audit:
 
 ```bash
 python multisample_data_audit.py \
-  --input /gz-data/research/demo/data/features/gsm8k_v2_5shot.npz \
+  --input /gz-data/research/demo/data/gsm8k_v2_5shot.npz \
   --output_dir outputs/multisample_data_audit
 
 python multisample_data_audit.py \
-  --input /gz-data/research/demo/data/features/gsm8k_v2_custom.npz \
+  --input /gz-data/research/demo/data/gsm8k_v2_custom.npz \
   --output_dir outputs/multisample_data_audit
 ```
 
