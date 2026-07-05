@@ -98,6 +98,13 @@ Read this audit as follows:
 - If a local score does survive, inspect its `argpos_error` and `argpos_correct`.  A useful intervention trigger should not simply fire late in every chain.
 - Because the same-problem data only has final-answer labels, this audit can establish whether a rupture signature exists, but cannot prove that the rupture aligns with the true first wrong step.
 
+Current temporal audit finding:
+
+- On `gsm8k_v2_5shot.npz` under `answer_format_ok`, the strongest local-looking score is `vec_norm_mid.contrast_max` with within-problem AUROC 0.646, but its median argpos is late for both error and correct chains (`0.80` vs `0.75`).  This is not a clean online rupture signal.
+- On `gsm8k_v2_custom.npz` under `answer_format_ok`, the strongest scores are still static cloud spread/resultant levels: `cloud_spread.level_late` within 0.659 and `cloud_spread.level_max` within 0.639.  The local contrast version `cloud_spread.contrast_max` drops to 0.579, and multi-channel rupture scores do not help.
+- Several apparent dynamic scores point in the wrong direction or fire at the end of both correct and error chains, e.g. `abs_zjump_max` / `multi.zcontrast_l2_max` with argpos near `1.00`.  Treat these as endpoint/length artifacts, not first-failure detectors.
+- Conclusion: with the currently saved same-problem signals, there is weak same-problem static separation but no robust evidence of an abrupt local transition.  The current signal family should not be presented as a dynamic rupture detector.
+
 For future data extraction, preserve the single-forward confidence traces:
 
 ```bash
