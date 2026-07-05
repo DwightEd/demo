@@ -243,12 +243,54 @@ def _obj_get(arr: object, i: int, default: object = None) -> object:
         return default
 
 
-def _hidden_path(hidden_dir: Optional[str], hidden_files: Optional[np.ndarray], ids: np.ndarray, i: int) -> str:
+def _hidden_candidates(
+    hidden_dir: Optional[str],
+    hidden_files: Optional[np.ndarray],
+    ids: np.ndarray,
+    i: int,
+    dataset: str,
+) -> List[str]:
+    roots = [hidden_dir or ""]
+    if dataset and hidden_dir:
+        roots.append(os.path.join(hidden_dir, dataset))
+    names: List[str] = []
     if hidden_files is not None:
         raw = str(_obj_get(hidden_files, i, ""))
         if raw:
-            return raw if os.path.isabs(raw) else os.path.join(hidden_dir or "", raw)
-    return os.path.join(hidden_dir or "", _fn(_obj_get(ids, i, i)))
+            names.append(raw)
+            if not os.path.isabs(raw) and dataset:
+                names.append(os.path.join(dataset, raw))
+    cid = _obj_get(ids, i, i)
+    names.extend([_fn(cid)])
+    if dataset:
+        names.append(f"{dataset}-{i}.npy")
+    names.append(f"{i}.npy")
+
+    out: List[str] = []
+    for nm in names:
+        if os.path.isabs(nm):
+            cand = nm
+            if cand not in out:
+                out.append(cand)
+            continue
+        for root in roots:
+            cand = os.path.join(root, nm)
+            if cand not in out:
+                out.append(cand)
+    return out
+
+
+def _hidden_path(
+    hidden_dir: Optional[str],
+    hidden_files: Optional[np.ndarray],
+    ids: np.ndarray,
+    i: int,
+    dataset: str,
+) -> Optional[str]:
+    for p in _hidden_candidates(hidden_dir, hidden_files, ids, i, dataset):
+        if os.path.exists(p):
+            return p
+    return None
 
 
 def _per_step_mean(values: Optional[np.ndarray], ranges: np.ndarray) -> np.ndarray:
@@ -269,6 +311,7 @@ def load_rows(
     npz_path: str,
     *,
     hidden_dir: Optional[str],
+    dataset: str = "",
     layer: int,
     max_chains: int = 0,
     min_tokens: int = 2,
@@ -301,10 +344,13 @@ def load_rows(
     n = len(ges) if not max_chains else min(int(max_chains), len(ges))
     rows: List[StepRow] = []
     skipped = {"missing_hidden": 0, "bad_hidden": 0, "short_step": 0, "post_error": 0}
+    missing_examples: List[List[str]] = []
     for i in range(n):
-        path = _hidden_path(hidden_dir, hidden_files, ids, i)
-        if not os.path.exists(path):
+        path = _hidden_path(hidden_dir, hidden_files, ids, i, dataset)
+        if path is None:
             skipped["missing_hidden"] += 1
+            if len(missing_examples) < 3:
+                missing_examples.append(_hidden_candidates(hidden_dir, hidden_files, ids, i, dataset)[:6])
             continue
         try:
             Hfull = np.load(path, mmap_mode="r")
@@ -374,12 +420,14 @@ def load_rows(
     meta = {
         "npz": npz_path,
         "hidden_dir": hidden_dir,
+        "dataset": dataset,
         "requested_layer": int(layer),
         "used_layer": int(used_layer),
         "n_chains_requested": int(n),
         "n_rows": len(rows),
         "n_error_rows": int(sum(r.y for r in rows)),
         "skipped": skipped,
+        "missing_hidden_examples": missing_examples,
         "has_qvec": qvec is not None,
         "has_tok_U_D": tok_ud is not None,
         "has_precomputed_resultant": ri is not None,
@@ -800,7 +848,14 @@ def main() -> None:
             if not args.dataset:
                 raise SystemExit("pass --npz, --dataset, or --selftest")
             npz = os.path.join(args.data_dir, "features", f"full_{args.dataset}.npz")
-        rows, meta = load_rows(npz, hidden_dir=args.hidden_dir, layer=args.layer, max_chains=args.max_chains, min_tokens=args.min_tokens)
+        rows, meta = load_rows(
+            npz,
+            hidden_dir=args.hidden_dir,
+            dataset=args.dataset or "",
+            layer=args.layer,
+            max_chains=args.max_chains,
+            min_tokens=args.min_tokens,
+        )
         if not rows:
             raise SystemExit(f"no rows loaded; check hidden_dir/npz. meta={meta}")
         stem = f"sphere_geometry_{args.dataset or os.path.splitext(os.path.basename(npz))[0]}_L{args.layer}"

@@ -158,7 +158,7 @@ for d in gsm8k math omnimath; do
   python sphere_geometry_audit.py \
     --dataset $d \
     --data_dir /gz-data/research/demo/data \
-    --hidden_dir /gz-data/research/demo/data/hidden \
+    --hidden_dir /gz-data/research/demo/data/hidden/$d \
     --layer 14 \
     --folds 5 \
     --n_boot 200 \
@@ -174,7 +174,7 @@ for d in gsm8k math omnimath; do
     python sphere_geometry_audit.py \
       --dataset $d \
       --data_dir /gz-data/research/demo/data \
-      --hidden_dir /gz-data/research/demo/data/hidden \
+      --hidden_dir /gz-data/research/demo/data/hidden/$d \
       --layer $l \
       --folds 5 \
       --n_boot 200 \
