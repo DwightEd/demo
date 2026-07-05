@@ -1039,6 +1039,7 @@ def run(args: argparse.Namespace) -> Dict[str, object]:
             "top_k": int(args.top_k),
             "temporal_radius": int(args.temporal_radius),
             "local_radius": int(args.local_radius),
+            "residual_mp": bool(not args.no_residual_mp),
             "device": str(device),
             "original_implementation": inspect_original_implementation(),
         },
@@ -1156,6 +1157,7 @@ def main() -> None:
     ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--hidden_dim", type=int, default=128)
     ap.add_argument("--gnn_layers", type=int, default=2)
+    ap.add_argument("--no_residual_mp", action="store_true")
     ap.add_argument("--dropout", type=float, default=0.20)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-3)
