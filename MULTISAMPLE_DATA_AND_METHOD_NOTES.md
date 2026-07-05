@@ -139,4 +139,36 @@ python 10_sample_and_extract.py ... \
   --store_token_uncertainty
 ```
 
+Refined tube validation now lives in `multisample_tube_refinement_audit.py`.
+It is the preferred next audit after the basic transition-tube script because
+it separates three claims:
+
+- `support_oracle.*`: same-problem correct support tube with heldout correct
+  samples and error samples scored against the same support folds.
+- `global_tail.*`: deployable-style cross-problem tube plus spectral-tail
+  features such as `tail_k90`, `tail_auc`, and residual-at-k.
+- `conditioned.*`: local tube from nearest training problems under `qvec` /
+  prompt vectors if present, or a clearly labeled first-step hidden proxy if
+  the multisample file lacks prompt vectors.
+- `layer.*`: adjacent-layer transition desynchronization and layer effective
+  rank, only when `sv_vec_step_exp` stores multiple layers.
+
+Run:
+
+```bash
+python multisample_tube_refinement_audit.py \
+  --input /gz-data/research/demo/data/gsm8k_v2_5shot.npz \
+  --policies answer_format_ok \
+  --band mid \
+  --normalize l2 \
+  --output_dir outputs/multisample_tube_refinement
+
+python multisample_tube_refinement_audit.py \
+  --input /gz-data/research/demo/data/gsm8k_v2_custom.npz \
+  --policies answer_format_ok \
+  --band mid \
+  --normalize l2 \
+  --output_dir outputs/multisample_tube_refinement
+```
+
 If storage allows, also use `--store_clouds --cloud_layers 10,14,18,22` for within-step reconvergence and boundary-free step discovery experiments.
