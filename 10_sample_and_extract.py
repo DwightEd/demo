@@ -613,6 +613,13 @@ def main():
             [r["SV"]["ae"][m] for r in rows], dtype=object)
     save["sv_out_entropy"] = np.array(
         [r["SV"]["out_entropy"] for r in rows], dtype=object)
+    save["sv_out_committal"] = np.array(
+        [r["SV"]["out_committal"] for r in rows], dtype=object)
+    if rows[0]["SV"].get("tok_entropy") is not None:
+        save["sv_tok_entropy"] = np.array(
+            [r["SV"].get("tok_entropy") for r in rows], dtype=object)
+        save["sv_tok_committal"] = np.array(
+            [r["SV"].get("tok_committal") for r in rows], dtype=object)
     if args.store_vectors and rows[0]["SV"].get("vec") is not None:
         save["sv_vectors_stored"] = np.array(True)
         for m in modes:
