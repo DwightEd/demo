@@ -66,6 +66,18 @@ python multisample_data_audit.py \
   --output_dir outputs/multisample_data_audit
 ```
 
+Then inspect the distributions of the feature families that previously looked useful:
+
+```bash
+python multisample_feature_distribution.py \
+  --input /gz-data/research/demo/data/gsm8k_v2_5shot.npz \
+  --output_dir outputs/multisample_feature_distribution
+
+python multisample_feature_distribution.py \
+  --input /gz-data/research/demo/data/gsm8k_v2_custom.npz \
+  --output_dir outputs/multisample_feature_distribution
+```
+
 For future data extraction, preserve the single-forward confidence traces:
 
 ```bash
