@@ -1348,3 +1348,134 @@ prompt repair 在 flagged wrong traces 上显著高于 random/high-entropy repai
 ```text
 not a better score, but a better intervention trigger.
 ```
+
+---
+
+## 17. Constrained Inference Manifold 启发与第一版验证
+
+### 17.1 这篇文章给我们的可用启发
+
+`Reasoning emerges from constrained inference manifolds in large language models`
+([arXiv:2605.08142](https://arxiv.org/abs/2605.08142)) 的核心不是“越低维越好”，而是：
+
+```text
+healthy reasoning = low-dimensional organization
+                  + non-degenerate information volume
+                  + sufficient representational substrate
+```
+
+它明确指出 geometric compression alone 不足以保证 robust reasoning。对本项目来说，这正好修正了早期“错误 = 更发散 / κ 更低”的过粗假设：
+
+```text
+正确困难推理也可能发散；
+错误也可能不是发散，而是过早坍缩、信息体积退化、或压缩后脱离题设约束。
+```
+
+因此主线应从 `spread/resultant` 升级为：
+
+```text
+当前 step 是否处在一个 compact + informative + anchored 的 admissible regime。
+```
+
+### 17.2 第一版 operationalization
+
+新增脚本：
+
+```text
+manifold_health_audit.py
+```
+
+它不是复现论文的 model-level label-free diagnostic，而是做 step-level first-error proxy：
+
+| 论文概念 | 本项目第一版 proxy | 说明 |
+|---|---|---|
+| geometric compression | `mh_compression = resultant`, `mh_spread = 1-resultant` | 利用已有 stepcloud |
+| information volume | `mh_volume` from `cloud_V` if available, else `cloud_D/cloud_C/geom_pr/geom_ae` | 先用已有 cloud feature 当非退化体积 proxy |
+| anchored constraint | `mh_anchor = q_align`, `mh_anchor_loss = 1-q_align` | 先用单 qvec；后续换 multi-anchor |
+| admissible health | `mh_health = z(compression)+z(volume)+z(anchor)` | 高为健康 |
+| pathology score | `mh_constrained_bad = z(spread)+z(anchor_loss)-z(volume)` | 高为风险 |
+| confident wrong | `mh_confident_bad = mh_constrained_bad - z(uncertainty)` | 低熵但 manifold 坏 |
+| phase break | `mh_phase_break = abs(delta(health)) + positive delta(diffuse_drift)` | 边界/相变候选 |
+
+输出包括：
+
+```text
+overall step/gold-error AUROC
+high-spread subset AUROC
+within-chain first-error localization
+OOF group AUROC
+cluster-bootstrap increment vs anchor_uncertainty
+```
+
+### 17.3 本地验证
+
+本地 synthetic selftest 已跑通：
+
+```bash
+python -m py_compile manifold_health_audit.py
+python manifold_health_audit.py --help
+python manifold_health_audit.py --selftest --output_dir outputs/manifold_health_selftest --n_boot 30 --folds 3
+```
+
+自测结果很强，但只是 injected synthetic，不代表真实有效。真实判据必须看远端 full datasets。
+
+### 17.4 远端运行命令
+
+GSM8K smoke：
+
+```bash
+python manifold_health_audit.py --dataset gsm8k --data_dir /gz-data/research/demo/data --layer 14 --max_chains 120 --folds 3 --n_boot 50 --output_dir outputs/manifold_health_smoke
+```
+
+正式三数据集：
+
+```bash
+python manifold_health_audit.py --dataset gsm8k --data_dir /gz-data/research/demo/data --layer 14 --folds 5 --n_boot 200 --output_dir outputs/manifold_health
+python manifold_health_audit.py --dataset math --data_dir /gz-data/research/demo/data --layer 14 --folds 5 --n_boot 200 --output_dir outputs/manifold_health
+python manifold_health_audit.py --dataset omnimath --data_dir /gz-data/research/demo/data --layer 14 --folds 5 --n_boot 200 --output_dir outputs/manifold_health
+```
+
+多层稳健性：
+
+```bash
+for d in gsm8k math omnimath; do
+  for l in 10 14 18 22; do
+    python manifold_health_audit.py --dataset $d --data_dir /gz-data/research/demo/data --layer $l --folds 5 --n_boot 200 --output_dir outputs/manifold_health_layers
+  done
+done
+```
+
+### 17.5 判断标准
+
+继续推进 AnchorFlow/CAPF 的条件：
+
+```text
+1. manifold_health 或 manifold_plus_anchor_uncertainty
+   相对 anchor_uncertainty 有稳定正增量；
+
+2. high-spread subset 中 mh_constrained_bad / mh_confident_bad
+   能区分健康发散和错误发散；
+
+3. confident-wrong 区域中 mh_confident_bad 强于 uncertainty/EDIS；
+
+4. mh_phase_break 或 mh_health_jump_bad
+   在 residualized localization 中仍高于随机期望；
+
+5. 多层结果不是单层偶然。
+```
+
+如果失败：
+
+```text
+说明单 qvec + cloud volume proxy 仍然太粗；
+不要直接否定 AnchorFlow，而应进入 multi-anchor transport：
+数字/变量/约束/目标 anchors + attention lookback + token-level boundary-free phase。
+```
+
+如果成功：
+
+```text
+下一步把 mh_volume 从 cloud proxy 换成 anchored information volume：
+在 prompt-anchor transport simplex 内计算 logdet / effective rank / coverage；
+并把 mh_phase_break 接入 prompt repair / micro-replay 干预。
+```
