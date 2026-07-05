@@ -127,6 +127,7 @@ Read this audit carefully:
 
 - `global.*` is the deployable-style setting: fit the transition tube on correct chains from training problems and score held-out problems.
 - `oracle.*` is a diagnostic setting: fit the tube from same-problem correct samples.  It tests whether a question-specific correct transition manifold exists, but it is not an online detector.
+- Important leakage guard: correct target samples must be excluded from their own same-problem tube.  Otherwise the correct class is evaluated on training residuals and `oracle.off_energy_ratio` can become artificially near-perfect.
 - If `oracle.*` works but `global.*` fails, the correct manifold is problem-conditioned and needs prompt/anchor conditioning.
 - If `rank_energy` or `transition_eff_rank` works, error chains need more transition directions.  If only `off_*` works, error chains leave the tube by residual magnitude rather than intrinsic rank.
 

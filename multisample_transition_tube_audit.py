@@ -9,10 +9,12 @@ Hypothesis:
 
 This is a diagnostic over existing `sv_vec_step_exp` payloads.  It reports:
   1. global_crossfit: fit on correct chains from training problems only.
-  2. problem_oracle: fit on correct samples from the same problem only.
+  2. problem_oracle: fit on correct samples from the same problem only,
+     excluding the target sample when the target itself is correct.
 
 The second setting is not deployable, but it is the cleanest check of whether
 same-question correct samples define a low-rank transition manifold at all.
+Correct targets are scored leave-one-correct-out to avoid train/test leakage.
 """
 from __future__ import annotations
 
@@ -485,26 +487,56 @@ def problem_oracle_scores(
     scores = {n: np.full(len(seqs), np.nan, dtype=np.float64) for n in names}
     pos = {"off_z_max": np.full(len(seqs), np.nan, dtype=np.float64)}
     used = 0
+    scored_error = 0
+    scored_correct = 0
     ranks: List[int] = []
+
+    def fit_refs(refs: np.ndarray) -> Optional[TransitionTube]:
+        D = collect_transitions(seqs, refs)
+        return fit_tube(
+            D,
+            rank=args.rank,
+            max_rank=args.max_rank,
+            energy=args.energy,
+            min_transitions=args.oracle_min_transitions,
+        )
+
     for p in np.unique(problem_ids[mask]):
         idx = np.where(mask & (problem_ids == p))[0]
         correct = idx[y_err[idx] == 0]
         if len(correct) < args.oracle_min_correct:
             continue
-        D = collect_transitions(seqs, correct)
-        tube = fit_tube(D, rank=args.rank, max_rank=args.max_rank, energy=args.energy, min_transitions=args.oracle_min_transitions)
-        if tube is None:
-            continue
         used += 1
-        ranks.append(tube.rank)
+
+        full_tube = fit_refs(correct)
         for i in idx:
+            if y_err[i] == 0:
+                refs = correct[correct != i]
+                if len(refs) < args.oracle_min_correct:
+                    continue
+                tube = fit_refs(refs)
+            else:
+                tube = full_tube
+            if tube is None:
+                continue
+            ranks.append(tube.rank)
             s = score_sequence(seqs[int(i)], tube, rank_energy=args.rank_energy)
             for n in names:
                 if n in s:
                     scores[n][i] = s[n]
             if "off_z_max_pos" in s:
                 pos["off_z_max"][i] = s["off_z_max_pos"]
-    meta = {"problem_tubes_used": used, "mean_rank": float(np.mean(ranks)) if ranks else None}
+            if y_err[i] == 0:
+                scored_correct += 1
+            else:
+                scored_error += 1
+    meta = {
+        "problem_tubes_used": used,
+        "mean_rank": float(np.mean(ranks)) if ranks else None,
+        "scored_error": int(scored_error),
+        "scored_correct_leave_one_out": int(scored_correct),
+        "target_leakage": "correct targets excluded from their own same-problem tube",
+    }
     return scores, pos, meta
 
 
@@ -556,7 +588,7 @@ def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
             "rank_energy": float(args.rank_energy),
             "notes": {
                 "global": "correct-chain transition tube fitted on training problems only",
-                "oracle": "same-problem correct samples define a diagnostic tube; not deployable",
+                "oracle": "same-problem correct samples define a diagnostic tube; correct targets are leave-one-correct-out; not deployable",
                 "rank_energy": "number of correct-basis directions needed to explain this chain's transition energy; max_rank+1 means off-basis energy remains too large",
             },
         },
@@ -575,7 +607,7 @@ def write_outputs(res: Mapping[str, Any], output_dir: str, top: int) -> Tuple[st
         f.write(f"# Multisample Transition Tube Audit: {res['meta']['basename']}\n\n")
         f.write("## Result Analysis\n\n")
         f.write("- `global.*` scores are deployable-style OOF scores: train correct transition tube on other problems, score held-out problems.\n")
-        f.write("- `oracle.*` scores are diagnostic: same-problem correct samples define the tube, so they test whether a question-specific correct manifold exists.\n")
+        f.write("- `oracle.*` scores are diagnostic: same-problem correct samples define the tube, with correct targets scored leave-one-correct-out to avoid target leakage.\n")
         f.write("- Signed AUROC > 0.5 means error samples have larger off-tube/rank values.\n\n")
         for pol, sec in res["policies"].items():
             f.write(f"### {pol}\n\n")
