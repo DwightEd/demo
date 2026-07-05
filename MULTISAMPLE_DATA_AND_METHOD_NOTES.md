@@ -172,3 +172,39 @@ python multisample_tube_refinement_audit.py \
 ```
 
 If storage allows, also use `--store_clouds --cloud_layers 10,14,18,22` for within-step reconvergence and boundary-free step discovery experiments.
+
+Latent-state validation now lives in `latent_constraint_em_audit.py`.  This
+script does not reconstruct a concrete tube.  It treats the constrained
+reasoning manifold as a hidden state learned by EM:
+
+- observations: `cloud_spread`, `sv_out_entropy`, `sv_out_committal`,
+  `sv_pr_step_exp`, `sv_ae_step_exp`, and step-vector jump;
+- no layer desynchronization or cross-layer tensor signal;
+- EM is unsupervised; chain labels only orient learned states into a risk score
+  on the training fold;
+- scoring uses online filtered posteriors `p(z_t | x_1...x_t)`.
+
+Recommended first run:
+
+```bash
+python latent_constraint_em_audit.py \
+  --input /gz-data/research/demo/data/gsm8k_v2_5shot.npz \
+  --policies answer_format_ok \
+  --band mid \
+  --states 4 \
+  --feature_groups all_effective=cloud_spread,out_entropy,out_committal,pr_mid,ae_mid,step_jump,direction_jump \
+  --output_dir outputs/latent_constraint_em
+
+python latent_constraint_em_audit.py \
+  --input /gz-data/research/demo/data/gsm8k_v2_custom.npz \
+  --policies answer_format_ok \
+  --band mid \
+  --states 4 \
+  --feature_groups all_effective=cloud_spread,out_entropy,out_committal,pr_mid,ae_mid,step_jump,direction_jump \
+  --output_dir outputs/latent_constraint_em
+```
+
+Then run the default feature-group ablation.  The key comparison is whether
+`hmm.spread_entropy_moment.*` or `hmm.all_effective.*` beats
+`hmm.spread_entropy.*` and the corresponding single-feature baselines under
+same-problem paired AUROC.
