@@ -1506,3 +1506,71 @@ done
 在 prompt-anchor transport simplex 内计算 logdet / effective rank / coverage；
 并把 mh_phase_break 接入 prompt repair / micro-replay 干预。
 ```
+
+### 17.6 L14 真实数据结果与阶段性判断
+
+远端已跑：
+
+```bash
+python manifold_health_audit.py --dataset gsm8k --data_dir /gz-data/research/demo/data --layer 14 --max_chains 120 --folds 3 --n_boot 50 --output_dir outputs/manifold_health_smoke
+
+python manifold_health_audit.py --dataset gsm8k --data_dir /gz-data/research/demo/data --layer 14 --folds 5 --n_boot 200 --output_dir outputs/manifold_health
+python manifold_health_audit.py --dataset math --data_dir /gz-data/research/demo/data --layer 14 --folds 5 --n_boot 200 --output_dir outputs/manifold_health
+python manifold_health_audit.py --dataset omnimath --data_dir /gz-data/research/demo/data --layer 14 --folds 5 --n_boot 200 --output_dir outputs/manifold_health
+```
+
+OOF AUROC summary：
+
+| dataset | anchor_uncertainty | manifold_health | inc | manifold_plus_anchor_uncertainty | inc | confident_manifold | inc |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| GSM8K | 0.811 | 0.742 | -0.069 SIG | 0.811 | +0.000 ns | 0.790 | -0.021 SIG |
+| MATH | 0.781 | 0.731 | -0.051 SIG | 0.787 | +0.005 ns | 0.769 | -0.012 SIG |
+| OmniMath | 0.809 | 0.774 | -0.035 SIG | 0.815 | +0.006 SIG | 0.807 | -0.002 ns |
+
+结果分析：
+
+```text
+1. 如果把 manifold_health 作为独立 detector，效果确实变差；
+2. 如果把 manifold features 拼回 anchor_uncertainty，基本不损失，OmniMath 有很小正增量，但不足以支撑新方法主张；
+3. confident_manifold 没有解决“低熵但错误”的核心问题，GSM8K/MATH 甚至显著低于 anchor_uncertainty；
+4. high-spread subset 中新 manifold 指标没有稳定超过 U_D_mean / spread，说明第一版还不能区分健康发散与错误发散；
+5. localization 中 mh_phase_cusum / mh_health_cusum 看起来强，但 `pos` top1=1.0，说明首错位置有强位置偏置，必须做 residualized localization 后才能解释。
+```
+
+最重要的负发现：
+
+```text
+cloud_V 几乎在读 step length / difficulty，而不是真正的 information volume。
+
+GSM8K:  cloud_V AUROC 0.712 vs logN 0.708
+MATH:   cloud_V AUROC 0.682 vs logN 0.680
+Omni:   cloud_V AUROC 0.718 vs logN 0.717
+```
+
+因此这次不是否定 constrained manifold 叙事，而是否定当前 v1 operationalization：
+
+```text
+single qvec anchor + raw cloud_V volume + hand-written z-score formula
+不足以构成一个新的机制读法。
+```
+
+后续研究方向：
+
+```text
+1. volume 必须改成 length-controlled / anchor-conditioned information volume；
+2. 所有 phase/localization 指标必须先 residualize logN 和 pos；
+3. 需要从 single question vector 转向 multi-anchor transport；
+4. 判断重点从 step AUROC 转向：高发散子集、confident-wrong 子集、early alarm delay、intervention gain。
+```
+
+优化建议：
+
+```text
+下一版不要继续堆 mh_* 标量。
+应实现 AnchorFlow v1：
+  prompt anchors = numbers / variables / constraints / goal
+  response state = token/window hidden transport to anchors
+  metrics = anchor coverage, target mass, constraint detachment, transport entropy,
+            length-residualized anchored logdet/effective-rank, phase break
+  validation = residualized AUROC + within-chain residual localization + online alarm + prompt repair
+```
