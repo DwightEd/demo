@@ -35,7 +35,7 @@ from anchorflow.eval import (
 )
 from anchorflow.residualize import crossfit_residualize
 from anchorflow.transport import add_transport_features
-from mechanism_phase_audit import make_selftest_npz
+from audit_utils import make_selftest_npz
 
 
 def resolve_npz(args: argparse.Namespace) -> str:

@@ -37,7 +37,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from hidden_io import _fn, load_chain
-from mechanism_phase_audit import auroc, bdir, finite_json, safe_mean, safe_std
+from audit_utils import auroc, bdir, finite_json, safe_mean, safe_std
 
 try:  # Optional: remote GPU env usually has torch; local Windows env may not.
     import torch

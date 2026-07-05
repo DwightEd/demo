@@ -93,7 +93,9 @@ tests/
 
 ```text
 chain_dynamics_audit.py          # baseline: spread/anchor/uncertainty/transition
-manifold_health_audit.py         # negative-result baseline
+audit_utils.py                   # shared loader/scoring/selftest utilities
+anchorflow_anchor_audit.py       # current AnchorFlow scaffold
+hypergraph_anchor_audit.py       # non-parametric hypergraph branch
 hypergraph_token_hgn.py          # heavy upper-bound baseline
 mainline_validation_suite.py     # old summary suite
 ```

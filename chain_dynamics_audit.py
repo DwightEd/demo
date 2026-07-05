@@ -9,7 +9,7 @@ each reasoning trace as a sequence and asks a sharper question:
   like a healthy transition?
 
 The script consumes the existing full_*.npz features through
-mechanism_phase_audit.load_chains, then adds chain-level dynamic scores:
+audit_utils.load_chains, then adds chain-level dynamic scores:
 
   recoverability           offline analysis: does spread reconverge soon?
   anchored divergence      spread plus loss of question-anchor alignment
@@ -40,7 +40,7 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise SystemExit("chain_dynamics_audit.py needs scikit-learn") from exc
 
-from mechanism_phase_audit import (
+from audit_utils import (
     Chain,
     auroc,
     bdir,
