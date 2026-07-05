@@ -900,6 +900,33 @@ oof_loc_top1          0.8539
 oof_loc_expected_top1 0.4629
 ```
 
+训练曲线摘要：
+
+```text
+split per fold: train 269 | val 47 | test 79
+node_dim 32778 | he_dim 4 | pos_weight range 4.139--4.531, mean 4.350
+
+best validation AUPR by fold:
+  fold1 epoch 02: AUROC 0.7785 | AUPR 0.4747 | early stop 07
+  fold2 epoch 10: AUROC 0.7689 | AUPR 0.4435 | early stop 15
+  fold3 epoch 02: AUROC 0.7641 | AUPR 0.5031 | early stop 07
+  fold4 epoch 05: AUROC 0.7887 | AUPR 0.5471 | early stop 10
+  fold5 epoch 13: AUROC 0.7963 | AUPR 0.5977 | early stop 18
+
+mean best-val AUROC 0.7793 | mean best-val AUPR 0.5132
+mean early-stop epoch 11.4
+```
+
+这组训练日志有记录价值，但不需要在正文反复引用每个 epoch。它主要说明三点：
+
+```text
+1. validation node AUROC/AUPR 很早进入 0.76--0.82 / 0.44--0.60 区间，后续训练收益有限；
+2. fold2/fold5 的 loss 继续接近 0，但 validation AUPR 不稳定，说明小数据 + token noisy label 下有明显过拟合风险；
+3. HGN 有学习能力，但成本高、泛化改善有限，更适合作为 hidden-token structure upper bound，而不是当前主线 detector。
+```
+
+原始 per-epoch `history` 已由 `hypergraph_token_hgn.py` 写入输出 JSON 的 `folds[*].history`，后续不需要手动保存控制台日志。
+
 解释：
 
 - `OOF` 表示每个样本只在自己所在 outer fold 的 held-out test split 上被预测，再把 5 个 fold 拼起来评估；不是训练集效果。
