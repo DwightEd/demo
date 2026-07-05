@@ -78,6 +78,26 @@ python multisample_feature_distribution.py \
   --output_dir outputs/multisample_feature_distribution
 ```
 
+For the actual "is there a local rupture signal?" question, run the temporal audit.  This keeps each sampled answer as a full per-step trajectory and compares local jumps/window contrasts against static level summaries:
+
+```bash
+python multisample_temporal_rupture_audit.py \
+  --input /gz-data/research/demo/data/gsm8k_v2_5shot.npz \
+  --policies answer_format_ok \
+  --output_dir outputs/multisample_temporal_rupture
+
+python multisample_temporal_rupture_audit.py \
+  --input /gz-data/research/demo/data/gsm8k_v2_custom.npz \
+  --policies answer_format_ok \
+  --output_dir outputs/multisample_temporal_rupture
+```
+
+Read this audit as follows:
+
+- If `*.jump_max`, `*.zjump_max`, `*.contrast_max`, or `multi.zjump_*` do not beat the corresponding `*.level_*` summaries under same-problem AUROC, the current data/signals do not yet support a genuine abrupt-transition detector.
+- If a local score does survive, inspect its `argpos_error` and `argpos_correct`.  A useful intervention trigger should not simply fire late in every chain.
+- Because the same-problem data only has final-answer labels, this audit can establish whether a rupture signature exists, but cannot prove that the rupture aligns with the true first wrong step.
+
 For future data extraction, preserve the single-forward confidence traces:
 
 ```bash
