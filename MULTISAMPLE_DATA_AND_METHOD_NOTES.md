@@ -105,6 +105,31 @@ Current temporal audit finding:
 - Several apparent dynamic scores point in the wrong direction or fire at the end of both correct and error chains, e.g. `abs_zjump_max` / `multi.zcontrast_l2_max` with argpos near `1.00`.  Treat these as endpoint/length artifacts, not first-failure detectors.
 - Conclusion: with the currently saved same-problem signals, there is weak same-problem static separation but no robust evidence of an abrupt local transition.  The current signal family should not be presented as a dynamic rupture detector.
 
+To test a stronger constrained-manifold reading, fit a low-rank transition tube from correct step-vector transitions:
+
+```bash
+python multisample_transition_tube_audit.py \
+  --input /gz-data/research/demo/data/gsm8k_v2_5shot.npz \
+  --policies answer_format_ok \
+  --band mid \
+  --normalize l2 \
+  --output_dir outputs/multisample_transition_tube
+
+python multisample_transition_tube_audit.py \
+  --input /gz-data/research/demo/data/gsm8k_v2_custom.npz \
+  --policies answer_format_ok \
+  --band mid \
+  --normalize l2 \
+  --output_dir outputs/multisample_transition_tube
+```
+
+Read this audit carefully:
+
+- `global.*` is the deployable-style setting: fit the transition tube on correct chains from training problems and score held-out problems.
+- `oracle.*` is a diagnostic setting: fit the tube from same-problem correct samples.  It tests whether a question-specific correct transition manifold exists, but it is not an online detector.
+- If `oracle.*` works but `global.*` fails, the correct manifold is problem-conditioned and needs prompt/anchor conditioning.
+- If `rank_energy` or `transition_eff_rank` works, error chains need more transition directions.  If only `off_*` works, error chains leave the tube by residual magnitude rather than intrinsic rank.
+
 For future data extraction, preserve the single-forward confidence traces:
 
 ```bash
