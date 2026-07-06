@@ -97,3 +97,57 @@ python -m pytest \
 ```
 
 Result: 5 passed.
+
+## Remote GSM8K Result
+
+Remote runs on 2026-07-06 do **not** support the lightweight regex arithmetic
+ledger as a useful next detector.
+
+`gsm8k_v2_custom.npz`, `answer_format_ok`:
+
+- samples: 3452; errors: 532; contrastive problems: 147;
+- text coverage: 3600 samples with parsed steps, 2903 samples with equations,
+  9110 equation-bearing steps out of 32645 total steps;
+- best constraint: `constraint_tainted_dep_sum`, within AUROC 0.562, cross
+  AUROC 0.704;
+- best saved baseline: `baseline_cloud_resultant_late_mean`, within AUROC
+  0.659, cross AUROC 0.769;
+- increment over best baseline: -0.097, bootstrap CI [-0.143, -0.048];
+- baseline-miss rescue: 331 / 978 = 0.338.
+
+`gsm8k_v2_5shot.npz`, `answer_format_ok`:
+
+- samples: 2035; errors: 279; contrastive problems: 94;
+- text coverage: 2646 samples with parsed steps, 2509 samples with equations,
+  7127 equation-bearing steps out of 14754 total steps;
+- best constraint: `constraint_invalid_eq_mean`, within AUROC 0.548, cross
+  AUROC 0.542;
+- best saved baseline: `baseline_cloud_resultant_max`, within AUROC 0.634,
+  cross AUROC 0.826;
+- increment over best baseline: -0.085, bootstrap CI [-0.159, -0.016];
+- baseline-miss rescue: 49 / 341 = 0.144.
+
+Interpretation:
+
+- The current constraint score is not a same-problem detector.  On
+  `gsm8k_v2_custom`, its cross AUROC is much higher than within AUROC, which is
+  the signature of difficulty/style/length confounding rather than a
+  question-conditioned failure mechanism.
+- `constraint_tainted_dep_sum` is cumulative and therefore inherits the old
+  late-chain/length risk.  It should not be promoted as an online trigger.
+- Equation coverage is high enough that the negative result is meaningful for
+  this parser family.  The failure is not simply "no equations were available."
+- The premise-consistency research direction remains plausible, but the local
+  regex arithmetic ledger is too shallow.  GSM8K errors often preserve explicit
+  arithmetic syntax while using the wrong operation, wrong semantic binding, or
+  wrong problem interpretation.  Those are graph/premise failures, not simple
+  equation-evaluation failures.
+
+Decision:
+
+- Keep `premise_constraint_audit.py` as a negative baseline and coverage
+  diagnostic.
+- Do not spend more time tuning regex arithmetic scores.
+- The next non-geometric implementation should test a stronger orthogonal
+  channel: same-problem counterfactual step value / operation-template
+  consistency / premise graph extraction, not scalar arithmetic invalidity.
