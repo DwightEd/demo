@@ -51,6 +51,17 @@ def test_sliding_resultant_separates_constant_from_alternating():
     assert np.nanmean(r_alt[7:]) < 0.80
 
 
+def test_multi_window_cpu_matches_single_window():
+    rng = np.random.default_rng(4)
+    H = rng.normal(size=(23, 17))
+    _, U = tsga.normalize_rows(H)
+    multi = tsga.sliding_resultants_multi_cpu(U, windows=[5, 11], decay=0.07, min_window=4)
+
+    for W in (5, 11):
+        one = tsga.sliding_resultant(U, window=W, decay=0.07, min_window=4)
+        np.testing.assert_allclose(multi[W], one, rtol=1e-5, atol=1e-6, equal_nan=True)
+
+
 def test_token_stream_selftest_runs_and_writes_outputs(tmp_path):
     npz = tmp_path / "token_stream_selftest.npz"
     tsga.make_selftest(str(npz), seed=5, n_problems=12, samples_per_problem=6)

@@ -43,6 +43,22 @@ H_{t-W:t} -> eigen spectrum of H H^T -> log-log spectral slope alpha
 
 Alpha is summarized by level, slope, amplitude, and phase-change magnitude.
 
+## Speed Notes
+
+The first version of `--no_alpha` was still slow because it only disabled the
+sliding spectrum.  The kappa/resultant trace was still computed by repeatedly
+scanning the same 4096-dimensional token stream once per window on CPU.
+
+Current optimization:
+
+- multi-window resultant is computed in one token pass on CPU;
+- hidden rows are processed as `float32`, matching the stored fp16/fp32
+  precision better than unnecessary `float64`;
+- `--stream_backend auto|cuda|torch` can compute the multi-window resultant
+  with grouped `conv1d` on GPU;
+- alpha remains the expensive branch and should be enabled only after the fast
+  kappa audit is interpreted.
+
 ## Anti-Confound Gates
 
 The script reports three baseline families:
@@ -87,4 +103,3 @@ same-problem ranking + fixed-FPR alarm delay
 
 If this fails, the branch should be retired as a weak physiological marker, not
 renamed as a new geometry metric.
-

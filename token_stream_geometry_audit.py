@@ -75,6 +75,8 @@ class StreamData:
     stream_groups: Dict[str, List[str]]
     source: str
     layer_used: int
+    stream_backend: str
+    stream_device: str
     policy_desc: str
     coverage: Dict[str, float]
 
@@ -228,6 +230,146 @@ def sliding_resultant(U: np.ndarray, *, window: int, decay: float, min_window: i
         if n >= min_window:
             out[t] = float(np.linalg.norm(S) / max(exp_denominator(n, decay), EPS))
     return np.clip(out, 0.0, 1.0)
+
+
+def sliding_resultants_multi_cpu(
+    U: np.ndarray,
+    *,
+    windows: Sequence[int],
+    decay: float,
+    min_window: int,
+) -> Dict[int, np.ndarray]:
+    """Compute several causal resultants in one token pass.
+
+    The first implementation called `sliding_resultant` once per window.  That
+    repeats the response scan and repeatedly casts 4096-dim hidden rows to
+    float64.  This version keeps all window accumulators together and uses
+    float32, which is enough for a diagnostic score and much closer to the
+    stored hidden precision.
+    """
+    X = np.asarray(U, dtype=np.float32)
+    if X.ndim != 2 or X.shape[0] == 0:
+        return {int(W): np.full(0, np.nan, dtype=np.float64) for W in windows}
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    Wv = np.asarray([int(W) for W in windows], dtype=np.int64)
+    Wv = Wv[Wv > 0]
+    if Wv.size == 0:
+        return {}
+    T, D = X.shape
+    q = float(math.exp(-float(decay)))
+    qW = np.asarray([q ** int(W) for W in Wv], dtype=np.float32)
+    denoms = {
+        int(W): np.asarray([exp_denominator(min(t + 1, int(W)), decay) for t in range(T)], dtype=np.float32)
+        for W in Wv
+    }
+    S = np.zeros((len(Wv), D), dtype=np.float32)
+    outs = {int(W): np.full(T, np.nan, dtype=np.float64) for W in Wv}
+    min_by_w = np.asarray([min(int(min_window), int(W)) for W in Wv], dtype=np.int64)
+    for t in range(T):
+        row = X[t]
+        S *= q
+        S += row[None, :]
+        for wi, W in enumerate(Wv):
+            if t >= int(W):
+                S[wi] -= qW[wi] * X[t - int(W)]
+            n = min(t + 1, int(W))
+            if n >= int(min_by_w[wi]):
+                outs[int(W)][t] = float(np.linalg.norm(S[wi]) / max(float(denoms[int(W)][t]), EPS))
+    for W in list(outs):
+        outs[W] = np.clip(outs[W], 0.0, 1.0)
+    return outs
+
+
+def resolve_stream_backend(args: argparse.Namespace):
+    requested = str(getattr(args, "stream_backend", "auto")).lower()
+    if requested == "cpu":
+        return "cpu", None, None
+    try:
+        import torch
+    except Exception as exc:
+        if requested == "auto":
+            return "cpu", None, None
+        raise SystemExit(f"--stream_backend={requested} requires torch: {exc}") from exc
+    device_arg = str(getattr(args, "stream_device", "") or "")
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return "torch", torch, torch.device(device_arg or "cuda")
+        return "cpu", None, None
+    if requested == "cuda":
+        if not torch.cuda.is_available():
+            raise SystemExit("--stream_backend=cuda requested, but torch.cuda.is_available() is false")
+        return "torch", torch, torch.device(device_arg or "cuda")
+    if requested == "torch":
+        return "torch", torch, torch.device(device_arg or ("cuda" if torch.cuda.is_available() else "cpu"))
+    raise SystemExit(f"unknown --stream_backend={requested!r}")
+
+
+def sliding_resultants_multi_torch(
+    U: np.ndarray,
+    *,
+    windows: Sequence[int],
+    decay: float,
+    min_window: int,
+    torch_mod,
+    device,
+) -> Dict[int, np.ndarray]:
+    """GPU/torch grouped-convolution implementation of causal resultants.
+
+    Input is one chain `(T, D)`.  We use grouped `conv1d` over the token axis:
+    each hidden dimension is convolved independently with the same exponential
+    kernel, then the channel vector norm gives the weighted resultant numerator.
+    """
+    import torch.nn.functional as F
+
+    X = np.asarray(U, dtype=np.float32)
+    if X.ndim != 2 or X.shape[0] == 0:
+        return {int(W): np.full(0, np.nan, dtype=np.float64) for W in windows}
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    T, D = X.shape
+    if T == 0 or D == 0:
+        return {int(W): np.full(T, np.nan, dtype=np.float64) for W in windows}
+    x = torch_mod.as_tensor(X.T[None, :, :], device=device)
+    outs: Dict[int, np.ndarray] = {}
+    q = float(math.exp(-float(decay)))
+    with torch_mod.no_grad():
+        for W0 in windows:
+            W = int(W0)
+            if W <= 0:
+                continue
+            # conv1d is cross-correlation.  With left padding, output t sees
+            # original tokens t-W+1..t, so the earliest token gets q^(W-1).
+            kernel = (q ** np.arange(W - 1, -1, -1, dtype=np.float32)).astype(np.float32)
+            weight = torch_mod.as_tensor(kernel[None, None, :], device=device).repeat(D, 1, 1)
+            padded = F.pad(x, (W - 1, 0))
+            conv = F.conv1d(padded, weight, groups=D)
+            num = torch_mod.linalg.norm(conv[0].transpose(0, 1), dim=1).detach().cpu().numpy()
+            den = np.asarray([exp_denominator(min(t + 1, W), decay) for t in range(T)], dtype=np.float64)
+            out = num.astype(np.float64) / np.maximum(den, EPS)
+            out[np.arange(T) + 1 < min(int(min_window), W)] = np.nan
+            outs[W] = np.clip(out, 0.0, 1.0)
+    return outs
+
+
+def sliding_resultants_multi(
+    U: np.ndarray,
+    *,
+    windows: Sequence[int],
+    decay: float,
+    min_window: int,
+    backend_kind: str,
+    torch_mod,
+    device,
+) -> Dict[int, np.ndarray]:
+    if backend_kind == "torch":
+        return sliding_resultants_multi_torch(
+            U,
+            windows=windows,
+            decay=decay,
+            min_window=min_window,
+            torch_mod=torch_mod,
+            device=device,
+        )
+    return sliding_resultants_multi_cpu(U, windows=windows, decay=decay, min_window=min_window)
 
 
 def alpha_from_eigvals(vals: np.ndarray, *, alpha_k: int) -> float:
@@ -553,12 +695,26 @@ def build_token_stream_features(
     alpha_k: int,
     alpha_stride: int,
     no_alpha: bool,
+    stream_backend_kind: str,
+    torch_mod,
+    stream_device,
 ) -> Tuple[Dict[str, float], Dict[str, np.ndarray]]:
     X, U = normalize_rows(H)
     feats: Dict[str, float] = {}
     risk: Dict[str, np.ndarray] = {}
+    resultants = sliding_resultants_multi(
+        U,
+        windows=windows,
+        decay=decay,
+        min_window=min_window,
+        backend_kind=stream_backend_kind,
+        torch_mod=torch_mod,
+        device=stream_device,
+    )
     for W in windows:
-        R = sliding_resultant(U, window=int(W), decay=decay, min_window=min(min_window, int(W)))
+        if int(W) not in resultants:
+            continue
+        R = resultants[int(W)]
         spread = 1.0 - R
         summarize_trace(f"stream_resultant_w{W}", R, feats)
         summarize_trace(f"stream_spread_w{W}", spread, feats)
@@ -615,6 +771,7 @@ def load_stream_data(path: str, args: argparse.Namespace) -> StreamData:
         pids_all = np.arange(n, dtype=int)
     y_err_all, mask_all, desc = resolve_labels(data, args.policy)
     source, layer_i, layer_used = source_info(data, path, args)
+    stream_backend_kind, torch_mod, stream_device = resolve_stream_backend(args)
 
     if args.max_problems:
         groups0 = problem_groups(pids_all, y_err_all, mask_all, args.min_per_class)
@@ -661,6 +818,9 @@ def load_stream_data(path: str, args: argparse.Namespace) -> StreamData:
             alpha_k=args.alpha_k,
             alpha_stride=args.alpha_stride,
             no_alpha=args.no_alpha,
+            stream_backend_kind=stream_backend_kind,
+            torch_mod=torch_mod,
+            stream_device=stream_device,
         )
         feats.update(stream_feats)
 
@@ -728,6 +888,8 @@ def load_stream_data(path: str, args: argparse.Namespace) -> StreamData:
         stream_groups=stream_groups,
         source=source,
         layer_used=int(layer_used),
+        stream_backend=stream_backend_kind,
+        stream_device=str(stream_device) if stream_device is not None else "cpu",
         policy_desc=desc,
         coverage=coverage,
     )
@@ -923,6 +1085,8 @@ def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
             "policy_description": sd.policy_desc,
             "source": sd.source,
             "layer": int(sd.layer_used),
+            "stream_backend": sd.stream_backend,
+            "stream_device": sd.stream_device,
             "n_samples": int(len(sd.rows)),
             "n_error": int(sd.y.sum()),
             "n_correct": int(len(sd.y) - sd.y.sum()),
@@ -997,7 +1161,7 @@ def write_markdown(path: str, res: Mapping[str, Any]) -> None:
         "",
         "## Headline",
         "",
-        f"- Source: `{meta['source']}` at layer `{meta['layer']}`.",
+        f"- Source: `{meta['source']}` at layer `{meta['layer']}`; stream backend `{meta.get('stream_backend', 'cpu')}` on `{meta.get('stream_device', 'cpu')}`.",
         f"- Samples: `{meta['n_samples']}`; errors: `{meta['n_error']}`; contrastive problems: `{meta['n_contrastive_problems']}`.",
         f"- Primary baseline: `{head['primary_baseline']}` = within `{fmt3(head['primary_baseline_row']['within_pair_auroc_error_high'])}`, cross `{fmt3(head['primary_baseline_row']['cross_auroc_error_high'])}`.",
         f"- Best stream group: `{head['best_stream_group']}` = within `{fmt3(head['best_stream_group_row']['within_pair_auroc_error_high'])}`, cross `{fmt3(head['best_stream_group_row']['cross_auroc_error_high'])}`.",
@@ -1094,7 +1258,7 @@ def print_result(res: Mapping[str, Any]) -> None:
     print(f"\n===== token-stream geometry | {meta['basename']} =====")
     print(
         f"samples {meta['n_samples']} | err {meta['n_error']} | problems {meta['n_contrastive_problems']} | "
-        f"source {meta['source']} L{meta['layer']}"
+        f"source {meta['source']} L{meta['layer']} | backend {meta.get('stream_backend', 'cpu')}:{meta.get('stream_device', 'cpu')}"
     )
     print(
         f"baseline {head['primary_baseline']} within {base['within_pair_auroc_error_high']:.3f} "
@@ -1242,6 +1406,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--nearest_layer", action="store_true")
     ap.add_argument("--hidden_dir", default="", help="override hidden shard directory for full_hidden npz files")
     ap.add_argument("--no_mmap", action="store_true")
+    ap.add_argument("--stream_backend", default="auto", choices=["auto", "cpu", "torch", "cuda"])
+    ap.add_argument("--stream_device", default="", help="torch device for stream resultant, e.g. cuda, cuda:0, or cpu")
     ap.add_argument("--windows", default="8,16,32,64")
     ap.add_argument("--alpha_windows", default="16,32,64")
     ap.add_argument("--decay", type=float, default=0.08)
