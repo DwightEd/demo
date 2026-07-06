@@ -210,7 +210,7 @@ Then run the default feature-group ablation.  The key comparison is whether
 same-problem paired AUROC.
 
 Second-moment and matrix-valued dynamics are now separated into
-`SECOND_MOMENT_DYNAMICS_RESEARCH_PLAN.md`.  That note records why the scalar
+`../progress/plans/SECOND_MOMENT_DYNAMICS_RESEARCH_PLAN.md`.  That note records why the scalar
 EM/HMM audit is not enough, how to reinterpret second moments as Gram-matrix
 trajectory structure, and what gates the next audit must pass before we treat
 this branch as a serious paper claim.

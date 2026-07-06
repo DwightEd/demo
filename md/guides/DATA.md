@@ -28,7 +28,7 @@ The `nts/` package always used `gold_error_step` and was never affected.
 `data/gsm8k_v2_5shot.npz` — **confirmed**: 2646 chains / **291 problems**; `sv_clouds` **(≈70, 1, 4096)** full-dim token cloud at **1 layer (16)**; `sv_vec_{last,mean,linear,step_exp}` (3,33,467); `whiten_baseline` present; layers_used = all 33. (`gsm8k_v2_custom.npz` 3600 chains, same.)
 
 ### Prior results (baselines — do NOT recompute)
-`results_summary.md` + `data/{probe,ens,mc,within,...}_*.npz` → probe within **0.71**, SPE **0.68**, scalar **0.55**.
+`../progress/results_summary.md` + `data/{probe,ens,mc,within,...}_*.npz` → probe within **0.71**, SPE **0.68**, scalar **0.55**.
 
 ## ❌ DROP — useless / stale, do not use
 - `data/features/processbench_gsm8k_features.npz` — **old/early variant** (pooled stepvec only, layers [8,16,24,31], 3-feature cloud, no `resultant`/`sv_layers`/`hidden_*`). This is what the loader was wrongly pointed at.
