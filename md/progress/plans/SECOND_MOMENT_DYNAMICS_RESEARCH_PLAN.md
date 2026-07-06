@@ -43,15 +43,23 @@ contrastive samples, or hard-but-format-clean problems.
 The main mathematical object should be the step token-cloud Gram matrix:
 
 ```text
-U_t = row-normalized hidden token matrix for step t
-G_t = U_t U_t^T / n_t
+H_t = raw hidden token matrix for step t
+G_t = H_t H_t^T / n_t
+G_t^c = (H_t - mean(H_t)) (H_t - mean(H_t))^T / n_t
 ```
 
 `G_t` is small because its size is the number of tokens in the step, not the
 hidden width.  Its non-zero eigenvalues match those of the hidden-dimension
-scatter matrix `U_t^T U_t / n_t`.  This gives us a cheap way to study the
+scatter matrix `H_t^T H_t / n_t`.  This gives us a cheap way to study the
 second-order geometry without explicitly building a 4096 x 4096 covariance
 matrix.
+
+2026-07-06 correction: row-normalized unit-token Gram matrices should not be
+the main object for this branch.  They are useful only as a directional
+ablation, because they discard token-norm/radial information before the
+spectral analysis.  The Geometry-of-Reason-style implementation should first
+compute spectra directly from the raw and centered token matrix, then report
+unit-row spectra only as a control.
 
 The story becomes:
 
@@ -280,12 +288,16 @@ cloud_layers
 For each step:
 
 1. take the token hidden matrix for that step;
-2. L2-normalize token rows;
-3. optionally center rows for a centered scatter variant;
-4. build `G_t = U_t U_t^T / n_t`;
+2. compute direct raw-token spectra from `H_t`;
+3. compute centered-token spectra from `H_t - mean(H_t)`;
+4. separately compute exp-weighted unit-row kappa as the first-moment baseline;
 5. eigendecompose `G_t`;
 6. compute spectral-tail and effective-rank features;
 7. compute local change relative to the previous step and previous prefix.
+
+Implementation note: `second_moment_dynamics_audit.py` follows this split.
+Feature prefixes `tok_raw_*` and `tok_cen_*` are the primary direct token-matrix
+features; `unit_raw_*` and `unit_cen_*` are ablations only.
 
 The first implementation should be transparent and nonparametric.  If it works,
 then a second phase can fit a directional mixture/HMM or matrix-valued latent
