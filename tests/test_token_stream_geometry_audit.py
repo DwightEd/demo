@@ -31,6 +31,10 @@ def _args(tmp_path):
         min_increment=0.02,
         max_problems=0,
         max_tokens=0,
+        shape_max_traces=24,
+        save_profiles=True,
+        profile_max_points=32,
+        profile_max_traces=12,
         seed=11,
         output_dir=str(tmp_path),
         no_progress=True,
@@ -70,7 +74,10 @@ def test_token_stream_selftest_runs_and_writes_outputs(tmp_path):
 
     assert res["headline"]["best_stream_group"].startswith("token_stream_")
     assert res["headline"]["best_alarm"]["error_recall"] >= 0.50
+    assert any(k.startswith("eff_rank_") for k in res["profiles"][0]["traces"])
+    assert "trajectory_shape" in res and res["trajectory_shape"]
 
     jpath, mpath = tsga.write_outputs(res, str(tmp_path), "token_stream_selftest")
     assert os.path.exists(jpath)
     assert os.path.exists(mpath)
+    assert os.path.exists(tmp_path / "token_stream_selftest.profiles.jsonl")

@@ -62,6 +62,7 @@ class StreamRow:
     error_token: float
     features: Dict[str, float]
     risk_traces: Dict[str, np.ndarray]
+    profile_traces: Dict[str, np.ndarray]
 
 
 @dataclass
@@ -145,6 +146,48 @@ def finite_slope(v: np.ndarray, pos: Optional[np.ndarray] = None) -> float:
     yy = y[m] - float(y[m].mean())
     den = float(np.dot(xx, xx))
     return float(np.dot(xx, yy) / den) if den > EPS else float("nan")
+
+
+def hump_metrics(v: np.ndarray) -> Dict[str, float]:
+    """Shape summary for "rise then fall" trajectory tests.
+
+    A hump is deliberately a descriptive shape, not a classifier.  It is present
+    when the trace has an interior peak and both early->peak and peak->late
+    changes are positive after a small robust-scale threshold.
+    """
+    x = np.asarray(v, dtype=np.float64)
+    m = np.isfinite(x)
+    if m.sum() < 5:
+        return {
+            "hump_score": float("nan"),
+            "hump_present": float("nan"),
+            "hump_peak_pos": float("nan"),
+            "hump_rise": float("nan"),
+            "hump_fall": float("nan"),
+        }
+    idx = np.where(m)[0]
+    vals = x[m]
+    peak_local = int(np.argmax(vals))
+    peak_i = int(idx[peak_local])
+    peak_pos = float(peak_i / max(1, len(x) - 1))
+    pos = np.arange(len(x), dtype=np.float64) / max(1, len(x) - 1)
+    early = safe_mean(x[pos <= 0.25])
+    late = safe_mean(x[pos >= 0.75])
+    peak = float(vals[peak_local])
+    rise = peak - early
+    fall = peak - late
+    finite = x[np.isfinite(x)]
+    scale = float(np.nanstd(finite)) if finite.size > 1 else 0.0
+    thresh = max(1e-6, 0.10 * scale)
+    interior = 0.15 <= peak_pos <= 0.85
+    present = bool(interior and rise > thresh and fall > thresh)
+    return {
+        "hump_score": float(min(rise, fall)),
+        "hump_present": float(present),
+        "hump_peak_pos": peak_pos,
+        "hump_rise": float(rise),
+        "hump_fall": float(fall),
+    }
 
 
 def robust_center_scale(v: np.ndarray) -> Tuple[float, float]:
@@ -387,7 +430,29 @@ def alpha_from_eigvals(vals: np.ndarray, *, alpha_k: int) -> float:
     return float(-slope)
 
 
-def sliding_alpha(
+def spectrum_metrics_from_eigvals(vals: np.ndarray, *, alpha_k: int) -> Dict[str, float]:
+    x = np.asarray(vals, dtype=np.float64)
+    x = np.clip(x[np.isfinite(x) & (x > EPS)], 0.0, None)
+    out = {
+        "alpha": float("nan"),
+        "eff_rank": float("nan"),
+        "entropy": float("nan"),
+        "lam1": float("nan"),
+        "stable_rank": float("nan"),
+    }
+    if x.size == 0 or float(x.sum()) <= EPS:
+        return out
+    p = x / float(x.sum())
+    ent = float(-np.sum(p * np.log(p + EPS)))
+    out["entropy"] = ent
+    out["eff_rank"] = float(np.exp(ent))
+    out["lam1"] = float(p[0])
+    out["stable_rank"] = float(1.0 / max(p[0], EPS))
+    out["alpha"] = alpha_from_eigvals(x, alpha_k=alpha_k)
+    return out
+
+
+def sliding_spectral_metrics(
     X: np.ndarray,
     U: np.ndarray,
     *,
@@ -397,23 +462,31 @@ def sliding_alpha(
     alpha_k: int,
     stride: int,
     use_unit: bool,
-) -> np.ndarray:
+) -> Dict[str, np.ndarray]:
     base = U if use_unit else X
     T = base.shape[0]
-    out = np.full(T, np.nan, dtype=np.float64)
+    out = {
+        "alpha": np.full(T, np.nan, dtype=np.float64),
+        "eff_rank": np.full(T, np.nan, dtype=np.float64),
+        "entropy": np.full(T, np.nan, dtype=np.float64),
+        "lam1": np.full(T, np.nan, dtype=np.float64),
+        "stable_rank": np.full(T, np.nan, dtype=np.float64),
+    }
     stride = max(1, int(stride))
     for t in range(max(0, min_window - 1), T, stride):
         lo = max(0, t - int(window) + 1)
-        H = np.asarray(base[lo : t + 1], dtype=np.float64)
+        H = np.asarray(base[lo : t + 1], dtype=np.float32)
         ok = np.isfinite(H).all(axis=1)
         H = H[ok]
         if H.shape[0] < min_window:
             continue
-        ages = np.arange(H.shape[0] - 1, -1, -1, dtype=np.float64)
+        ages = np.arange(H.shape[0] - 1, -1, -1, dtype=np.float32)
         w = np.exp(-float(decay) * ages)
         w /= max(float(w.sum()), EPS)
         Y = H * np.sqrt(w[:, None])
-        out[t] = alpha_from_eigvals(small_gram_eigvals(Y), alpha_k=alpha_k)
+        metrics = spectrum_metrics_from_eigvals(small_gram_eigvals(Y), alpha_k=alpha_k)
+        for k, v in metrics.items():
+            out[k][t] = v
     return out
 
 
@@ -452,6 +525,8 @@ def summarize_trace(prefix: str, v: np.ndarray, out: Dict[str, float]) -> None:
     else:
         out[f"{prefix}_argmax_pos"] = float("nan")
         out[f"{prefix}_argmin_pos"] = float("nan")
+    for k, v in hump_metrics(x).items():
+        out[f"{prefix}_{k}"] = v
 
 
 def summarize_baseline_trace(prefix: str, v: Optional[np.ndarray], out: Dict[str, float]) -> None:
@@ -698,10 +773,11 @@ def build_token_stream_features(
     stream_backend_kind: str,
     torch_mod,
     stream_device,
-) -> Tuple[Dict[str, float], Dict[str, np.ndarray]]:
+) -> Tuple[Dict[str, float], Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     X, U = normalize_rows(H)
     feats: Dict[str, float] = {}
     risk: Dict[str, np.ndarray] = {}
+    profiles: Dict[str, np.ndarray] = {}
     resultants = sliding_resultants_multi(
         U,
         windows=windows,
@@ -725,11 +801,13 @@ def build_token_stream_features(
         risk[f"spread_w{W}"] = spread
         risk[f"zspread_w{W}"] = z_spread
         risk[f"dspread_w{W}"] = d_spread
+        profiles[f"resultant_w{W}"] = R
+        profiles[f"spread_w{W}"] = spread
     if not no_alpha:
         for W in alpha_windows:
             if int(W) < 3:
                 continue
-            raw = sliding_alpha(
+            raw_metrics = sliding_spectral_metrics(
                 X,
                 U,
                 window=int(W),
@@ -739,7 +817,7 @@ def build_token_stream_features(
                 stride=alpha_stride,
                 use_unit=False,
             )
-            unit = sliding_alpha(
+            unit_metrics = sliding_spectral_metrics(
                 X,
                 U,
                 window=int(W),
@@ -749,8 +827,13 @@ def build_token_stream_features(
                 stride=alpha_stride,
                 use_unit=True,
             )
+            raw = raw_metrics["alpha"]
+            unit = unit_metrics["alpha"]
             summarize_trace(f"stream_alpha_raw_w{W}", raw, feats)
             summarize_trace(f"stream_alpha_unit_w{W}", unit, feats)
+            for metric in ("eff_rank", "entropy", "lam1", "stable_rank"):
+                summarize_trace(f"stream_{metric}_raw_w{W}", raw_metrics[metric], feats)
+                summarize_trace(f"stream_{metric}_unit_w{W}", unit_metrics[metric], feats)
             draw = abs_delta(raw)
             dunit = abs_delta(unit)
             summarize_trace(f"stream_dalpha_raw_w{W}", draw, feats)
@@ -759,7 +842,13 @@ def build_token_stream_features(
             risk[f"alpha_unit_phase_w{W}"] = dunit
             risk[f"alpha_raw_low_w{W}"] = -raw
             risk[f"alpha_unit_low_w{W}"] = -unit
-    return feats, risk
+            profiles[f"alpha_raw_w{W}"] = raw
+            profiles[f"alpha_unit_w{W}"] = unit
+            profiles[f"eff_rank_raw_w{W}"] = raw_metrics["eff_rank"]
+            profiles[f"eff_rank_unit_w{W}"] = unit_metrics["eff_rank"]
+            profiles[f"lam1_raw_w{W}"] = raw_metrics["lam1"]
+            profiles[f"lam1_unit_w{W}"] = unit_metrics["lam1"]
+    return feats, risk, profiles
 
 
 def load_stream_data(path: str, args: argparse.Namespace) -> StreamData:
@@ -809,7 +898,7 @@ def load_stream_data(path: str, args: argparse.Namespace) -> StreamData:
             "base_max_step_tokens": float(np.max(lengths)),
             "base_log_mean_step_tokens": math.log1p(float(np.mean(lengths))),
         }
-        stream_feats, risk = build_token_stream_features(
+        stream_feats, risk, profiles = build_token_stream_features(
             H,
             windows=windows,
             alpha_windows=alpha_windows,
@@ -842,6 +931,7 @@ def load_stream_data(path: str, args: argparse.Namespace) -> StreamData:
                 error_token=err_tok,
                 features=feats,
                 risk_traces=risk,
+                profile_traces=profiles,
             )
         )
     data.close()
@@ -865,6 +955,11 @@ def load_stream_data(path: str, args: argparse.Namespace) -> StreamData:
     baseline_groups = {k: v for k, v in baseline_groups.items() if v}
     kappa_names = [k for k in feature_names if k.startswith(("stream_spread", "stream_resultant", "stream_zspread"))]
     alpha_names = [k for k in feature_names if "stream_alpha" in k]
+    spectrum_names = [
+        k
+        for k in feature_names
+        if any(tok in k for tok in ("stream_alpha", "stream_eff_rank", "stream_entropy", "stream_lam1", "stream_stable_rank"))
+    ]
     dyn_names = [
         k
         for k in feature_names
@@ -874,8 +969,9 @@ def load_stream_data(path: str, args: argparse.Namespace) -> StreamData:
     stream_groups = {
         "token_stream_kappa": sorted(set(kappa_names)),
         "token_stream_alpha": sorted(set(alpha_names)),
+        "token_stream_spectrum": sorted(set(spectrum_names)),
         "token_stream_dynamics": sorted(set(dyn_names)),
-        "token_stream_all": sorted(set(kappa_names + alpha_names + dyn_names)),
+        "token_stream_all": sorted(set(kappa_names + spectrum_names + dyn_names)),
     }
     stream_groups = {k: v for k, v in stream_groups.items() if v}
     return StreamData(
@@ -943,6 +1039,92 @@ def best_single_features(sd: StreamData, *, limit: int = 40) -> Dict[str, Dict[s
         reverse=True,
     )
     return {k: v for k, v in rows[:limit]}
+
+
+def trajectory_shape_report(sd: StreamData, *, max_traces: int = 24) -> Dict[str, Any]:
+    trace_names = sorted({name for r in sd.rows for name in r.profile_traces})
+    preferred = [
+        n
+        for n in trace_names
+        if n.startswith(("resultant_w", "spread_w", "eff_rank_raw_w", "eff_rank_unit_w", "alpha_raw_w", "alpha_unit_w"))
+    ]
+    names = preferred[:max_traces]
+    out: Dict[str, Any] = {}
+    for name in names:
+        rows: List[Tuple[int, Dict[str, float]]] = []
+        for r in sd.rows:
+            if name not in r.profile_traces:
+                continue
+            hm = hump_metrics(r.profile_traces[name])
+            if np.isfinite(hm["hump_score"]):
+                rows.append((r.y_err, hm))
+        if not rows:
+            continue
+        y = np.asarray([yy for yy, _hm in rows], dtype=int)
+        present = np.asarray([hm["hump_present"] for _yy, hm in rows], dtype=np.float64)
+        score = np.asarray([hm["hump_score"] for _yy, hm in rows], dtype=np.float64)
+        peak = np.asarray([hm["hump_peak_pos"] for _yy, hm in rows], dtype=np.float64)
+        row = {
+            "n": int(len(rows)),
+            "hump_rate": float(np.nanmean(present)),
+            "hump_score": descriptive(score),
+            "peak_pos": descriptive(peak),
+        }
+        if y.size == score.size and y.size:
+            row["error"] = {
+                "hump_rate": float(np.nanmean(present[y == 1])) if np.any(y == 1) else float("nan"),
+                "hump_score": descriptive(score[y == 1]),
+                "peak_pos": descriptive(peak[y == 1]),
+            }
+            row["correct"] = {
+                "hump_rate": float(np.nanmean(present[y == 0])) if np.any(y == 0) else float("nan"),
+                "hump_score": descriptive(score[y == 0]),
+                "peak_pos": descriptive(peak[y == 0]),
+            }
+            row["hump_score_cross_auroc_error_high"] = auroc(score, y)
+        out[name] = row
+    return out
+
+
+def compact_trace(v: np.ndarray, *, max_points: int) -> List[Optional[float]]:
+    x = np.asarray(v, dtype=np.float64).reshape(-1)
+    if max_points and x.size > max_points:
+        idx = np.linspace(0, x.size - 1, int(max_points)).round().astype(int)
+        x = x[idx]
+    out: List[Optional[float]] = []
+    for val in x:
+        out.append(float(val) if np.isfinite(val) else None)
+    return out
+
+
+def build_profile_rows(sd: StreamData, *, max_points: int, max_traces: int) -> List[Dict[str, Any]]:
+    preferred = [
+        n
+        for n in sorted({name for r in sd.rows for name in r.profile_traces})
+        if n.startswith(("resultant_w", "spread_w", "eff_rank_raw_w", "eff_rank_unit_w", "alpha_raw_w", "alpha_unit_w"))
+    ]
+    names = preferred[: int(max_traces)] if max_traces else preferred
+    rows: List[Dict[str, Any]] = []
+    for r in sd.rows:
+        traces = {
+            name: compact_trace(r.profile_traces[name], max_points=max_points)
+            for name in names
+            if name in r.profile_traces
+        }
+        shapes = {name: hump_metrics(r.profile_traces[name]) for name in traces if name in r.profile_traces}
+        rows.append(
+            {
+                "idx": int(r.idx),
+                "problem_id": int(r.problem_id),
+                "y_err": int(r.y_err),
+                "n_tokens": int(r.n_tokens),
+                "n_steps": int(r.n_steps),
+                "error_token": float(r.error_token) if np.isfinite(r.error_token) else None,
+                "traces": traces,
+                "hump": finite_json(shapes),
+            }
+        )
+    return rows
 
 
 def oof_alarm_metrics(
@@ -1135,6 +1317,14 @@ def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
         "stream_scores": stream_rows,
         "single_features": single_rows,
         "alarm_scores": {k: v for k, v in ranked_alarm},
+        "trajectory_shape": trajectory_shape_report(sd, max_traces=args.shape_max_traces),
+        "profiles": build_profile_rows(
+            sd,
+            max_points=args.profile_max_points,
+            max_traces=args.profile_max_traces,
+        )
+        if args.save_profiles
+        else [],
     }
 
 
@@ -1224,6 +1414,30 @@ def write_markdown(path: str, res: Mapping[str, Any]) -> None:
             f"{fmt3(row['error_recall'])} | {fmt3(row['gold_time_recall'])} | {fmt3(row['pre_error_or_onset_recall'])} | "
             f"{fmt3(delay)} | {fmt3(endpoint)} |"
         )
+    if res.get("trajectory_shape"):
+        lines += [
+            "",
+            "## Trajectory Shape",
+            "",
+            "| trace | hump rate | error hump | correct hump | median peak | error AUROC by hump score |",
+            "|---|---:|---:|---:|---:|---:|",
+        ]
+        for name, row in list(res["trajectory_shape"].items())[:24]:
+            err = row.get("error", {})
+            cor = row.get("correct", {})
+            peak = row.get("peak_pos", {}).get("median", float("nan"))
+            lines.append(
+                f"| `{name}` | {fmt3(row.get('hump_rate'))} | {fmt3(err.get('hump_rate'))} | "
+                f"{fmt3(cor.get('hump_rate'))} | {fmt3(peak)} | {fmt3(row.get('hump_score_cross_auroc_error_high'))} |"
+            )
+    if res.get("profile_file"):
+        lines += [
+            "",
+            "## Profiles",
+            "",
+            f"- Per-chain trajectory profiles: `{res['profile_file']}`",
+            f"- Profile rows: `{res.get('profile_rows', 0)}`",
+        ]
     lines += [
         "",
         "## Interpretation Guardrails",
@@ -1241,7 +1455,17 @@ def write_outputs(res: Mapping[str, Any], output_dir: str, stem: str) -> Tuple[s
     os.makedirs(output_dir, exist_ok=True)
     jpath = os.path.join(output_dir, stem + ".json")
     mpath = os.path.join(output_dir, stem + ".md")
-    clean = finite_json(res)
+    profiles = list(res.get("profiles") or [])
+    clean_obj = dict(res)
+    clean_obj.pop("profiles", None)
+    if profiles:
+        ppath = os.path.join(output_dir, stem + ".profiles.jsonl")
+        with open(ppath, "w", encoding="utf-8") as f:
+            for row in profiles:
+                f.write(json.dumps(finite_json(row), ensure_ascii=False) + "\n")
+        clean_obj["profile_file"] = ppath
+        clean_obj["profile_rows"] = len(profiles)
+    clean = finite_json(clean_obj)
     with open(jpath, "w", encoding="utf-8") as f:
         json.dump(clean, f, ensure_ascii=False, indent=2)
     write_markdown(mpath, clean)
@@ -1295,6 +1519,19 @@ def print_result(res: Mapping[str, Any]) -> None:
             f"  {name:42s} within-best {row['within_best_direction']:.3f} "
             f"cross-best {row['cross_best_direction']:.3f}"
         )
+    if res.get("trajectory_shape"):
+        print("\nTrajectory shape:")
+        for name, row in list(res["trajectory_shape"].items())[:8]:
+            err = row.get("error", {})
+            cor = row.get("correct", {})
+            peak = row.get("peak_pos", {}).get("median", float("nan"))
+            print(
+                f"  {name:28s} hump {row.get('hump_rate', float('nan')):.3f} "
+                f"err {err.get('hump_rate', float('nan')):.3f} cor {cor.get('hump_rate', float('nan')):.3f} "
+                f"peak {peak:.3f}"
+            )
+    if res.get("profile_file"):
+        print(f"\nprofiles saved: {res['profile_file']}")
 
 
 def _unit(v: np.ndarray) -> np.ndarray:
@@ -1425,6 +1662,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--min_increment", type=float, default=0.02)
     ap.add_argument("--max_problems", type=int, default=0)
     ap.add_argument("--max_tokens", type=int, default=0)
+    ap.add_argument("--shape_max_traces", type=int, default=24)
+    ap.add_argument("--save_profiles", action="store_true", help="write per-chain trajectory traces to *.profiles.jsonl")
+    ap.add_argument("--profile_max_points", type=int, default=256, help="downsample each saved trace to this many points; 0 keeps all")
+    ap.add_argument("--profile_max_traces", type=int, default=24, help="maximum trace names saved per chain; 0 keeps all")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--output_dir", default="outputs/token_stream_geometry")
     ap.add_argument("--no_progress", action="store_true")

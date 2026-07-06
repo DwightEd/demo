@@ -43,6 +43,30 @@ H_{t-W:t} -> eigen spectrum of H H^T -> log-log spectral slope alpha
 
 Alpha is summarized by level, slope, amplitude, and phase-change magnitude.
 
+The spectral branch now also records sliding effective rank:
+
+```text
+eff_rank_t(W) = exp( entropy( spectrum(H_{t-W:t} H_{t-W:t}^T) ) )
+```
+
+For each saved trajectory the audit can export:
+
+- `resultant_w*`: direction concentration;
+- `spread_w*`: direction breadth;
+- `eff_rank_raw_w*`: raw hidden token-window effective rank;
+- `eff_rank_unit_w*`: direction-only effective rank;
+- `alpha_raw/unit_w*`: spectral slope.
+
+The report includes a descriptive hump test for "rise then fall" shapes:
+
+```text
+hump_present = interior peak AND early->peak rise AND peak->late fall
+```
+
+This does not classify correctness by itself.  It tests whether the expected
+Reasoning-Fails-Where-Step-Flow-Breaks style flow morphology actually exists in
+our traces before building a heavier breakpoint model.
+
 ## Speed Notes
 
 The first version of `--no_alpha` was still slow because it only disabled the
