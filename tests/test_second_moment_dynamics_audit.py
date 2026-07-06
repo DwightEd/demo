@@ -24,6 +24,7 @@ def _args(tmp_path, npz):
         min_increment=0.02,
         seed=5,
         output_dir=str(tmp_path),
+        no_progress=True,
         selftest=False,
     )
 

@@ -46,6 +46,13 @@ EPS = 1e-12
 
 
 try:
+    from tqdm import tqdm
+except Exception:  # pragma: no cover - progress is optional
+    def tqdm(iterable, **_kwargs):
+        return iterable
+
+
+try:
     from sklearn.impute import SimpleImputer
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import make_pipeline
@@ -54,6 +61,12 @@ try:
     HAVE_SKLEARN = True
 except Exception:  # pragma: no cover - exercised only on minimal boxes
     HAVE_SKLEARN = False
+
+
+def progress_iter(iterable, *, enabled: bool, **kwargs):
+    if not enabled:
+        return iterable
+    return tqdm(iterable, **kwargs)
 
 
 @dataclass
@@ -450,6 +463,7 @@ def select_layer(layers: Sequence[int], requested: int, nearest: bool) -> Tuple[
 
 def load_audit_data(path: str, args: argparse.Namespace) -> AuditData:
     data = np.load(path, allow_pickle=True)
+    show_progress = not bool(getattr(args, "no_progress", False))
     y_err_all, mask_all, desc = label_policy(data, args.policy)
     problem_ids_all = data["problem_ids"].astype(int)
 
@@ -483,9 +497,14 @@ def load_audit_data(path: str, args: argparse.Namespace) -> AuditData:
         raise SystemExit("need sv_clouds+cloud_sizes or respcloud+step_token_ranges")
 
     rows: List[ChainRow] = []
-    present_counts: Dict[str, int] = {}
     contrast_mask = groups_to_mask(groups0, len(problem_ids_all))
-    for i in range(n_total):
+    for i in progress_iter(
+        range(n_total),
+        enabled=show_progress,
+        desc="token spectra",
+        unit="chain",
+        dynamic_ncols=True,
+    ):
         if not contrast_mask[i]:
             continue
         steps = get_steps(i)
@@ -516,10 +535,6 @@ def load_audit_data(path: str, args: argparse.Namespace) -> AuditData:
                 positions=pos,
             )
         )
-        for k, v in feats.items():
-            if np.isfinite(v):
-                present_counts[k] = present_counts.get(k, 0) + 1
-
     if len(rows) < 20:
         raise SystemExit("not enough rows with usable token clouds")
 
@@ -738,6 +753,8 @@ def same_problem_increment_ci(
     *,
     n_boot: int,
     seed: int,
+    progress: bool = False,
+    desc: str = "bootstrap",
 ) -> Dict[str, Any]:
     point_f, pairs = within_pair_auroc(groups, sf, y)
     point_b, _ = within_pair_auroc(groups, sb, y)
@@ -746,7 +763,15 @@ def same_problem_increment_ci(
         return {"point": point, "lo": None, "hi": None, "sig": False, "pairs": int(pairs)}
     rng = np.random.default_rng(seed)
     vals = []
-    for _ in range(int(n_boot)):
+    boot_iter = progress_iter(
+        range(int(n_boot)),
+        enabled=progress and int(n_boot) >= 50,
+        desc=desc,
+        unit="boot",
+        leave=False,
+        dynamic_ncols=True,
+    )
+    for _ in boot_iter:
         chosen = [groups[int(j)] for j in rng.integers(0, len(groups), size=len(groups))]
         af, _ = within_pair_auroc(chosen, sf, y)
         ab, _ = within_pair_auroc(chosen, sb, y)
@@ -852,6 +877,7 @@ def build_subset_masks(ad: AuditData) -> Dict[str, np.ndarray]:
 
 
 def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
+    show_progress = not bool(getattr(args, "no_progress", False))
     ad = load_audit_data(path, args)
     B = feature_matrix(ad.rows, ad.baseline_names)
     base_score = oof_scores(B, ad.y, ad.problem_ids, folds=args.folds, seed=args.seed)
@@ -882,9 +908,18 @@ def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
     residual_rows: Dict[str, Any] = {}
     best_residual_score: Optional[np.ndarray] = None
     best_residual_name = ""
-    for j, name in enumerate(single_scores):
+    residual_items = list(single_scores.items())
+    for j, (name, single_score) in enumerate(
+        progress_iter(
+            residual_items,
+            enabled=show_progress,
+            desc="residual Gram features",
+            unit="feature",
+            dynamic_ncols=True,
+        )
+    ):
         rscore = oof_residual_feature(
-            single_scores[name],
+            single_score,
             B,
             ad.y,
             ad.problem_ids,
@@ -900,7 +935,16 @@ def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
 
     group_rows: Dict[str, Any] = {}
     group_scores: Dict[str, np.ndarray] = {}
-    for gi, (gname, names) in enumerate(ad.gram_groups.items()):
+    group_items = list(ad.gram_groups.items())
+    for gi, (gname, names) in enumerate(
+        progress_iter(
+            group_items,
+            enabled=show_progress,
+            desc="OOF Gram groups",
+            unit="group",
+            dynamic_ncols=True,
+        )
+    ):
         Xg = feature_matrix(ad.rows, names)
         full = oof_scores(np.column_stack([B, Xg]), ad.y, ad.problem_ids, folds=args.folds, seed=args.seed + 17 + gi)
         row = evaluate_score(f"OOF:baseline+{gname}", full, ad.y, ad.groups)
@@ -912,6 +956,8 @@ def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
             ad.groups,
             n_boot=args.bootstrap,
             seed=args.seed + 1000 + gi,
+            progress=show_progress,
+            desc=f"bootstrap {gname}",
         )
         group_rows[gname] = row
         group_scores[gname] = full
@@ -1279,6 +1325,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--min_increment", type=float, default=0.02)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--output_dir", default="outputs/second_moment_dynamics")
+    ap.add_argument("--no_progress", action="store_true", help="disable tqdm progress bars")
     ap.add_argument("--selftest", action="store_true")
     return ap
 
