@@ -335,6 +335,86 @@ If all second-moment gates fail, retire the second-moment branch as a mainline
 claim and return to richer single-forward signals: boundary logits, attention
 lookback/prompt connectivity, and token-level reconvergence.
 
+## Remote Gram Dynamics Result
+
+Remote run on `gsm8k_v2_custom.npz` does **not** support a second-moment Gram
+dynamics increment over the static baseline.
+
+Setting:
+
+- samples: 1658; errors: 462; problems: 147;
+- source: `sv_clouds`, layer 16;
+- primary metric: OOF same-problem paired AUROC;
+- baseline: exp-weighted cloud spread/resultant + step length + available
+  uncertainty/static controls.
+
+Headline:
+
+- baseline: 0.685;
+- best Gram group: `token_matrix_level`, 0.660;
+- increment: -0.025, bootstrap CI [-0.058, +0.005];
+- decision: no robust OOF same-problem increment over the static baseline.
+
+Group increments:
+
+| Group | AUROC | Increment |
+|---|---:|---:|
+| `baseline+token_matrix_level` | 0.660 | -0.025 |
+| `baseline+token_raw_matrix` | 0.658 | -0.027 |
+| `baseline+token_centered_matrix` | 0.654 | -0.031 |
+| `baseline+token_matrix_dynamics` | 0.644 | -0.041 |
+| `baseline+token_matrix_all` | 0.635 | -0.051 |
+| `baseline+token_spectral_tail` | 0.634 | -0.051 |
+| `baseline+unit_direction_ablation` | 0.633 | -0.052 |
+| `baseline` | 0.685 | 0.000 |
+
+Top scalar observations:
+
+- best scalar: `tok_norm_mean_late`, 0.667;
+- best Gram scalar: `tok_raw_log_energy_mean`, best-direction 0.662 but raw
+  orientation 0.338;
+- best residual over baseline: `unit_cen_log_energy_volatility`, 0.614.
+
+Subsets:
+
+| Subset | n | problems | baseline | group | residual |
+|---|---:|---:|---:|---:|---:|
+| all | 1658 | 147 | 0.685 | 0.660 | 0.614 |
+| ambiguous high spread q50 | 829 | 106 | 0.679 | 0.631 | 0.641 |
+| ambiguous high spread q75 | 415 | 68 | 0.728 | 0.636 | 0.654 |
+| confident low entropy q50 | 829 | 97 | 0.690 | 0.661 | 0.653 |
+| hard high-error-rate problems | 886 | 81 | 0.661 | 0.659 | 0.617 |
+
+Interpretation:
+
+- Direct token-matrix Gram features are not unlocking information beyond the
+  static spread/resultant baseline.  The strongest Gram scalar is mostly a
+  raw-energy/norm quantity and even has reversed raw orientation, which suggests
+  it is not a stable risk mechanism.
+- The dynamic Gram features are worse than level features.  This agrees with
+  the previous event-study result: the error signal is synchronous/late rather
+  than a clean precursor or covariance rupture.
+- Centered, raw, unit-direction, and spectral-tail variants all fall below the
+  baseline.  This rules out the simple explanation that the first
+  implementation merely used the wrong centering or normalization.
+- Subset tests do not rescue the branch.  Even in high-spread, confident
+  low-entropy, and hard-problem subsets, Gram groups do not overtake the static
+  baseline.
+- OOF `baseline+Gram` can be lower than `baseline` because the added Gram
+  block is high-dimensional, correlated with spread/length/norm, and noisy
+  under same-problem splits.  Regularized OOF models are not monotone: adding a
+  weak correlated block can shift weights away from the robust static scalar and
+  reduce held-out paired ranking.
+
+Decision:
+
+- Retire direct step-token Gram/spectrum dynamics as a mainline method claim.
+- Keep `second_moment_dynamics_audit.py` as a negative-result audit and as a
+  guard against rebranding second moments as a new signal.
+- Future work should move to genuinely orthogonal channels: operation/premise
+  choice consistency, causal evidence flow, fork-token progress value, or
+  knowledge-boundary/output-commitment mismatch.
+
 ## Optimization Suggestions
 
 1. Do not use cumulative drift as the main detector.
