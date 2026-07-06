@@ -212,6 +212,12 @@ Current selftest status:
 - The synthetic selftest verifies that the model can recover a latent transition/duration grammar and write outputs.
 - It is not evidence that HSMM beats static baselines; that must be judged on `gsm8k_v2_5shot.npz` and `gsm8k_v2_custom.npz`.
 
+First real-data smoke result:
+
+- On a 40-problem `gsm8k_v2_custom.npz` smoke run, HSMM full AUROC was `0.538`, censor80 AUROC was `0.506`, while static `mean:cloud_spread` reached `0.682`.
+- Interpretation: the current HSMM implementation does not recover useful latent state grammar from the saved channels. This is a negative result, not a paper claim.
+- Consequence: do not keep tuning HSMM blindly. First test whether any non-static path-shape information exists at all.
+
 Run commands:
 
 ```bash
@@ -227,4 +233,46 @@ python within_problem_regime_hsmm_audit.py \
   --folds 5 \
   --permutations 200 \
   --output_dir outputs/within_problem_regime_hsmm_custom
+```
+
+## Implemented Follow-Up: `within_problem_path_kernel_audit.py`
+
+The next implementation tests trajectory shape more directly before adding more latent-state machinery.
+
+Core question:
+
+```text
+After controlling for problem identity and removing each chain's own static level/trend,
+do correct and incorrect paths still come from different distributions?
+```
+
+Methods:
+
+- same-problem robust centering by unlabeled problem median/MAD;
+- `level`, `shape_mean`, and `shape_linear` path representations;
+- endpoint-censored variants;
+- DCT, flattened path, and path-signature features;
+- cross-fitted kernel witness scores trained only on training problems;
+- conditional MMD two-sample tests with labels permuted within each problem.
+
+Important distinction:
+
+- If `level` wins but `shape_mean/shape_linear` fails, the current signal is mostly static spread/entropy level.
+- If `shape_mean/shape_linear` survives and is significant under conditional MMD, then there is real path-order/shape information worth modeling with richer latent regimes.
+
+Run command:
+
+```bash
+python within_problem_path_kernel_audit.py \
+  --input data/gsm8k_v2_custom.npz \
+  --policy answer_format_ok \
+  --channels cloud_spread,out_entropy,pr_mid,ae_mid \
+  --require_channels \
+  --grid 32 \
+  --dct_components 8 \
+  --signature_order 2 \
+  --folds 5 \
+  --score_permutations 200 \
+  --mmd_permutations 200 \
+  --output_dir outputs/within_problem_path_kernel_custom
 ```

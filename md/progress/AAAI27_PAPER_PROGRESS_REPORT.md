@@ -295,9 +295,9 @@ token-level readers can recover step-level failures from hidden-state relations.
 
 ## Next Paper-Critical Experiments
 
-1. Run the newly implemented `within_problem_regime_hsmm_audit.py` on `gsm8k_v2_5shot.npz` and `gsm8k_v2_custom.npz`.
-2. Test whether correct/error samples differ by latent transition and duration grammar, not by distance from a single "healthy trajectory".
-3. Treat `full_gsm8k.npz` dynamic results as a negative/control result: dynamic groups did not improve over `anchor_uncertainty`, and `pos`/late CUSUM localization is contaminated by late first-error position.
+1. Treat the `within_problem_regime_hsmm_audit.py` 40-problem smoke result as negative: HSMM `0.538` / censor80 `0.506` vs static `mean:cloud_spread=0.682`.
+2. Run `within_problem_path_kernel_audit.py` to test whether any shape-only trajectory information exists after same-problem centering and per-chain level/trend removal.
+3. If shape-only conditional MMD or witness scores fail, stop adding latent-state complexity and prioritize richer extraction channels.
 4. Re-extract same-problem samples with `sv_out_committal`, `sv_tok_entropy`, and `sv_tok_committal` only after the existing-channel shape model shows a non-endpoint same-problem signal.
 5. Add prompt-anchor hidden banks so the anchor signal is semantic rather than a single question-vector cosine.
 6. Build one minimal intervention only after the detector survives same-problem and endpoint-control audits.
