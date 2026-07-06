@@ -270,6 +270,13 @@ dynamic entropy adds stable OOF increment over static entropy/spread,
 or improves online FPR/recall/delay at fixed FPR.
 ```
 
+Implementation status:
+
+- Use `chain_dynamics_audit.py` on `data/features/full_*.npz`; it consumes `stepcloud`, `stepvec/qvec`, `tok_U_D`, `tok_U_C`, and strided `tok_U_E` through `tok_U_E_offsets`.
+- The audit now reports explicit uncertainty (`unc_entropy`, `unc_committal`, `unc_epistemic`) and causal burst/rebound/CUSUM dynamics for each uncertainty channel.
+- Primary comparison groups: `anchor_uncertainty`, `explicit_uncertainty`, `uncertainty_dynamics`, `dynamic_online`, and `transition_ablation`.
+- Decision rule before new sampling: only re-extract or resample channels that show stable OOF increment, better first-error localization, or better conformal alarm recall/delay on the existing full data.
+
 ### Experiment B: Failure-mode taxonomy
 
 Goal: test committed vs persistent failure modes in our saved samples.

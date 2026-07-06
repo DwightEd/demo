@@ -162,6 +162,52 @@ def per_step_token_var(arr: Optional[np.ndarray], ranges: np.ndarray) -> np.ndar
     return out
 
 
+def per_step_offset_mean(arr: Optional[np.ndarray], offsets: Optional[np.ndarray], ranges: np.ndarray) -> np.ndarray:
+    """Mean of a strided token trace whose entries are indexed by response offsets."""
+    T = len(ranges)
+    out = np.full(T, np.nan)
+    if arr is None or offsets is None:
+        return out
+    a = np.asarray(arr, float).reshape(-1)
+    off = np.asarray(offsets, int).reshape(-1)
+    m = np.isfinite(a)
+    a = a[m]
+    off = off[m]
+    if len(a) == 0 or len(off) != len(a):
+        return out
+    a0 = int(ranges[0, 0])
+    for t, (lo0, hi0) in enumerate(ranges):
+        lo = max(0, int(lo0) - a0)
+        hi = max(lo, int(hi0) - a0)
+        keep = (off >= lo) & (off <= hi)
+        if keep.any():
+            out[t] = float(np.nanmean(a[keep]))
+    return out
+
+
+def per_step_offset_var(arr: Optional[np.ndarray], offsets: Optional[np.ndarray], ranges: np.ndarray) -> np.ndarray:
+    """Variance of a strided token trace whose entries are indexed by response offsets."""
+    T = len(ranges)
+    out = np.full(T, np.nan)
+    if arr is None or offsets is None:
+        return out
+    a = np.asarray(arr, float).reshape(-1)
+    off = np.asarray(offsets, int).reshape(-1)
+    m = np.isfinite(a)
+    a = a[m]
+    off = off[m]
+    if len(a) == 0 or len(off) != len(a):
+        return out
+    a0 = int(ranges[0, 0])
+    for t, (lo0, hi0) in enumerate(ranges):
+        lo = max(0, int(lo0) - a0)
+        hi = max(lo, int(hi0) - a0)
+        keep = (off >= lo) & (off <= hi)
+        if keep.any():
+            out[t] = float(np.nanvar(a[keep]))
+    return out
+
+
 def delta(x: np.ndarray, *, reverse: bool = False) -> np.ndarray:
     v = np.asarray(x, float)
     out = np.full(len(v), np.nan)
@@ -204,6 +250,8 @@ def load_chains(npz_path: str, *, layer: int, max_chains: int = 0) -> Tuple[List
 
     UD = z["tok_U_D"] if "tok_U_D" in z.files else None
     UC = z["tok_U_C"] if "tok_U_C" in z.files else None
+    UE = z["tok_U_E"] if "tok_U_E" in z.files else None
+    UEO = z["tok_U_E_offsets"] if "tok_U_E_offsets" in z.files else None
 
     SV = z["stepvec"] if "stepvec" in z.files else None
     qvec = z["qvec"] if "qvec" in z.files else None
@@ -246,12 +294,23 @@ def load_chains(npz_path: str, *, layer: int, max_chains: int = 0) -> Tuple[List
         else:
             missing["stepattn"] += 1
 
-        ud = np.asarray(UD[i], float) if UD is not None else None
-        uc = np.asarray(UC[i], float) if UC is not None else None
+        ud = np.asarray(UD[i], float) if UD is not None and UD[i] is not None else None
+        uc = np.asarray(UC[i], float) if UC is not None and UC[i] is not None else None
+        ue = np.asarray(UE[i], float) if UE is not None and UE[i] is not None else None
+        ueo = np.asarray(UEO[i], int) if UEO is not None and UEO[i] is not None else None
         feats["U_D_mean"] = per_step_token_mean(ud, rng)
         feats["U_D_var"] = per_step_token_var(ud, rng)
         feats["U_C_mean"] = per_step_token_mean(uc, rng)
         feats["U_C_var"] = per_step_token_var(uc, rng)
+        if ue is not None and ueo is not None and len(ue) == len(ueo):
+            feats["U_E_mean"] = per_step_offset_mean(ue, ueo, rng)
+            feats["U_E_var"] = per_step_offset_var(ue, ueo, rng)
+        else:
+            feats["U_E_mean"] = per_step_token_mean(ue, rng)
+            feats["U_E_var"] = per_step_token_var(ue, rng)
+        feats["unc_entropy"] = feats["U_D_mean"]
+        feats["unc_committal"] = feats["U_C_mean"]
+        feats["unc_epistemic"] = feats["U_E_mean"]
 
         if SV is not None and qvec is not None and svi is not None and SV[i] is not None:
             sv = np.asarray(SV[i], float)
@@ -318,6 +377,12 @@ def load_chains(npz_path: str, *, layer: int, max_chains: int = 0) -> Tuple[List
         "attn_features": an,
         "has_attention": bool(has_attn),
         "has_stepvec_qvec": bool(SV is not None and qvec is not None and svi is not None),
+        "has_uncertainty": {
+            "tok_U_D": bool(UD is not None),
+            "tok_U_C": bool(UC is not None),
+            "tok_U_E": bool(UE is not None),
+            "tok_U_E_offsets": bool(UEO is not None),
+        },
         "missing": missing,
     }
     return chains, meta
@@ -342,7 +407,7 @@ def make_selftest_npz(path: str, *, n_chains: int = 80, layer: int = 14, seed: i
     attn_names = np.array(["q_frac", "sink_frac", "attn_entropy"], dtype=object)
 
     gold, groups = [], []
-    step_ranges_all, stepcloud, stepgeom, tok_ud, tok_uc = [], [], [], [], []
+    step_ranges_all, stepcloud, stepgeom, tok_ud, tok_uc, tok_ue, tok_ue_offsets = [], [], [], [], [], [], []
     stepattn, stepvec, steps_text, qvecs = [], [], [], []
     d = 24
 
@@ -425,6 +490,8 @@ def make_selftest_npz(path: str, *, n_chains: int = 80, layer: int = 14, seed: i
 
         ud_tok = np.concatenate([rng.normal(ud_step[t], 0.025, size=int(lens[t])) for t in range(T)])
         uc_tok = np.concatenate([rng.normal(uc_step[t], 0.025, size=int(lens[t])) for t in range(T)])
+        ue_tok_full = np.concatenate([rng.normal(ud_step[t] * 1.4, 0.035, size=int(lens[t])) for t in range(T)])
+        ue_off = np.arange(0, len(ue_tok_full), 2, dtype=np.int32)
 
         stepcloud.append(sc)
         stepgeom.append(sg)
@@ -433,6 +500,8 @@ def make_selftest_npz(path: str, *, n_chains: int = 80, layer: int = 14, seed: i
         qvecs.append(qv)
         tok_ud.append(ud_tok)
         tok_uc.append(uc_tok)
+        tok_ue.append(ue_tok_full[ue_off])
+        tok_ue_offsets.append(ue_off)
         steps_text.append(np.array([f"step {t}: synthetic reasoning state" for t in range(T)], dtype=object))
 
     np.savez_compressed(
@@ -451,6 +520,8 @@ def make_selftest_npz(path: str, *, n_chains: int = 80, layer: int = 14, seed: i
         attn_stored=np.array(True),
         tok_U_D=_object_array(tok_ud),
         tok_U_C=_object_array(tok_uc),
+        tok_U_E=_object_array(tok_ue),
+        tok_U_E_offsets=_object_array(tok_ue_offsets),
         stepvec=_object_array(stepvec),
         qvec=np.asarray(qvecs, float),
         sv_layers=sv_layers,

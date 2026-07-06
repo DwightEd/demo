@@ -132,6 +132,28 @@ def future_recovery(spread: np.ndarray, *, horizon: int = 1) -> np.ndarray:
     return out
 
 
+def lag_burst(x: np.ndarray, *, lag: int = 1) -> np.ndarray:
+    """Causal jump over a short lag; positive values are local uncertainty bursts."""
+    v = np.asarray(x, float)
+    out = np.full(len(v), np.nan)
+    for t in range(max(1, lag), len(v)):
+        if np.isfinite(v[t]) and np.isfinite(v[t - lag]):
+            out[t] = float(v[t] - v[t - lag])
+    return out
+
+
+def causal_rebound(x: np.ndarray, *, warmup: int = 1) -> np.ndarray:
+    """Causal rise above the best previous low point."""
+    v = np.asarray(x, float)
+    out = np.full(len(v), np.nan)
+    for t in range(warmup, len(v)):
+        hist = v[:t]
+        hist = hist[np.isfinite(hist)]
+        if len(hist) and np.isfinite(v[t]):
+            out[t] = float(v[t] - np.min(hist))
+    return out
+
+
 def add_chain_dynamic_features(chains: Sequence[Chain], *, recovery_horizon: int, lam: float, kref: float) -> None:
     for c in chains:
         if "resultant" in c.features:
@@ -163,6 +185,16 @@ def add_chain_dynamic_features(chains: Sequence[Chain], *, recovery_horizon: int
             uncertainty = np.full(c.n_steps, np.nan)
         c.features["uncertainty"] = uncertainty
         c.features["cz_uncertainty"] = causal_z(uncertainty)
+
+        for nm in ("unc_entropy", "unc_committal", "unc_epistemic"):
+            if nm not in c.features:
+                continue
+            v = arr(c, nm)
+            c.features[f"d_{nm}"] = delta(v)
+            c.features[f"cz_{nm}"] = causal_z(v)
+            c.features[f"edyn_{nm}_burst"] = lag_burst(v, lag=1)
+            c.features[f"edyn_{nm}_rebound"] = causal_rebound(v)
+            c.features[f"edyn_{nm}_cusum"] = leaky_cusum(c.features[f"cz_{nm}"], lam=lam, kref=kref)
 
         z_spread = chain_z(spread)
         z_anchor = chain_z(anchor_loss)
@@ -241,7 +273,17 @@ def add_trajectory_pattern_features(
 def choose_obs(chains: Sequence[Chain], requested: Optional[str], *, min_finite: int) -> List[str]:
     if requested:
         return [x.strip() for x in requested.split(",") if x.strip()]
-    candidates = ["spread", "anchor_loss", "uncertainty", "step_direction_jump", "geom_ae", "cloud_D"]
+    candidates = [
+        "spread",
+        "anchor_loss",
+        "uncertainty",
+        "unc_entropy",
+        "unc_committal",
+        "unc_epistemic",
+        "step_direction_jump",
+        "geom_ae",
+        "cloud_D",
+    ]
     return [nm for nm in candidates if finite_count(chains, nm) >= min_finite]
 
 
@@ -250,6 +292,9 @@ def short_name(name: str) -> str:
         "spread": "spread",
         "anchor_loss": "anchor",
         "uncertainty": "unc",
+        "unc_entropy": "UD",
+        "unc_committal": "UC",
+        "unc_epistemic": "UE",
         "step_direction_jump": "jump",
         "geom_ae": "ae",
         "cloud_D": "cloudD",
@@ -831,7 +876,34 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
     if transition_feature_names and "transition_surprise" not in transition_feature_names:
         transition_feature_names.extend(["transition_surprise", "transition_cusum"])
 
-    static = ["spread", "resultant", "uncertainty", "anchor_loss", "step_direction_jump", "logN", "pos"]
+    uncertainty_family = [
+        "unc_entropy",
+        "unc_committal",
+        "unc_epistemic",
+    ]
+    uncertainty_dynamics = []
+    for nm in uncertainty_family:
+        uncertainty_dynamics.extend(
+            [
+                f"d_{nm}",
+                f"cz_{nm}",
+                f"edyn_{nm}_burst",
+                f"edyn_{nm}_rebound",
+                f"edyn_{nm}_cusum",
+            ]
+        )
+    uncertainty_dynamics = [
+        nm for nm in uncertainty_dynamics if finite_count(chains, nm) >= args.min_finite
+    ]
+    static = [
+        "spread",
+        "resultant",
+        "uncertainty",
+        "anchor_loss",
+        "step_direction_jump",
+        "logN",
+        "pos",
+    ] + uncertainty_family
     dynamic = [
         "d_spread",
         "cz_spread",
@@ -844,7 +916,7 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
         "confident_cusum",
         "transition_surprise",
         "transition_cusum",
-    ] + transition_feature_names
+    ] + uncertainty_dynamics + transition_feature_names
 
     residual_source = [
         "spread",
@@ -853,7 +925,7 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
         "d_spread",
         "cz_spread",
         "spread_cusum",
-    ] + transition_feature_names
+    ] + uncertainty_dynamics + transition_feature_names
     residual_info = add_control_residuals(
         chains,
         residual_source,
@@ -866,6 +938,9 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
         "spread",
         "anchor_loss",
         "uncertainty",
+        "unc_entropy",
+        "unc_committal",
+        "unc_epistemic",
         "unanchored_divergence",
         "confident_divergence",
         "transition_surprise",
@@ -880,7 +955,21 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
     groups = {
         "static": ["spread", "logN", "pos"],
         "anchor_uncertainty": ["spread", "anchor_loss", "uncertainty", "logN", "pos"],
-        "dynamic_online": ["spread", "d_spread", "cz_spread", "spread_cusum", "unanchored_cusum", "confident_cusum", "transition_surprise", "transition_cusum", "logN", "pos"],
+        "explicit_uncertainty": ["spread", "anchor_loss", "unc_entropy", "unc_committal", "unc_epistemic", "logN", "pos"],
+        "uncertainty_dynamics": ["spread", "anchor_loss", "logN", "pos"] + uncertainty_dynamics,
+        "dynamic_online": [
+            "spread",
+            "d_spread",
+            "cz_spread",
+            "spread_cusum",
+            "unanchored_cusum",
+            "confident_cusum",
+            "transition_surprise",
+            "transition_cusum",
+            "logN",
+            "pos",
+        ]
+        + uncertainty_dynamics,
         "transition_ablation": ["spread", "logN", "pos"] + transition_feature_names,
         "control_residual": residual_names,
         "trajectory_pattern": ["spread", "anchor_loss", "uncertainty", "logN", "pos"] + pattern_names,
@@ -956,11 +1045,15 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
                     "next_recovery_1",
                     "anchor_loss",
                     "uncertainty",
+                    "unc_entropy",
+                    "unc_committal",
+                    "unc_epistemic",
                     "unanchored_divergence",
                     "confident_divergence",
                     "transition_surprise",
                     "transition_cusum",
                 )
+                + tuple(uncertainty_dynamics[:8])
                 + tuple(pattern_names[:8])
                 if finite_count(chains, nm) >= 20
             ],
@@ -1048,7 +1141,7 @@ def make_selftest_npz(path: str, *, n_chains: int = 90, layer: int = 14, seed: i
     cloud_names = np.array(["resultant", "coherence", "cloud_D"], dtype=object)
     geom_names = np.array(["ae"], dtype=object)
     gold, pids, ranges_all = [], [], []
-    stepcloud, stepgeom, tok_ud, tok_uc, stepvec, qvecs, texts = [], [], [], [], [], [], []
+    stepcloud, stepgeom, tok_ud, tok_uc, tok_ue, tok_ue_offsets, stepvec, qvecs, texts = [], [], [], [], [], [], [], [], []
     d = 24
     for i in range(n_chains):
         T = int(rng.integers(6, 9))
@@ -1105,10 +1198,14 @@ def make_selftest_npz(path: str, *, n_chains: int = 90, layer: int = 14, seed: i
             prev = cur
         ud = np.concatenate([rng.normal(uncertainty[t], 0.02, size=int(lens[t])) for t in range(T)])
         uc = np.concatenate([rng.normal(uncertainty[t] * 0.8, 0.02, size=int(lens[t])) for t in range(T)])
+        ue_full = np.concatenate([rng.normal(uncertainty[t] * 1.2, 0.03, size=int(lens[t])) for t in range(T)])
+        ue_off = np.arange(0, len(ue_full), 2, dtype=int)
         stepcloud.append(sc)
         stepgeom.append(sg)
         tok_ud.append(ud)
         tok_uc.append(uc)
+        tok_ue.append(ue_full[ue_off])
+        tok_ue_offsets.append(ue_off)
         stepvec.append(sv)
         qvecs.append(qv)
         texts.append(np.array([f"synthetic step {t}" for t in range(T)], dtype=object))
@@ -1125,6 +1222,8 @@ def make_selftest_npz(path: str, *, n_chains: int = 90, layer: int = 14, seed: i
         geom_feature_names=geom_names,
         tok_U_D=_object_array(tok_ud),
         tok_U_C=_object_array(tok_uc),
+        tok_U_E=_object_array(tok_ue),
+        tok_U_E_offsets=_object_array(tok_ue_offsets),
         stepvec=_object_array(stepvec),
         qvec=np.asarray(qvecs, float),
         sv_layers=sv_layers,
