@@ -295,8 +295,9 @@ token-level readers can recover step-level failures from hidden-state relations.
 
 ## Next Paper-Critical Experiments
 
-1. Run the low-rank transition tube audit on `gsm8k_v2_5shot.npz` and `gsm8k_v2_custom.npz`.
-2. Re-extract same-problem samples with `sv_out_committal`, `sv_tok_entropy`, and `sv_tok_committal` saved.
-3. Add prompt-anchor hidden banks so the anchor signal is semantic rather than a single question-vector cosine.
-4. Validate on ProcessBench MATH and OmniMath with the same metrics.
-5. Build one minimal intervention: when geometry health crosses a threshold, branch/resample the current step and choose the lower-risk continuation.
+1. Replace cross-problem dynamic reruns with a same-problem functional shape model on `gsm8k_v2_5shot.npz` and `gsm8k_v2_custom.npz`.
+2. Use problem-conditioned correct-chain baselines, within-problem pairwise ranking, and functional cluster permutation to test trajectory-shape differences.
+3. Treat `full_gsm8k.npz` dynamic results as a negative/control result: dynamic groups did not improve over `anchor_uncertainty`, and `pos`/late CUSUM localization is contaminated by late first-error position.
+4. Re-extract same-problem samples with `sv_out_committal`, `sv_tok_entropy`, and `sv_tok_committal` only after the existing-channel shape model shows a non-endpoint same-problem signal.
+5. Add prompt-anchor hidden banks so the anchor signal is semantic rather than a single question-vector cosine.
+6. Build one minimal intervention only after the detector survives same-problem and endpoint-control audits.

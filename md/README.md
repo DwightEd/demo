@@ -23,6 +23,8 @@ Research findings, literature notes, falsification records, and hypothesis/insig
 - `DYNAMICS_README.md` - dynamic-vs-static analysis notes.
 - `TRAJECTORY_DESIGN.md` and `TRAJECTORY_README.md` - trajectory-phase-transition branch notes.
 - `2026-07-06-pluggable-llm-monitor-research-plan.md` - literature-derived monitor/intervention plan.
+- `2026-07-06-localized-trajectory-difference-methods.md` - localized trajectory-difference methods for same-problem samples.
+- `2026-07-06-within-problem-functional-shape-model.md` - same-problem functional modeling plan after the full-data dynamic negative result.
 
 ## `guides/`
 
