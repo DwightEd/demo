@@ -15,6 +15,7 @@ def _args(tmp_path, npz):
         require_channels=False,
         min_channel_coverage=0.8,
         min_per_class=1,
+        max_problems=0,
         grid=12,
         problem_center="problem_median",
         include_abs_delta=False,
@@ -49,4 +50,3 @@ def test_regime_hsmm_selftest_core(tmp_path):
     jpath, mpath = hsmm.write_outputs(res, str(tmp_path), "regime_selftest")
     assert os.path.exists(jpath)
     assert os.path.exists(mpath)
-

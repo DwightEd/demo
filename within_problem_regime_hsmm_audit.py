@@ -209,6 +209,11 @@ def load_regime_data(path: str, args: argparse.Namespace) -> RegimeData:
     idx = np.where(pd.contrast_mask)[0]
     if idx.size < 20:
         raise SystemExit("not enough contrastive same-problem samples")
+    if args.max_problems:
+        keep_problems = np.unique(pd.problem_ids[idx])[: int(args.max_problems)]
+        idx = idx[np.isin(pd.problem_ids[idx], keep_problems)]
+        if idx.size < 20:
+            raise SystemExit("--max_problems left too few contrastive samples")
     local_problem_ids = pd.problem_ids[idx]
     local_y = pd.y_err[idx].astype(int)
     tensor = pd.tensor[idx]
@@ -1053,6 +1058,7 @@ def main() -> None:
     ap.add_argument("--require_channels", action="store_true")
     ap.add_argument("--min_channel_coverage", type=float, default=0.80)
     ap.add_argument("--min_per_class", type=int, default=1)
+    ap.add_argument("--max_problems", type=int, default=0, help="debug/smoke limit; 0 uses all contrastive problems")
     ap.add_argument("--grid", type=int, default=32)
     ap.add_argument("--problem_center", default="problem_median", choices=["problem_median", "none"])
     ap.add_argument("--include_abs_delta", action="store_true")
