@@ -45,7 +45,7 @@ Python files are not moved in this cleanup because many are root-level experimen
 Suggested code groups:
 
 - Extraction/data: `extract_features.py`, `10_sample_and_extract.py`, `data_loading*.py`, `hidden_io.py`, `npz_to_json.py`, `responses_to_json.py`.
-- Main audits: `mainline_validation_suite.py`, `chain_dynamics_audit.py`, `trajectory_relative_audit.py`, `within_problem_trajectory_audit.py`, `validate_phase_instability.py`.
+- Main audits: `mainline_validation_suite.py`, `chain_dynamics_audit.py`, `trajectory_relative_audit.py`, `within_problem_trajectory_audit.py`, `within_problem_regime_hsmm_audit.py`, `validate_phase_instability.py`.
 - Multisample audits: `multisample_*_audit.py`, `multisample_feature_distribution.py`, `multisample_to_json.py`.
 - Geometry/spectral experiments: `trajectory_geometry.py`, `phase_transition.py`, `spectral_*`, `dir_*`, `kappa_*`, `step_*`, `seq_gram.py`, `step_gram.py`.
 - Online/intervention prototypes: `online_intervene.py`, `intervene_prototype.py`, `intervene_bestofn.py`, `select_bestof.py`, `selfconsistency_cusum.py`, `conformal_cusum.py`.

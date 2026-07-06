@@ -295,8 +295,8 @@ token-level readers can recover step-level failures from hidden-state relations.
 
 ## Next Paper-Critical Experiments
 
-1. Replace cross-problem dynamic reruns with a same-problem functional shape model on `gsm8k_v2_5shot.npz` and `gsm8k_v2_custom.npz`.
-2. Use problem-conditioned correct-chain baselines, within-problem pairwise ranking, and functional cluster permutation to test trajectory-shape differences.
+1. Run the newly implemented `within_problem_regime_hsmm_audit.py` on `gsm8k_v2_5shot.npz` and `gsm8k_v2_custom.npz`.
+2. Test whether correct/error samples differ by latent transition and duration grammar, not by distance from a single "healthy trajectory".
 3. Treat `full_gsm8k.npz` dynamic results as a negative/control result: dynamic groups did not improve over `anchor_uncertainty`, and `pos`/late CUSUM localization is contaminated by late first-error position.
 4. Re-extract same-problem samples with `sv_out_committal`, `sv_tok_entropy`, and `sv_tok_committal` only after the existing-channel shape model shows a non-endpoint same-problem signal.
 5. Add prompt-anchor hidden banks so the anchor signal is semantic rather than a single question-vector cosine.

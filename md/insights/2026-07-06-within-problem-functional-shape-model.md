@@ -149,24 +149,82 @@ Every proposed method must report:
 
 ## Immediate Code Target
 
-Build `within_problem_shape_model_audit.py` for `gsm8k_v2_5shot.npz` and `gsm8k_v2_custom.npz`.
+Build `within_problem_regime_hsmm_audit.py` for `gsm8k_v2_5shot.npz` and `gsm8k_v2_custom.npz`.
 
 First version:
 
 1. Load available same-problem channels: `cloud_spread`, `out_entropy`, `pr_mid`, `ae_mid`, and later `out_committal` if re-extracted.
 2. Interpolate each chain to a fixed progress grid.
-3. Construct problem-conditioned residual curves against correct-chain baselines.
+3. Construct problem-conditioned residual curves using unlabeled same-problem robust centering, not correct-chain healthy templates.
 4. Run:
-   - functional cluster permutation;
-   - pairwise functional logistic ranking;
-   - local shapelet discovery.
+   - shared-emission, class-specific-transition latent regime HSMM;
+   - prefix log-likelihood ratio;
+   - transition and duration grammar comparison;
+   - endpoint-censored evaluation;
+   - same-problem label permutation on scores.
 5. Compare all methods against static same-problem baselines and endpoint controls.
 
 Pass condition:
 
 ```text
-The method improves same-problem paired AUROC over static spread,
-has a significant within-problem permutation result,
-and does not reduce to endpoint/length artifacts.
+The method either improves same-problem paired AUROC over static spread,
+or reveals a statistically meaningful transition/duration grammar difference
+that survives endpoint-censored evaluation and within-problem permutation.
 ```
 
+## Implemented First Pass: `within_problem_regime_hsmm_audit.py`
+
+The first implementation now exists as `within_problem_regime_hsmm_audit.py`.
+
+Key modeling choices:
+
+- no `pos` feature is used as model input;
+- no correct-chain "healthy trajectory" is used;
+- each channel is first interpolated to a fixed progress grid;
+- each problem is centered by the unlabeled same-problem median/MAD;
+- observations are local regime vectors `[level channels, delta channels]`;
+- emissions are shared between correct and incorrect samples;
+- class-specific parameters are initial-state distribution, transition matrix, and explicit duration distribution;
+- evaluation is GroupKFold by problem.
+
+The fitted model compares:
+
+```text
+LLR(prefix) = log p(x_1:t | error-regime grammar)
+              - log p(x_1:t | correct-regime grammar)
+```
+
+This is not a CUSUM over anomaly scores. It is a prefix likelihood ratio between two latent dynamic grammars.
+
+Required result fields:
+
+- `hsmm_llr_full`;
+- `hsmm_llr_censor80`;
+- `hsmm_llr_prefixXX`;
+- best static same-problem baseline;
+- `transition_l1`;
+- `duration_l1`;
+- state occupancy and state-duration summaries;
+- within-problem score permutation p-values.
+
+Current selftest status:
+
+- The synthetic selftest verifies that the model can recover a latent transition/duration grammar and write outputs.
+- It is not evidence that HSMM beats static baselines; that must be judged on `gsm8k_v2_5shot.npz` and `gsm8k_v2_custom.npz`.
+
+Run commands:
+
+```bash
+python within_problem_regime_hsmm_audit.py \
+  --input data/gsm8k_v2_custom.npz \
+  --policy answer_format_ok \
+  --channels cloud_spread,out_entropy,pr_mid,ae_mid \
+  --require_channels \
+  --grid 32 \
+  --states 4 \
+  --max_duration 8 \
+  --em_iters 12 \
+  --folds 5 \
+  --permutations 200 \
+  --output_dir outputs/within_problem_regime_hsmm_custom
+```
