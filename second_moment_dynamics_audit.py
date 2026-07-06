@@ -90,6 +90,8 @@ class AuditData:
     policy_desc: str
     source: str
     layer_used: int
+    spectral_backend: str
+    spectral_device: str
     coverage: Dict[str, float]
 
 
@@ -241,6 +243,70 @@ def spectrum_stats(lam: np.ndarray, prefix: str, top_k: int, alpha_k: int) -> Di
     return out
 
 
+def small_gram_eigvals(A: np.ndarray) -> np.ndarray:
+    """Eigenvalues of A A^T, descending.
+
+    For step token clouds n_tokens << hidden_dim, this is exactly the squared
+    singular spectrum of A but avoids an expensive SVD of the tall hidden
+    matrix.  The decomposition is over n_tokens x n_tokens.
+    """
+    X = np.asarray(A, dtype=np.float64)
+    if X.ndim != 2 or X.shape[0] == 0:
+        return np.empty(0, dtype=np.float64)
+    G = X @ X.T
+    G = 0.5 * (G + G.T)
+    vals = np.linalg.eigvalsh(G)[::-1]
+    return np.clip(vals, 0.0, None)
+
+
+def empty_step_features(n: int, *, top_k: int, alpha_k: int) -> Dict[str, float]:
+    out: Dict[str, float] = {"n_tok": float(n), "logN": math.log1p(max(n, 0))}
+    out["kappa"] = float("nan")
+    out["spread"] = float("nan")
+    out["tok_norm_mean"] = float("nan")
+    out["tok_norm_std"] = float("nan")
+    out["tok_cen_trace"] = float("nan")
+    out["unit_cen_trace"] = float("nan")
+    for prefix in ("tok_raw", "tok_cen", "unit_raw", "unit_cen"):
+        out.update(spectrum_stats(np.array([]), prefix, top_k, alpha_k))
+    out["kappa_x_tok_cen_eff_rank"] = float("nan")
+    out["spread_x_tok_cen_eff_rank"] = float("nan")
+    return out
+
+
+def assemble_step_features(
+    *,
+    n: int,
+    norm_mean: float,
+    norm_std: float,
+    kappa: float,
+    lam_tok_raw: np.ndarray,
+    lam_tok_cen: np.ndarray,
+    lam_unit_raw: np.ndarray,
+    lam_unit_cen: np.ndarray,
+    top_k: int,
+    alpha_k: int,
+) -> Dict[str, float]:
+    out: Dict[str, float] = {"n_tok": float(n), "logN": math.log1p(max(n, 0))}
+    out["tok_norm_mean"] = float(norm_mean)
+    out["tok_norm_std"] = float(norm_std)
+    out["kappa"] = float(kappa)
+    out["spread"] = float(1.0 - kappa)
+    out.update(spectrum_stats(lam_tok_raw, "tok_raw", top_k, alpha_k))
+    out["tok_cen_trace"] = float(np.sum(lam_tok_cen))
+    out.update(spectrum_stats(lam_tok_cen, "tok_cen", top_k, alpha_k))
+    out.update(spectrum_stats(lam_unit_raw, "unit_raw", top_k, alpha_k))
+    out["unit_cen_trace"] = float(np.sum(lam_unit_cen))
+    out.update(spectrum_stats(lam_unit_cen, "unit_cen", top_k, alpha_k))
+    if np.isfinite(out["tok_cen_eff_rank"]) and np.isfinite(kappa):
+        out["kappa_x_tok_cen_eff_rank"] = float(kappa * out["tok_cen_eff_rank"])
+        out["spread_x_tok_cen_eff_rank"] = float((1.0 - kappa) * out["tok_cen_eff_rank"])
+    else:
+        out["kappa_x_tok_cen_eff_rank"] = float("nan")
+        out["spread_x_tok_cen_eff_rank"] = float("nan")
+    return out
+
+
 def step_gram_features(
     H: np.ndarray,
     *,
@@ -251,59 +317,214 @@ def step_gram_features(
 ) -> Dict[str, float]:
     X, U, w = token_rows(H, beta)
     n = int(X.shape[0])
-    out: Dict[str, float] = {"n_tok": float(n), "logN": math.log1p(max(n, 0))}
     if n < min_tokens:
-        out["kappa"] = float("nan")
-        out["spread"] = float("nan")
-        out["tok_norm_mean"] = float("nan")
-        out["tok_norm_std"] = float("nan")
-        out["tok_cen_trace"] = float("nan")
-        out["unit_cen_trace"] = float("nan")
-        for prefix in ("tok_raw", "tok_cen", "unit_raw", "unit_cen"):
-            out.update(spectrum_stats(np.array([]), prefix, top_k, alpha_k))
-        return out
+        return empty_step_features(n, top_k=top_k, alpha_k=alpha_k)
 
     norms = np.linalg.norm(X, axis=1)
-    out["tok_norm_mean"] = float(np.mean(norms))
-    out["tok_norm_std"] = float(np.std(norms))
+    norm_mean = float(np.mean(norms))
+    norm_std = float(np.std(norms))
 
     unit_mu = w @ U
     kappa = float(np.linalg.norm(unit_mu))
-    out["kappa"] = kappa
-    out["spread"] = float(1.0 - kappa)
 
     # Main Geometry-of-Reason-style object: direct token hidden matrix.  The
     # sqrt(w) rows implement exp-weighted Gram H^T W H without pooling tokens.
     h_raw = X * np.sqrt(w[:, None])
-    s_tok_raw = np.linalg.svd(h_raw, compute_uv=False)
-    out.update(spectrum_stats(s_tok_raw * s_tok_raw, "tok_raw", top_k, alpha_k))
+    lam_tok_raw = small_gram_eigvals(h_raw)
 
     h_mu = w @ X
     h_cen = (X - h_mu[None, :]) * np.sqrt(w[:, None])
-    s_tok_cen = np.linalg.svd(h_cen, compute_uv=False)
-    lam_tok_cen = s_tok_cen * s_tok_cen
-    out["tok_cen_trace"] = float(np.sum(lam_tok_cen))
-    out.update(spectrum_stats(lam_tok_cen, "tok_cen", top_k, alpha_k))
+    lam_tok_cen = small_gram_eigvals(h_cen)
 
     # Direction-only ablation: useful for separating angular shape from radial
     # activation magnitude, but not the primary object.
     u_raw = U * np.sqrt(w[:, None])
-    s_unit_raw = np.linalg.svd(u_raw, compute_uv=False)
-    out.update(spectrum_stats(s_unit_raw * s_unit_raw, "unit_raw", top_k, alpha_k))
+    lam_unit_raw = small_gram_eigvals(u_raw)
 
     u_cen = (U - unit_mu[None, :]) * np.sqrt(w[:, None])
-    s_unit_cen = np.linalg.svd(u_cen, compute_uv=False)
-    lam_unit_cen = s_unit_cen * s_unit_cen
-    out["unit_cen_trace"] = float(np.sum(lam_unit_cen))
-    out.update(spectrum_stats(lam_unit_cen, "unit_cen", top_k, alpha_k))
+    lam_unit_cen = small_gram_eigvals(u_cen)
 
-    if np.isfinite(out["tok_cen_eff_rank"]) and np.isfinite(kappa):
-        out["kappa_x_tok_cen_eff_rank"] = float(kappa * out["tok_cen_eff_rank"])
-        out["spread_x_tok_cen_eff_rank"] = float((1.0 - kappa) * out["tok_cen_eff_rank"])
-    else:
-        out["kappa_x_tok_cen_eff_rank"] = float("nan")
-        out["spread_x_tok_cen_eff_rank"] = float("nan")
-    return out
+    return assemble_step_features(
+        n=n,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
+        kappa=kappa,
+        lam_tok_raw=lam_tok_raw,
+        lam_tok_cen=lam_tok_cen,
+        lam_unit_raw=lam_unit_raw,
+        lam_unit_cen=lam_unit_cen,
+        top_k=top_k,
+        alpha_k=alpha_k,
+    )
+
+
+def resolve_spectral_backend(args: argparse.Namespace):
+    requested = str(getattr(args, "spectral_backend", "auto")).lower()
+    if requested == "cpu":
+        return "cpu", None, None
+    try:
+        import torch
+    except Exception as exc:
+        if requested == "auto":
+            return "cpu", None, None
+        raise SystemExit(f"--spectral_backend={requested} requires torch: {exc}") from exc
+
+    device_arg = str(getattr(args, "spectral_device", "") or "")
+    if requested == "auto":
+        if torch.cuda.is_available():
+            device = torch.device(device_arg or "cuda")
+            return "torch", torch, device
+        return "cpu", None, None
+    if requested == "cuda":
+        if not torch.cuda.is_available():
+            raise SystemExit("--spectral_backend=cuda requested, but torch.cuda.is_available() is false")
+        device = torch.device(device_arg or "cuda")
+        return "torch", torch, device
+    if requested == "torch":
+        device = torch.device(device_arg or ("cuda" if torch.cuda.is_available() else "cpu"))
+        return "torch", torch, device
+    raise SystemExit(f"unknown --spectral_backend={requested!r}")
+
+
+def torch_batched_step_features(
+    steps: Sequence[np.ndarray],
+    *,
+    torch_mod,
+    device,
+    beta: float,
+    top_k: int,
+    alpha_k: int,
+    min_tokens: int,
+    batch_size: int,
+) -> List[Dict[str, float]]:
+    outs: List[Dict[str, float]] = []
+    batch_size = max(1, int(batch_size))
+    for start in range(0, len(steps), batch_size):
+        batch = steps[start : start + batch_size]
+        cleaned: List[np.ndarray] = []
+        weights: List[np.ndarray] = []
+        norm_stats: List[Tuple[float, float]] = []
+        for H in batch:
+            X = np.asarray(H, dtype=np.float32)
+            if X.ndim != 2 or X.shape[0] == 0:
+                cleaned.append(np.empty((0, 0), dtype=np.float32))
+                weights.append(np.empty(0, dtype=np.float32))
+                norm_stats.append((float("nan"), float("nan")))
+                continue
+            norms = np.linalg.norm(X, axis=1)
+            ok = norms > EPS
+            X = X[ok]
+            if X.size:
+                norms = np.linalg.norm(X, axis=1)
+                norm_stats.append((float(np.mean(norms)), float(np.std(norms))))
+            else:
+                norm_stats.append((float("nan"), float("nan")))
+            cleaned.append(X.astype(np.float32, copy=False))
+            weights.append(exp_weights(X.shape[0], beta).astype(np.float32))
+
+        max_n = max((x.shape[0] for x in cleaned), default=0)
+        d = next((x.shape[1] for x in cleaned if x.ndim == 2 and x.shape[1] > 0), 0)
+        if max_n < min_tokens or d == 0:
+            outs.extend(empty_step_features(x.shape[0], top_k=top_k, alpha_k=alpha_k) for x in cleaned)
+            continue
+
+        Xpad = np.zeros((len(cleaned), max_n, d), dtype=np.float32)
+        Wpad = np.zeros((len(cleaned), max_n), dtype=np.float32)
+        for bi, X in enumerate(cleaned):
+            n = X.shape[0]
+            if n:
+                Xpad[bi, :n, :] = X
+                Wpad[bi, :n] = weights[bi]
+
+        with torch_mod.no_grad():
+            X_t = torch_mod.as_tensor(Xpad, device=device)
+            W_t = torch_mod.as_tensor(Wpad, device=device)
+            sqrtw = torch_mod.sqrt(torch_mod.clamp(W_t, min=0.0)).unsqueeze(-1)
+            token_norm = torch_mod.linalg.norm(X_t, dim=2, keepdim=True).clamp_min(EPS)
+            U_t = X_t / token_norm
+            U_t = torch_mod.where(W_t.unsqueeze(-1) > 0.0, U_t, torch_mod.zeros_like(U_t))
+
+            unit_mu = (W_t.unsqueeze(-1) * U_t).sum(dim=1)
+            kappa = torch_mod.linalg.norm(unit_mu, dim=1).detach().cpu().numpy()
+
+            h_raw = X_t * sqrtw
+            G = torch_mod.bmm(h_raw, h_raw.transpose(1, 2))
+            lam_tok_raw = torch_mod.linalg.eigvalsh(0.5 * (G + G.transpose(1, 2)))
+
+            h_mu = (W_t.unsqueeze(-1) * X_t).sum(dim=1, keepdim=True)
+            h_cen = (X_t - h_mu) * sqrtw
+            G = torch_mod.bmm(h_cen, h_cen.transpose(1, 2))
+            lam_tok_cen = torch_mod.linalg.eigvalsh(0.5 * (G + G.transpose(1, 2)))
+
+            u_raw = U_t * sqrtw
+            G = torch_mod.bmm(u_raw, u_raw.transpose(1, 2))
+            lam_unit_raw = torch_mod.linalg.eigvalsh(0.5 * (G + G.transpose(1, 2)))
+
+            u_cen = (U_t - unit_mu.unsqueeze(1)) * sqrtw
+            G = torch_mod.bmm(u_cen, u_cen.transpose(1, 2))
+            lam_unit_cen = torch_mod.linalg.eigvalsh(0.5 * (G + G.transpose(1, 2)))
+
+            eig_arrays = [
+                torch_mod.flip(torch_mod.clamp(v, min=0.0), dims=(1,)).detach().cpu().numpy()
+                for v in (lam_tok_raw, lam_tok_cen, lam_unit_raw, lam_unit_cen)
+            ]
+
+        for bi, X in enumerate(cleaned):
+            n = int(X.shape[0])
+            if n < min_tokens:
+                outs.append(empty_step_features(n, top_k=top_k, alpha_k=alpha_k))
+                continue
+            norm_mean, norm_std = norm_stats[bi]
+            outs.append(
+                assemble_step_features(
+                    n=n,
+                    norm_mean=norm_mean,
+                    norm_std=norm_std,
+                    kappa=float(kappa[bi]),
+                    lam_tok_raw=eig_arrays[0][bi],
+                    lam_tok_cen=eig_arrays[1][bi],
+                    lam_unit_raw=eig_arrays[2][bi],
+                    lam_unit_cen=eig_arrays[3][bi],
+                    top_k=top_k,
+                    alpha_k=alpha_k,
+                )
+            )
+    return outs
+
+
+def chain_gram_feature_rows(
+    steps: Sequence[np.ndarray],
+    *,
+    backend_kind: str,
+    torch_mod,
+    device,
+    beta: float,
+    top_k: int,
+    alpha_k: int,
+    min_tokens: int,
+    batch_size: int,
+) -> List[Dict[str, float]]:
+    if backend_kind == "torch":
+        return torch_batched_step_features(
+            steps,
+            torch_mod=torch_mod,
+            device=device,
+            beta=beta,
+            top_k=top_k,
+            alpha_k=alpha_k,
+            min_tokens=min_tokens,
+            batch_size=batch_size,
+        )
+    return [
+        step_gram_features(
+            H,
+            beta=beta,
+            top_k=top_k,
+            alpha_k=alpha_k,
+            min_tokens=min_tokens,
+        )
+        for H in steps
+    ]
 
 
 def finite_mean(x: np.ndarray) -> float:
@@ -462,8 +683,9 @@ def select_layer(layers: Sequence[int], requested: int, nearest: bool) -> Tuple[
 
 
 def load_audit_data(path: str, args: argparse.Namespace) -> AuditData:
-    data = np.load(path, allow_pickle=True)
     show_progress = not bool(getattr(args, "no_progress", False))
+    backend_kind, torch_mod, spectral_device = resolve_spectral_backend(args)
+    data = np.load(path, allow_pickle=True)
     y_err_all, mask_all, desc = label_policy(data, args.policy)
     problem_ids_all = data["problem_ids"].astype(int)
 
@@ -511,14 +733,18 @@ def load_audit_data(path: str, args: argparse.Namespace) -> AuditData:
         if steps is None or len(steps) < args.min_steps:
             continue
         per_step: Dict[str, List[float]] = {}
-        for H in steps:
-            sf = step_gram_features(
-                H,
-                beta=args.kappa_beta,
-                top_k=args.top_k,
-                alpha_k=args.alpha_k,
-                min_tokens=args.min_tokens,
-            )
+        step_rows = chain_gram_feature_rows(
+            steps,
+            backend_kind=backend_kind,
+            torch_mod=torch_mod,
+            device=spectral_device,
+            beta=args.kappa_beta,
+            top_k=args.top_k,
+            alpha_k=args.alpha_k,
+            min_tokens=args.min_tokens,
+            batch_size=getattr(args, "spectral_batch_size", 64),
+        )
+        for sf in step_rows:
             for k, v in sf.items():
                 per_step.setdefault(k, []).append(v)
         add_optional_step_sequences(data, i, len(steps), per_step)
@@ -631,7 +857,7 @@ def load_audit_data(path: str, args: argparse.Namespace) -> AuditData:
     gram_groups = {k: [v for v in vals if v in feature_names] for k, vals in gram_groups.items()}
     gram_groups = {k: vals for k, vals in gram_groups.items() if vals}
 
-    return AuditData(
+    out = AuditData(
         rows=rows,
         y=y,
         problem_ids=pids,
@@ -642,8 +868,12 @@ def load_audit_data(path: str, args: argparse.Namespace) -> AuditData:
         policy_desc=desc,
         source=source,
         layer_used=int(layer_used),
+        spectral_backend=backend_kind,
+        spectral_device=str(spectral_device) if spectral_device is not None else "cpu",
         coverage=coverage,
     )
+    data.close()
+    return out
 
 
 def feature_matrix(rows: Sequence[ChainRow], names: Sequence[str]) -> np.ndarray:
@@ -1013,6 +1243,8 @@ def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
             "policy_description": ad.policy_desc,
             "source": ad.source,
             "layer": int(ad.layer_used),
+            "spectral_backend": ad.spectral_backend,
+            "spectral_device": ad.spectral_device,
             "kappa_pooling": f"exp(beta={args.kappa_beta:g})",
             "n_samples": int(len(ad.rows)),
             "n_error": int(ad.y.sum()),
@@ -1320,6 +1552,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--kappa_beta", type=float, default=1.0)
     ap.add_argument("--top_k", type=int, default=16)
     ap.add_argument("--alpha_k", type=int, default=12)
+    ap.add_argument("--spectral_backend", default="auto", choices=["auto", "cpu", "torch", "cuda"])
+    ap.add_argument("--spectral_device", default="", help="torch device, e.g. cuda, cuda:0, or cpu")
+    ap.add_argument("--spectral_batch_size", type=int, default=64, help="steps per torch spectral batch")
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--bootstrap", type=int, default=500)
     ap.add_argument("--min_increment", type=float, default=0.02)

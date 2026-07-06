@@ -19,6 +19,9 @@ def _args(tmp_path, npz):
         kappa_beta=1.0,
         top_k=8,
         alpha_k=8,
+        spectral_backend="cpu",
+        spectral_device="",
+        spectral_batch_size=8,
         folds=3,
         bootstrap=20,
         min_increment=0.02,
@@ -42,3 +45,13 @@ def test_second_moment_selftest_uses_direct_token_matrix(tmp_path):
     jpath, mpath = smd.write_outputs(res, str(tmp_path), "second_moment_selftest")
     assert os.path.exists(jpath)
     assert os.path.exists(mpath)
+
+
+def test_small_gram_eigvals_match_svd_squared():
+    import numpy as np
+
+    rng = np.random.default_rng(3)
+    H = rng.normal(size=(7, 31))
+    s2 = np.linalg.svd(H, compute_uv=False) ** 2
+    gram = smd.small_gram_eigvals(H)
+    np.testing.assert_allclose(gram[: len(s2)], s2, rtol=1e-10, atol=1e-10)
