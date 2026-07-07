@@ -841,3 +841,78 @@ or transport away from prompt/prefix anchor features.
    High-rank dispersion explains fragmented failures.  It does not solve
    coherent-but-wrong.  The coherent-wrong subset should go to AnchorFlow /
    source attribution rather than more direction-only spectra.
+
+## 2026-07-07 Follow-Up Replication Result
+
+The next remote run, with a larger step-row count than `full_gsm8k`, replicated
+the same qualitative pattern:
+
+```text
+H1a res_eff_rank cond 0.576 | delta +3.169 | CI [+1.907, +4.496]
+H1b bipolarity   cond 0.437 | delta -0.002 | CI [-0.004, -0.000]
+H1c cluster      cond 0.464 | delta -0.002 | CI [-0.005, +0.001]
+H1d ordered      cond 0.510 | delta +0.002 | CI [-0.002, +0.007]
+```
+
+Taxonomy again points in the same direction:
+
+```text
+high_rank_dispersion n=362 | error_rate=0.304 | outside=0.119 | OR=3.23
+not_low_kappa        n=3038 | error_rate=0.091 | outside=0.238 | OR=0.32
+```
+
+Interpretation:
+
+1. **H1a replicates**: wrong reasoning steps have higher residual effective
+   rank even after coarse matching on length/kappa/position.
+2. **Effect is real but modest**: conditioned AUROC `0.576` is weaker than the
+   GSM8K pilot `0.602`; this supports a mechanism story, not a standalone
+   detector.
+3. **Bipolar and clean clustering remain negative**: first-error dispersion is
+   not mainly a two-pole cancellation or a small number of stable semantic
+   clusters.
+4. **Ordered substep shift remains non-independent**: taxonomy enrichment exists
+   but the conditioned hypothesis test is nearly null.
+
+The repeated top-feature pattern is also informative:
+
+```text
+pair_cos_q90/q75 lower in errors
+res_top8_mass/top4_mass lower in errors
+res_participation higher in errors
+res_eff_rank higher in errors
+```
+
+This converges on a narrower phrase:
+
+```text
+first-error steps exhibit diffuse high-dimensional residual angular
+dispersion, not discrete cluster splitting.
+```
+
+### Immediate Methodological Risk
+
+`kappa`, `spread`, `res_trace`, and `residual_energy` remain among the top
+conditioned features.  This means the current binning is not a strict enough
+control: within each kappa bin, residual continuous kappa variation still leaks
+into the matched comparison.
+
+Before using H1a in the paper, implement and run:
+
+```text
+continuous residualization:
+  feature ~ spline/logistic controls of [logN, kappa, pos, n_steps]
+
+nearest-neighbor matching:
+  match each error step to correct steps with close [logN, kappa, pos]
+
+within-chain/prefix controls when available:
+  compare first-error step to pre-error correct steps in the same chain class
+```
+
+Pass criterion for the mechanism claim:
+
+```text
+res_eff_rank remains positive with CI > 0 under continuous controls,
+and the effect replicates across at least GSM8K plus one harder dataset.
+```
