@@ -1,6 +1,69 @@
 # Token-Stream Geometry Audit Plan
 
 Date: 2026-07-06
+Status update: 2026-07-07
+
+## Result Summary
+
+Run:
+
+```text
+token-stream geometry | gsm8k_v2_custom.npz | sv_clouds L16 | backend torch:cuda:0
+```
+
+Headline:
+
+```text
+samples 3452 | err 532 | problems 147
+baseline length_entropy_static within 0.668 cross 0.808
+best stream token_stream_alpha within 0.670 cross 0.805
+increment +0.002 CI [-0.023, +0.027]
+decision: no robust token-stream increment over length/entropy/static controls
+```
+
+Group results:
+
+```text
+token_stream_alpha     within 0.670 inc +0.002 [-0.023,+0.027]
+token_stream_dynamics  within 0.647 inc -0.021 [-0.048,+0.006]
+token_stream_all       within 0.633 inc -0.035 [-0.069,-0.001]
+token_stream_kappa     within 0.631 inc -0.037 [-0.063,-0.010]
+token_stream_spectrum  within 0.623 inc -0.045 [-0.081,-0.010]
+```
+
+Online alarm:
+
+```text
+best alarm spread_w64
+FPR 0.049
+recall 0.269
+gold-time recall 0.000
+median delay nan
+endpoint fraction 0.573
+```
+
+Interpretation:
+
+- The boundary-free stream protocol is implemented, but it does not produce a
+  robust deployable detector on this data.
+- Kappa/spread stream features are weaker than the static/length/entropy
+  baseline.
+- Alpha/effective-rank stream summaries nearly match the baseline, but their
+  increment is statistically null.
+- The alarm is late/end-point-like and does not localize gold first-error time.
+- Effective-rank trajectories do show a broad rise-then-fall morphology, but
+  this morphology is common to correct and incorrect traces and is not yet a
+  correctness mechanism.
+
+Decision:
+
+```text
+Retire token-stream kappa/alpha/effective-rank as a standalone online monitor.
+Keep the profile exporter for descriptive physiology and phase annotation.
+Move the main research effort to source-aware anchoring:
+  prompt-span anchors, anchor-source attribution, coherent-but-wrong subsets,
+  and counterfactual sibling traces.
+```
 
 ## Motivation
 

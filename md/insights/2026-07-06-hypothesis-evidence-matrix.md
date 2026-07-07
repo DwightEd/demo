@@ -1,6 +1,7 @@
 # Hypothesis Evidence Matrix
 
 Date: 2026-07-06
+Updated: 2026-07-07
 
 This note collects the current status of the project's major hypotheses.  It
 separates validated anchors, retired branches, and untested next steps.  The
@@ -51,7 +52,7 @@ Required controls:
 | Manifold health v1: q_align + cloud volume + spread | negative or too weak | manifold alone below anchor_uncertainty; cloud_V almost equals logN/difficulty | Retire v1 scalar formula; volume must be anchor/length-conditioned |
 | Hypergraph / token relational reader | promising but heavy | HGN step AUROC about 0.760 and first-error top1 about 0.854 | Keep as evidence that relations exist, not as lightweight hook |
 | Attention graph spectral metrics | untested locally | `Geometry of Reason` uses attention graph Laplacian; our Gram tests are hidden-cloud, not attention-graph | Needs attention maps and same-problem increment tests |
-| Token-level boundary-free kappa / alpha | untested as main online monitor | Current saved step-level data can validate boundary alignment; online extraction must save per-token hidden | Next priority if deployment is the goal |
+| Token-level boundary-free kappa / alpha / effective-rank stream | negative as main online monitor | `gsm8k_v2_custom`, L16 `sv_clouds`: length+entropy+static baseline within 0.668; best stream group `token_stream_alpha` within 0.670, increment +0.002 CI [-0.023,+0.027]; `token_stream_kappa` within 0.631, `token_stream_spectrum` 0.623. Best alarm `spread_w64` FPR 0.049, recall 0.269, gold-time 0.000, endpoint 0.573. | Retire as standalone deployable detector. Keep profiles as descriptive physiology; move to anchor-source / counterfactual sibling tests for coherent-but-wrong. |
 | Perturbation-normalized geometry | untested | Inspired by `What do Geometric Hallucination Detection Metrics Actually Measure?`; could normalize original response against counterfactual perturbations | Next priority for coherent-but-wrong / domain-shift control |
 | Operation / premise-choice consistency | untested | Regex arithmetic failed because valid equations can still use wrong operation or binding | Next semantic branch after perturbation design |
 | Causal evidence flow / attention lookback | untested locally | Step-saliency hook exists in `step-saliency`; attention intervention infrastructure is available | Next white-box branch after signal-only audits |
@@ -82,11 +83,62 @@ alignment to step boundaries only for validation
 OOD and same-problem controls
 ```
 
-## Next Concrete Validation
+## Token-Stream Geometry Result
 
-The next deployable audit should not require pre-split steps.
+The boundary-free token-stream audit has now been run on
+`gsm8k_v2_custom.npz` with `sv_clouds` at L16.
 
-Proposed script:
+Headline:
+
+```text
+baseline length_entropy_static within 0.668 cross 0.808
+best stream token_stream_alpha within 0.670 cross 0.805
+increment +0.002 CI [-0.023, +0.027]
+decision: no robust token-stream increment
+```
+
+This is a clean negative result.  The strongest single stream features are
+mostly level summaries of sliding effective rank / stable rank, not causal
+online ruptures:
+
+```text
+stream_eff_rank_unit_w32_mean within-best 0.682
+stream_stable_rank_raw_w64_mean within-best 0.681
+stream_eff_rank_raw_w32_mean within-best 0.680
+```
+
+But grouped OOF features do not beat the length/entropy/static-spread baseline.
+The alarm result is also not deployable:
+
+```text
+best alarm spread_w64
+FPR 0.049
+recall 0.269
+gold-time recall 0.000
+endpoint fraction 0.573
+```
+
+So the current token-stream geometry is mostly a late/static physiology readout,
+not an online first-error detector.
+
+The shape report contains one useful descriptive result:
+
+```text
+eff_rank_raw_w16 hump 0.783, err 0.808, correct 0.778, peak 0.589
+eff_rank_raw_w32 hump 0.757, err 0.795, correct 0.750, peak 0.619
+```
+
+This suggests a broad expand-then-compress morphology exists in token-window
+effective rank, with a mid/late peak.  However, it is common to correct and
+incorrect traces and currently does not provide a robust same-problem
+correctness increment.  It can be used for descriptive phase annotation, not as
+the paper's main detector.
+
+## Completed Token-Stream Validation
+
+This deployable audit did not require pre-split steps.
+
+Completed script:
 
 ```text
 token_stream_geometry_audit.py
@@ -122,6 +174,7 @@ The token-stream signal improves online alarm recall/delay or rescues
 baseline-missed same-problem pairs without relying on parsed step boundaries.
 ```
 
-If it fails, then the project should accept that the current hidden-geometry
-family is a weak physiological marker rather than a standalone online detector,
-and move to perturbation-normalized geometry or attention/evidence-flow.
+This condition failed on `gsm8k_v2_custom.npz`.  The project should accept that
+the current source-free hidden-geometry family is a weak physiological marker
+rather than a standalone online detector, and move to prompt-anchor
+source-attribution, counterfactual sibling traces, or attention/evidence-flow.
