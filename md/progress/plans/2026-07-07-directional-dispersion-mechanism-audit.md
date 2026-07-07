@@ -1294,25 +1294,47 @@ The paper studies three metrics:
 
 ### Relation To Our Current Code
 
-HS and ME have been substantially tested under the Gram/spectral family:
+Important correction: in the paper, HS and ME are computed on the Gram matrix
+of **all tokens in the whole response / reasoning chain**:
 
 ```text
+H_l = [h_1^l, ..., h_m^l]^T for the whole generated response
+G_l = H_l H_l^T
+```
+
+This is not the same object as a within-step token Gram.  Our existing code has
+covered several related but distinct versions:
+
+```text
+seq_gram.py:
+  whole-response raw H H^T HS / ME / lam1, close to the paper protocol
+
+lam1_within.py:
+  whole-response kappa / alpha / lam1 / effrank / HS with within-problem
+  difficulty control for sampled rollouts
+
 second_moment_dynamics_audit.py:
   tok_raw_logdet_mean / tok_cen_logdet_mean  ~= HS
   tok_raw_entropy / tok_cen_entropy
   tok_raw_eff_rank / tok_cen_eff_rank        ~= ME / effective rank
+  but computed on step-level token slices / aggregated step summaries
 
 vector_detect.py:
-  explicitly tests [HS, eff-rank D, lam1, logE, twoNN_d]
+  explicitly tests [HS, eff-rank D, lam1, logE, twoNN_d] at step level
 ```
 
-These features did not beat the spread/kappa baseline under same-problem or
-first-error controls.  This is consistent with the current conclusion:
+Therefore the precise statement is:
 
 ```text
-source-free hidden-state geometry is mostly saturated by directional
-concentration for broad detection.
+HS/ME as a spectral family has been probed, and step-level Gram variants did
+not beat kappa/spread.  However, the exact whole-chain paper protocol has not
+yet been folded into the current controlled audit/reporting pipeline.
 ```
+
+This matters because whole-chain Gram statistics are response-level detectors:
+they can judge final correctness or best-of-chain selection, but they cannot
+directly localize a first wrong step unless converted into prefix or
+step-difference statistics.
 
 AS has **not** been exactly replicated.  Existing `attn_audit.py` uses:
 
@@ -1349,14 +1371,16 @@ than a plain static hidden-state scalar.
 
 ### Actionable Takeaway
 
-Do not re-run HS/ME as if they were new signals.  They are already in the
-tested Gram/spectral family.
+Do not re-run step-level HS/ME as if they were new signals.  They are already
+in the tested Gram/spectral family.
 
 The useful follow-up is:
 
 ```text
-1. exact AS diagonal-logdet replication if attention diagonals can be saved;
-2. perturbation-normalized reasoning audit:
+1. exact whole-chain HS/ME replication under the current leak-free controls:
+   length, same-problem grouping, bootstrap CI, and comparison to kappa/spread;
+2. exact AS diagonal-logdet replication if attention diagonals can be saved;
+3. perturbation-normalized reasoning audit:
    compare a generated step to local counterfactual/sibling steps for the same
    problem and same position.
 ```
