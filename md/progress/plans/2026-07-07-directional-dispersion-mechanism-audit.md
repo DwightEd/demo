@@ -1085,3 +1085,171 @@ If negative, the honest conclusion is:
 residual rank was a coarse-bin artifact; kappa/spread remains the saturated
 direction-only signal, and coherent wrong must be handled by source attribution.
 ```
+
+## 2026-07-07 Full GSM8K Joint Kappa-Rank Result
+
+Remote run:
+
+```text
+kappa_rank_joint_trajectory_audit.py
+  --input data/features/full_gsm8k.npz
+  --policy gold_error_step
+  --layer 14
+```
+
+Headline:
+
+```text
+rows 2072 | first-error 205 | pre 385 | post 512 | correct-step 970
+best score spread AUROC 0.772
+```
+
+### Detection Result
+
+Global first-error ranking is still dominated by spread:
+
+```text
+spread                 AUROC 0.772
+joint_raw_zsum         AUROC 0.754
+joint_strict_zsum      AUROC 0.714
+res_eff_rank           AUROC 0.714
+rank_resid_lenkappapos AUROC 0.605
+```
+
+Bootstrap increments confirm no all-error AUROC gain over spread:
+
+```text
+joint_strict_vs_spread -0.058 [-0.098, -0.018]
+joint_raw_vs_spread    -0.018 [-0.031, -0.004]
+```
+
+Conclusion:
+
+```text
+Residual rank is not a stronger global detector than kappa/spread.
+```
+
+This should not be sold as detector improvement.
+
+### Useful Increment: High-Precision Subtype
+
+The dual-high quadrant is strongly enriched:
+
+```text
+dual_high_spread_high_rank n=128
+error_rate 0.453
+OR 7.23
+recall 0.283
+FPR 0.052
+```
+
+This is the useful operational signal:
+
+```text
+when consensus loss and residual-rank dispersion co-occur, the step is a
+high-risk fragmented-error subtype.
+```
+
+It catches only ~28% of first errors, but at ~5% control FPR and 45% precision.
+So its role is **not** "better AUROC than spread"; its role is:
+
+```text
+high-confidence alarm subtype / intervention selector.
+```
+
+The other quadrants are weaker:
+
+```text
+consensus_loss_only  error_rate 0.175 | OR 1.56
+rank_dispersion_only error_rate 0.124 | OR 0.93
+low-low              error_rate 0.065 | OR 0.28
+```
+
+So rank alone is not enough.  Rank matters mainly when paired with consensus
+loss.
+
+### Trajectory Result
+
+The two signals jump together at the first-error step:
+
+```text
+spread         pre->first +0.023 | correct adjacent -0.013 | first->post -0.027
+res_eff_rank   pre->first +7.674 | correct adjacent -3.686 | first->post -9.814
+z_spread_resid pre->first +0.467 | correct adjacent +0.045 | first->post -0.081
+z_rank_resid   pre->first +0.796 | correct adjacent +0.015 | first->post -0.557
+joint_strict   pre->first +1.263 | correct adjacent +0.061 | first->post -0.638
+```
+
+Interpretation:
+
+```text
+The event is local and synchronous: consensus weakens and residual rank rises
+at the first wrong step, then both partially fall back after that step.
+```
+
+This does **not** support a long precursor or accumulating cascade story on
+GSM8K.  It supports:
+
+```text
+first-error = local rupture / fragmented computation event
+```
+
+### Why The Earlier Gram Audit Looked Negative
+
+The earlier second-moment / Gram audit answered a different question:
+
+```text
+Can chain-level aggregated Gram summaries improve final-answer same-problem
+classification over spread/entropy baselines?
+```
+
+This joint audit answers:
+
+```text
+At the gold first-error step, does residual-rank dispersion co-activate with
+consensus loss and define a high-risk subtype?
+```
+
+Those are not equivalent.  The Gram audit diluted the effect because:
+
+1. it aggregated over the chain, while the rank signal is sharply localized at
+   first error;
+2. it optimized global AUROC, while the useful result here is a low-FPR
+   dual-high subtype;
+3. the strongest global scalar, spread, already captures most rank-one
+   consensus loss;
+4. raw Gram/effective-rank features are length-sensitive unless residualized;
+5. the OOF logistic fusion can learn linear combinations, but it is not designed
+   to discover a sparse "both high" quadrant unless explicitly represented.
+
+Therefore the earlier null result does not contradict this finding.  It says:
+
+```text
+Gram spectra are not a better broad final-answer detector.
+```
+
+The new result says:
+
+```text
+residual rank is a mechanistic subtype marker when aligned to the first-error
+step and combined with spread.
+```
+
+### Paper Wording
+
+Safe wording:
+
+```text
+Directional concentration remains the strongest source-free detector.  However,
+conditioning on the first-error event reveals a second axis: when low
+concentration is accompanied by high residual effective rank, the step enters a
+high-precision fragmented-error regime.
+```
+
+Unsafe wording:
+
+```text
+Residual rank improves detection over kappa.
+```
+
+The data does not support the unsafe version.
