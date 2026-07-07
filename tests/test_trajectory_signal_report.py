@@ -73,3 +73,37 @@ def test_profile_report_writes_distribution_and_shape_files(tmp_path):
     for path in res["files"].values():
         assert os.path.exists(path)
     assert any(r["signal"] == "eff_rank_raw_w4" for r in res["trajectory_shape"])
+
+
+def test_print_result_tolerates_none_best_direction(capsys):
+    res = {
+        "input": "toy.jsonl",
+        "mode": "profiles",
+        "n_samples": 2,
+        "n_error": 1,
+        "n_correct": 1,
+        "signals": ["x"],
+        "distribution": [
+            {
+                "signal": "x",
+                "stat": "mean",
+                "cross_auroc_error_high": None,
+                "cross_best_direction": None,
+                "error_median": None,
+                "correct_median": None,
+            },
+            {
+                "signal": "y",
+                "stat": "mean",
+                "cross_auroc_error_high": 0.75,
+                "cross_best_direction": 0.75,
+                "error_median": 1.0,
+                "correct_median": 0.0,
+            },
+        ],
+        "files": {},
+    }
+    tsr.print_result(res)
+    out = capsys.readouterr().out
+    assert "trajectory signal report" in out
+    assert "y/mean" in out

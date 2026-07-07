@@ -526,6 +526,14 @@ def fmt(x: Any, digits: int = 3) -> str:
     return f"{val:.{digits}f}"
 
 
+def sort_value(x: Any, default: float = -1.0) -> float:
+    try:
+        val = float(x)
+    except (TypeError, ValueError):
+        return float(default)
+    return val if math.isfinite(val) else float(default)
+
+
 def find_dist(dist_rows: Sequence[Mapping[str, Any]], signal: str, stat: str) -> Optional[Mapping[str, Any]]:
     for row in dist_rows:
         if row["signal"] == signal and row["stat"] == stat:
@@ -751,7 +759,7 @@ def print_result(res: Mapping[str, Any]) -> None:
     )
     print("\nTop signal/stat AUROCs:")
     rows = list(res.get("distribution") or [])
-    rows.sort(key=lambda r: np.nan_to_num(r.get("cross_best_direction", float("nan")), nan=-1.0), reverse=True)
+    rows.sort(key=lambda r: sort_value(r.get("cross_best_direction")), reverse=True)
     for row in rows[:12]:
         print(
             "  {}/{} auc {} best {} err_med {} cor_med {}".format(
