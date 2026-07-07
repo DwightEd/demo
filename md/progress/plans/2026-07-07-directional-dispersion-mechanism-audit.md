@@ -1538,3 +1538,480 @@ against pre-error steps.
 
 If chain-level HS/ME is strong but prefix deltas are weak, then the paper metric
 is a final-response detector, not a real-time first-error monitor.
+
+## 2026-07-07 Structural Signal Validity Plan Inspired By Know More, Know Clearer
+
+Reference checked from local `papers/推理`:
+
+```text
+Know More, Know Clearer: A Meta-Cognitive Framework for Knowledge
+Augmentation in Large Language Models
+ICML 2026 / PMLR 306, arXiv:2602.12996
+```
+
+### What The Paper Actually Does
+
+The useful methodological lesson is not their training recipe itself, but their
+signal-validity argument.  They first ask whether an internal confidence signal
+contains structured information aligned with performance.
+
+Their signal:
+
+```text
+U(y | q) = -(1/T) sum_t log p_theta(x_t | q, x_<t)
+```
+
+For each query, they sample multiple reasoning paths:
+
+```text
+K = 16 responses per query
+U_bar(q) = mean_k U(y^(k) | q)
+Acc(q) = mean_k I(correct(y^(k)))
+```
+
+Then they aggregate across many instances:
+
+```text
+50,000 sampled instances
+M = 100 uncertainty intervals
+bin centroid:
+  x_m = mean_{i in bin m} U_bar_i
+  y_m = mean_{i in bin m} Acc_i
+```
+
+They fit:
+
+```text
+E[Acc | U] ~= a * exp(-b U) + c
+```
+
+and show this relationship across Qwen, Llama, and Mistral model families.
+This is the basis for their statement:
+
+```text
+internal confidence signals carry structured information aligned with
+performance, not random fluctuations.
+```
+
+They then add two additional validity layers:
+
+1. **Calibration validity**
+
+   Convert uncertainty to confidence:
+
+   ```text
+   c = exp(-NLL)
+   ```
+
+   and report ECE with equal-mass confidence bins:
+
+   ```text
+   ECE = sum_m |B_m|/N * |acc(B_m) - conf(B_m)|
+   ```
+
+2. **Behavioral self-knowledge validity**
+
+   Evaluate answer/refuse decisions through:
+
+   ```text
+   AR  = TP / (TP + FP)
+   KEI = TP / (TP + FN)
+   NPV = TN / (TN + FN)
+   CBS = harmonic_mean(AR, KEI)
+   CAE = (TP + TN) / all
+   ```
+
+The key lesson for our paper:
+
+```text
+Do not only report AUROC.  Demonstrate that the internal signal induces a
+stable, monotonic, calibrated, and behaviorally meaningful performance law.
+```
+
+### Our Corresponding Core Hypothesis
+
+For reasoning traces, the analogous hypothesis should be:
+
+```text
+Internal geometric disorder is a structured meta-cognitive signal:
+as directional consensus decreases and high-rank residual dispersion increases,
+the empirical probability of reasoning failure rises monotonically after
+controlling for length, task difficulty, and problem identity.
+```
+
+This is stronger and more paper-worthy than:
+
+```text
+low kappa has AUROC above chance.
+```
+
+### Signals To Audit
+
+Primary source-free hidden-state signals:
+
+```text
+spread = 1 - kappa
+res_eff_rank = effective rank of residual directional scatter
+dual_high = high spread AND high residual rank
+```
+
+Auxiliary channels:
+
+```text
+entropy / NLL / token uncertainty
+whole-chain HS / ME / AS if available
+length, step position, n_steps, problem id
+```
+
+Localization signals:
+
+```text
+step spread
+step residual rank
+prefix_delta_HS / prefix_delta_ME
+pre->first jumps
+```
+
+### Experiment 1: Structural Decay Law For Geometry
+
+Goal:
+
+```text
+replace "signal has AUROC" with "signal defines a stable risk law".
+```
+
+For same-problem multi-sampling data:
+
+```text
+for each generated chain i:
+  compute chain-level signals:
+    mean_spread, max_spread, late_spread
+    mean_res_eff_rank, dual_high_fraction
+    entropy baselines
+  y_i = final incorrectness
+```
+
+For ProcessBench first-error data:
+
+```text
+for each step j:
+  compute step-level spread, res_eff_rank, dual_high
+  y_j = first-error indicator
+```
+
+Analysis:
+
+```text
+1. equal-mass bins by signal value, M in {10, 20, 50}
+2. within each bin:
+     err_rate = mean(y)
+     mean_length, mean_entropy, mean_position
+3. fit monotonic / exponential / logistic laws:
+     P(error | s) ~= sigmoid(a + b s)
+     P(correct | s) ~= a * exp(-b s) + c
+4. report:
+     Spearman rho between bin signal and bin error rate
+     Kendall tau
+     monotonic violation count
+     bootstrap CI by problem/chain
+     R^2 or deviance reduction over length-only baseline
+```
+
+Required controls:
+
+```text
+length-stratified bins
+same-problem paired bins
+permutation within problem and length bucket
+label shuffle null distribution
+residualized signal after [logN, position, n_steps, entropy]
+```
+
+Pass condition:
+
+```text
+error rate rises monotonically across signal bins;
+bootstrap CI excludes zero for trend;
+trend remains after length/problem controls;
+permuted labels/signals destroy the trend.
+```
+
+Kill condition:
+
+```text
+trend vanishes under same-problem or length-stratified controls.
+```
+
+### Experiment 2: Calibration Validity / ECE For Geometry
+
+The paper reports ECE to show that confidence aligns with accuracy.  Our analog
+should calibrate geometric risk.
+
+Map raw signal to probability using only train folds:
+
+```text
+risk_hat = isotonic_regression(spread or joint signal -> error probability)
+confidence_hat = 1 - risk_hat
+```
+
+Evaluate out of fold:
+
+```text
+ECE over equal-mass risk/confidence bins
+Brier score
+negative log-likelihood
+reliability diagram
+risk-coverage / selective answering curve
+AURC / coverage at fixed error rate
+```
+
+Baselines:
+
+```text
+length-only
+entropy-only
+spread-only
+spread + entropy
+spread + residual-rank interaction
+whole-chain HS/ME if chain-level task
+```
+
+Important interpretation:
+
+```text
+If geometry improves AUROC but not ECE, it is a ranking signal, not calibrated
+meta-cognition.
+
+If geometry improves ECE especially in low-entropy/confident subsets, that is a
+strong "Know Clearer" style claim.
+```
+
+### Experiment 3: Multi-Sample Latent State Estimation
+
+The paper uses K=16 samples per query to estimate latent knowledge state rather
+than trusting one generation.  We should mirror this exactly on same-problem
+multi-sampling data.
+
+For each problem p with rollouts r:
+
+```text
+Acc_bar(p) = mean_r I(correct_{p,r})
+S_bar(p) = mean_r signal_{p,r}
+S_var(p) = var_r signal_{p,r}
+S_q25/q50/q75(p)
+```
+
+Questions:
+
+```text
+Does mean geometric disorder predict problem-level failure rate?
+Does within-problem signal variance identify "confused" problems?
+Do correct and wrong rollouts separate within the same problem?
+```
+
+Region assignment without LLM prompting:
+
+```text
+Mastered:
+  high Acc_bar, low S_bar, low S_var
+
+Missing:
+  low Acc_bar, high S_bar, low-to-medium S_var
+
+Confused:
+  intermediate Acc_bar or high S_var, mixed correctness among rollouts
+```
+
+This gives us an empirical analog of:
+
+```text
+Mastered / Confused / Missing
+```
+
+without relying on prompt-based self-evaluation.
+
+Validation:
+
+```text
+confused region should have high within-problem disagreement;
+missing region should have high error rate and high geometry risk;
+mastered region should have low error and calibrated low risk.
+```
+
+### Experiment 4: First-Error Structural Law
+
+For ProcessBench:
+
+```text
+align steps by relative event time:
+  pre-error
+  first-error
+  post-error
+  correct-chain controls
+```
+
+Report:
+
+```text
+P(first-error | spread decile)
+P(first-error | residual-rank decile)
+P(first-error | dual_high quadrant)
+pre->first jump vs correct-chain adjacent jump
+post-error relaxation or cascade
+```
+
+This connects to our current finding:
+
+```text
+dual_high_spread_high_rank:
+  error_rate 0.453
+  OR 7.23
+  recall 0.283
+  FPR 0.052
+```
+
+The refined claim should be:
+
+```text
+the strongest structural event is not a long precursor but a local rupture:
+consensus drops and residual rank rises synchronously at the first wrong step.
+```
+
+### Experiment 5: Coherent-Wrong Boundary Test
+
+The paper explicitly cares about confidence-accuracy mismatch.  Our equivalent
+hard case is:
+
+```text
+coherent-but-wrong:
+  low entropy
+  normal/high kappa
+  incorrect final answer or first wrong step
+```
+
+Required report:
+
+```text
+fraction of errors that are geometry-visible:
+  high spread or dual_high
+
+fraction of errors that are geometry-blind:
+  coherent wrong
+
+does whole-chain HS/ME or entropy catch geometry-blind errors?
+does anchor/source attribution catch them?
+```
+
+This prevents overclaiming.  It also gives the paper a clean boundary:
+
+```text
+geometry detects fragmented failures; source attribution is needed for
+coherent-but-wrong failures.
+```
+
+### Scripts Needed / Existing Coverage
+
+Existing:
+
+```text
+kappa_rank_joint_trajectory_audit.py
+  first-error spread/rank joint state and trajectory
+
+whole_chain_gram_metrics_audit.py
+  strict whole-chain HS/ME/AS replication and prefix adaptation
+
+token_stream_geometry_audit.py
+  segmentation-free token stream geometry
+```
+
+New script to implement:
+
+```text
+signal_structural_validity_audit.py
+```
+
+Core outputs:
+
+```text
+*.json
+*.md
+*.bins.csv          binned structural law
+*.calibration.csv   ECE / reliability bins
+*.regions.csv       Mastered / Confused / Missing analog
+*.nulls.csv         permutation nulls
+```
+
+Required command targets:
+
+```bash
+python signal_structural_validity_audit.py \
+  --input data/gsm8k_v2_custom.npz \
+  --policy answer_format_ok \
+  --layer 16 \
+  --mode chain_final \
+  --signals spread,res_eff_rank,dual_high,entropy,whole_hs,whole_me \
+  --bins 20 \
+  --permutations 1000 \
+  --bootstrap 1000 \
+  --output_dir outputs/signal_structural_validity_gsm8k_v2_custom
+
+python signal_structural_validity_audit.py \
+  --input data/features/full_gsm8k.npz \
+  --policy gold_error_step \
+  --layer 14 \
+  --mode first_error \
+  --signals spread,res_eff_rank,dual_high,entropy,prefix_hs,prefix_me \
+  --bins 20 \
+  --permutations 1000 \
+  --bootstrap 1000 \
+  --output_dir outputs/signal_structural_validity_full_gsm8k
+```
+
+### Paper-Level Claim If Experiments Pass
+
+Strong claim:
+
+```text
+Reasoning failures obey a structural risk law in internal geometry: as
+directional consensus deteriorates and residual scatter becomes high-rank,
+empirical error probability rises monotonically under length-, problem-, and
+entropy-controlled analyses.  This transforms kappa from a weak scalar detector
+into a calibrated meta-cognitive signal of reasoning state.
+```
+
+Moderate claim:
+
+```text
+Directional geometry is a reliable high-risk subtype marker, especially for
+fragmented first-error steps, but it does not cover coherent wrong reasoning.
+```
+
+Negative but useful claim:
+
+```text
+After rigorous structural-validity tests, geometry remains a weak ranking
+signal rather than a calibrated meta-cognitive law.  The research should then
+shift to anchor-source attribution.
+```
+
+### Why This Is Necessary
+
+Top-venue reviewers will not accept:
+
+```text
+AUROC is above 0.5, therefore the hidden signal is meaningful.
+```
+
+The required evidence chain is:
+
+```text
+1. signal-performance relationship is monotonic and stable;
+2. trend survives length/difficulty/problem controls;
+3. calibration metrics improve over entropy/length baselines;
+4. permutation/null tests destroy the trend;
+5. failure cases are explicitly characterized.
+```
+
+This is the exact role played by the Structural Decay Law and ECE analyses in
+`Know More, Know Clearer`, and it should become the validity backbone of our
+paper.
