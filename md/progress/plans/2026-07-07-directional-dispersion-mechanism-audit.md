@@ -657,3 +657,187 @@ In that case the correct conclusion is not "try another spectrum"; it is:
 direction-only geometry is saturated by kappa, so coherent wrong requires
 source-aware anchor analysis.
 ```
+
+## 2026-07-07 Full GSM8K Result
+
+Command run on the remote full-hidden ProcessBench GSM8K file:
+
+```text
+directional_dispersion_mechanism_audit.py
+  --input data/features/full_gsm8k.npz
+  --policy gold_error_step
+  --label_mode first_error
+  --layer 14
+```
+
+### Headline
+
+```text
+rows 1560 | err 205 | chains 395 | source full_hidden L14 | label first_error
+low-kappa err-rate 0.280 vs non-low 0.068
+identity median 1.11e-16
+```
+
+This confirms two things:
+
+1. The original directional-consensus observation still holds at true
+   first-error-step level: low-kappa steps are substantially enriched for
+   first errors.
+2. The residual-scatter decomposition is numerically exact, so the following
+   mechanism claims are about residual **shape**, not a hidden restatement of
+   residual energy.
+
+### Mechanism Finding
+
+The first clean positive mechanism signal is **high-rank residual dispersion**:
+
+```text
+H1a res_eff_rank: conditioned AUROC 0.602
+delta error-correct +3.669
+CI [+1.983, +5.528]
+```
+
+The conditioning already matches length, kappa, and step position bins.  Thus,
+among steps with comparable concentration and length, wrong first-error steps
+still spread their residual directional energy across more dimensions.
+
+Taxonomy agrees:
+
+```text
+high_rank_dispersion n=142 | error_rate=0.373 | outside=0.107 | OR=4.96
+```
+
+This is the important new result.  It supports the refined statement:
+
+```text
+The kappa drop is not only loss of the rank-one consensus component.  At true
+first-error steps, the remaining residual scatter is more high-dimensional.
+```
+
+### What Did Not Survive
+
+`bipolarity` and `signed_clusterability` do not explain GSM8K first errors:
+
+```text
+H1b bipolarity            cond 0.433 | delta -0.002 | CI [-0.005, +0.000]
+H1c signed_clusterability cond 0.452 | delta -0.003 | CI [-0.006, +0.000]
+```
+
+This argues against a simple picture where wrong steps split into two opposing
+directions or a clean small number of semantic clusters.
+
+`ordered_shift` is not independently convincing after conditioning:
+
+```text
+H1d ordered_shift cond 0.502 | delta +0.000 | CI [-0.004, +0.005]
+```
+
+The taxonomy enrichment for `ordered_substep_shift` is therefore likely a
+low-kappa correlate, not an independent mechanism.
+
+### Shape Interpretation
+
+Top conditioned features also point to diffuse angular flattening:
+
+```text
+pair_cos_q90 / q75 lower in errors
+res_top8_mass lower in errors
+res_eff_rank higher in errors
+```
+
+So the best current wording is:
+
+```text
+First-error steps are not primarily bipolar or cleanly multi-clustered.  They
+look like a diffuse high-dimensional angular dispersion of token directions.
+```
+
+This is more precise than "the model loses consistency" and stronger than a
+static detector claim.
+
+### Caveats
+
+`kappa`, `spread`, `residual_energy`, and `res_trace` still appear among the top
+conditioned features because quantile bins leave within-bin continuous
+variation.  The next version should add one stricter control:
+
+```text
+res_eff_rank residualized against continuous [logN, kappa, pos]
+or nearest-neighbor matching on continuous kappa/length/position.
+```
+
+The H1a result is still meaningful because `res_eff_rank` is residual shape, not
+the trace identity, but a continuous-control re-run is needed before paper
+wording.
+
+### Literature Connection: Activations And Residual Stream
+
+This result connects to the mechanistic-interpretability residual-stream line:
+
+- Elhage et al., *A Mathematical Framework for Transformer Circuits*,
+  Transformer Circuits, 2021:
+  residual stream as the shared communication channel that components read from
+  and write to.
+- Anthropic, *Privileged Bases in the Transformer Residual Stream*,
+  Transformer Circuits, 2023:
+  individual residual coordinates can become special in practice despite the
+  nominal arbitrary-basis view.
+- Sun et al., *Massive Activations in Large Language Models*, arXiv/COLM 2024:
+  a few very large activation coordinates can act as bias/attention-sink
+  mechanisms.
+- Cunningham et al., *Sparse Autoencoders Find Highly Interpretable Features in
+  Language Models*, ICLR 2024, and Templeton et al., *Scaling
+  Monosemanticity*, Transformer Circuits/arXiv, 2024:
+  residual-stream activations can be decomposed into sparse, interpretable
+  feature directions.
+- Lawson et al., *Residual Stream Analysis with Multi-Layer SAEs*, ICLR 2025:
+  directly studies residual-stream features across layers and representation
+  drift.
+- Anthropic, *Circuit Tracing* / *On the Biology of a Large Language Model*,
+  Transformer Circuits, 2025:
+  traces computational graphs through residual/MLP/attention pathways for
+  behaviors including multi-hop reasoning and hallucination.
+
+Our result is not yet a circuit analysis.  It is a population-level residual
+geometry finding.  The next bridge is to ask whether the high-rank residual
+dispersion corresponds to:
+
+```text
+many SAE features becoming weakly active,
+loss of a small valid-reasoning feature set,
+or transport away from prompt/prefix anchor features.
+```
+
+### Next Experiments
+
+1. **Continuous-control re-run**
+
+   Add residualization or nearest-neighbor matching for
+   `[logN, kappa, pos]`, then re-test `res_eff_rank`.
+
+2. **Layer sweep**
+
+   Run L10/L14/L18/L22 on `full_gsm8k`; mechanism should peak in the same
+   middle-layer region as kappa if it is the same physiological event.
+
+3. **Hard dataset replication**
+
+   Run the exact script on `full_math.npz` and `full_omnimath.npz`.  If H1a
+   strengthens with task difficulty, it becomes a credible mechanism story.
+
+4. **Cascade test**
+
+   Re-run with:
+
+   ```text
+   --label_mode error_and_after
+   ```
+
+   If high-rank dispersion grows after the first wrong step, we can discuss a
+   cascade.  If it is only at the first wrong step, it is a local rupture.
+
+5. **Source-aware follow-up**
+
+   High-rank dispersion explains fragmented failures.  It does not solve
+   coherent-but-wrong.  The coherent-wrong subset should go to AnchorFlow /
+   source attribution rather than more direction-only spectra.
