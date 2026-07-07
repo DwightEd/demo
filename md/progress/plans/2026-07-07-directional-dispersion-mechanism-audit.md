@@ -1253,3 +1253,118 @@ Residual rank improves detection over kappa.
 ```
 
 The data does not support the unsafe version.
+
+## 2026-07-07 Note On Geometric Hallucination Metrics
+
+Reference checked from the local `papers/推理` folder:
+
+```text
+What do Geometric Hallucination Detection Metrics Actually Measure?
+arXiv:2602.09158, ICML 2025 Reliable and Responsible Foundation Models Workshop
+```
+
+The paper studies three metrics:
+
+1. **Hidden Score (HS)**:
+
+   ```text
+   G_l = H_l H_l^T
+   HS(H_l) = (1/m) log det(G_l) = (1/m) sum_i log lambda_i
+   ```
+
+   This is a token-sequence log-volume / logdet statistic.
+
+2. **Matrix Entropy (ME)**:
+
+   ```text
+   q_i = lambda_i / trace(G_l)
+   ME(H_l) = - sum_i q_i log q_i
+   ```
+
+   This is spectral entropy / effective-rank family.
+
+3. **Attention Score (AS)**:
+
+   ```text
+   AS(A_l) = (1/(m n_heads)) sum_head sum_token log diag(A_l^head)
+   ```
+
+   This measures self-attention diagonal strength, not just attention entropy
+   or prompt attention mass.
+
+### Relation To Our Current Code
+
+HS and ME have been substantially tested under the Gram/spectral family:
+
+```text
+second_moment_dynamics_audit.py:
+  tok_raw_logdet_mean / tok_cen_logdet_mean  ~= HS
+  tok_raw_entropy / tok_cen_entropy
+  tok_raw_eff_rank / tok_cen_eff_rank        ~= ME / effective rank
+
+vector_detect.py:
+  explicitly tests [HS, eff-rank D, lam1, logE, twoNN_d]
+```
+
+These features did not beat the spread/kappa baseline under same-problem or
+first-error controls.  This is consistent with the current conclusion:
+
+```text
+source-free hidden-state geometry is mostly saturated by directional
+concentration for broad detection.
+```
+
+AS has **not** been exactly replicated.  Existing `attn_audit.py` uses:
+
+```text
+q_frac, sink_frac, attn_entropy
+```
+
+These are anchoring/sink summaries, not the paper's diagonal attention logdet.
+An exact AS replication requires saved per-token self-attention diagonal values
+or re-extraction from the model.
+
+### Why Their AUROC Can Be Much Higher
+
+The paper's strongest AUROCs come from a different protocol:
+
+1. synthetic prompt-response QA templates, not natural generated CoT;
+2. teacher-forced prompt+response evaluation, not online detection while the
+   model is generating;
+3. best layer selected across all layers;
+4. large hallucination types such as irrelevance, incoherence, and
+   incompleteness, not only subtle first wrong reasoning steps;
+5. domain-normalized perturbation baselines around the answer token.
+
+The most important methodological point is their perturbation normalization:
+
+```text
+score_norm = (score(response) - mean score(perturbed responses))
+             / std score(perturbed responses)
+```
+
+This removes domain/template effects and makes all-domain factual
+incorrectness much easier.  It is closer to a local counterfactual comparison
+than a plain static hidden-state scalar.
+
+### Actionable Takeaway
+
+Do not re-run HS/ME as if they were new signals.  They are already in the
+tested Gram/spectral family.
+
+The useful follow-up is:
+
+```text
+1. exact AS diagonal-logdet replication if attention diagonals can be saved;
+2. perturbation-normalized reasoning audit:
+   compare a generated step to local counterfactual/sibling steps for the same
+   problem and same position.
+```
+
+If perturbation normalization works, the novelty is not "another geometric
+metric"; it is:
+
+```text
+same-problem local counterfactual normalization turns weak geometry into a
+calibrated reasoning-step monitor.
+```
