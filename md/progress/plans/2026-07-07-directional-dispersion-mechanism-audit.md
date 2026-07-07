@@ -1392,3 +1392,149 @@ metric"; it is:
 same-problem local counterfactual normalization turns weak geometry into a
 calibrated reasoning-step monitor.
 ```
+
+## 2026-07-07 Strict Whole-Chain Gram Replication Code
+
+Implemented:
+
+```text
+whole_chain_gram_metrics_audit.py
+```
+
+Purpose:
+
+```text
+strictly reproduce the paper's HS/ME object level:
+whole response / whole reasoning-chain token Gram H_l H_l^T
+```
+
+This is different from `step_gram.py`, `vector_detect.py`, and most of
+`second_moment_dynamics_audit.py`, which operate on step-local token clouds or
+step-level summaries.
+
+### Exact Metrics
+
+For each chain and layer:
+
+```text
+G_l = H_l H_l^T
+HS = (1/m) log det(G_l)
+ME = -sum_i q_i log q_i, q_i = lambda_i / trace(G_l)
+```
+
+Strict guardrails:
+
+```text
+HS is reported only when G_l is full rank.
+No pseudo-logdet is substituted.
+AS is reported only if exact self-attention diagonals are stored.
+attn_entropy/q_frac/sink_frac are not used as AS substitutes.
+```
+
+### Two Evaluation Levels
+
+1. **Chain-level replication**
+
+   Tests whether whole-chain HS/ME/AS detect final wrong reasoning chains,
+   with:
+
+   ```text
+   cross AUROC
+   same-problem within-pair AUROC
+   OOF group scores
+   increment over [length + chain_spread]
+   bootstrap CI
+   ```
+
+2. **Prefix localization adaptation**
+
+   For ProcessBench-style first-error labels, the script computes:
+
+   ```text
+   prefix_hs / prefix_me / prefix_as
+   delta_hs / delta_me / delta_as
+   ```
+
+   at reasoning-step endpoints.  This is not the original paper protocol; it
+   is the deployable adaptation that asks whether whole-chain Gram metrics can
+   localize the first wrong step.
+
+### Local Validation
+
+```bash
+python -m py_compile whole_chain_gram_metrics_audit.py
+python whole_chain_gram_metrics_audit.py --selftest
+python -m pytest tests/test_whole_chain_gram_metrics_audit.py -q
+```
+
+The tests verify:
+
+```text
+HS/ME equal the analytic values on scaled identity matrices;
+HS becomes NaN when the Gram is rank-deficient;
+prefix traces are true whole-chain prefix Grams;
+synthetic whole-chain and prefix signals are recovered.
+```
+
+### Remote Commands
+
+Full hidden ProcessBench GSM8K:
+
+```bash
+cd /gz-data/research/demo
+git pull
+
+python whole_chain_gram_metrics_audit.py \
+  --input data/features/full_gsm8k.npz \
+  --policy gold_error_step \
+  --layer 14 \
+  --nearest_layer \
+  --bootstrap 500 \
+  --output_dir outputs/whole_chain_gram_full_gsm8k
+```
+
+Same-problem sampled GSM8K:
+
+```bash
+python whole_chain_gram_metrics_audit.py \
+  --input data/gsm8k_v2_custom.npz \
+  --policy answer_format_ok \
+  --layer 16 \
+  --nearest_layer \
+  --bootstrap 500 \
+  --output_dir outputs/whole_chain_gram_gsm8k_v2_custom
+```
+
+If the full-hidden shard directory is stale:
+
+```bash
+--hidden_dir data/hidden/gsm8k
+```
+
+### How To Read
+
+Important rows:
+
+```text
+paper_exact_hs_me          strict paper HS+ME
+paper_exact_hs_me_as       strict paper HS+ME+AS, only if AS exists
+baseline_length_spread     length + whole-chain directional spread
+baseline_plus_exact_paper  whether strict paper metrics add over baseline
+```
+
+Pass condition for a detector claim:
+
+```text
+baseline_plus_exact_paper improves over baseline_length_spread
+with same-problem bootstrap CI excluding 0.
+```
+
+Pass condition for localization:
+
+```text
+delta_hs / delta_me / delta_as has high within-error-chain localization
+against pre-error steps.
+```
+
+If chain-level HS/ME is strong but prefix deltas are weak, then the paper metric
+is a final-response detector, not a real-time first-error monitor.
