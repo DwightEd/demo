@@ -916,3 +916,172 @@ Pass criterion for the mechanism claim:
 res_eff_rank remains positive with CI > 0 under continuous controls,
 and the effect replicates across at least GSM8K plus one harder dataset.
 ```
+
+## 2026-07-07 Joint Kappa-Rank Trajectory Audit Code
+
+Implemented `kappa_rank_joint_trajectory_audit.py` to answer two follow-up
+questions:
+
+```text
+1. Do consensus loss and high-rank residual dispersion jointly define a stronger
+   failure state than either signal alone?
+2. Along a reasoning trajectory, do spread and residual rank rise at the same
+   point, before the first error, or only after the first error?
+```
+
+### Signals
+
+The script computes:
+
+```text
+spread = 1 - kappa
+res_eff_rank = effective rank of centered residual directional scatter
+spread_resid_lenpos = spread residualized over [logN, pos, n_steps]
+rank_resid_lenkappapos = res_eff_rank residualized over [logN, kappa, pos, n_steps]
+joint_raw_zsum = z(spread) + z(res_eff_rank)
+joint_strict_zsum = z(spread_resid_lenpos) + z(rank_resid_lenkappapos)
+joint_strict_min = min(z_spread_resid, z_rank_resid)
+```
+
+The important version is `joint_strict_zsum`: it keeps the consensus-loss
+channel while asking whether residual rank adds beyond continuous kappa,
+length, and position controls.
+
+### Joint Failure State
+
+The script defines four quadrants using control-step quantile thresholds:
+
+```text
+low_spread_low_rank
+consensus_loss_only
+rank_dispersion_only
+dual_high_spread_high_rank
+```
+
+The most interpretable state is:
+
+```text
+dual_high_spread_high_rank
+```
+
+This means both:
+
+```text
+the step has weak directional consensus
+and
+its residual scatter is unusually high-rank after controlling for kappa/length
+```
+
+### Trajectory Outputs
+
+The script keeps all steps and uses `gold_error_step` to label:
+
+```text
+correct_chain
+pre_error
+first_error
+post_error
+```
+
+It writes:
+
+```text
+*.rows.csv         per-step signals and phases
+*.profiles.csv     profiles by phase, normalized position, and relative step
+*.transitions.csv  pre->first, first->post, and correct-chain adjacent deltas
+*.json / *.md      headline summary
+```
+
+Key trajectory questions:
+
+```text
+pre->first jump > correct-chain adjacent jump?
+first->post stays high or falls back?
+rank_resid rises with spread or lags it?
+dual_high quadrant appears mainly at first-error or also post-error?
+```
+
+### Local Validation
+
+```text
+python -m py_compile kappa_rank_joint_trajectory_audit.py
+python kappa_rank_joint_trajectory_audit.py --selftest
+python -m pytest tests/test_kappa_rank_joint_trajectory_audit.py -q
+python -m pytest tests/test_directional_dispersion_mechanism_audit.py -q
+```
+
+### Remote Command
+
+```bash
+cd /gz-data/research/demo
+git pull
+
+python kappa_rank_joint_trajectory_audit.py \
+  --input data/features/full_gsm8k.npz \
+  --policy gold_error_step \
+  --layer 14 \
+  --nearest_layer \
+  --kappa_beta 1.0 \
+  --min_tokens 4 \
+  --quadrant_q 0.75 \
+  --bootstrap 500 \
+  --output_dir outputs/kappa_rank_joint_full_gsm8k
+```
+
+For harder datasets:
+
+```bash
+python kappa_rank_joint_trajectory_audit.py \
+  --input data/features/full_math.npz \
+  --policy gold_error_step \
+  --layer 14 \
+  --nearest_layer \
+  --bootstrap 500 \
+  --output_dir outputs/kappa_rank_joint_full_math
+
+python kappa_rank_joint_trajectory_audit.py \
+  --input data/features/full_omnimath.npz \
+  --policy gold_error_step \
+  --layer 14 \
+  --nearest_layer \
+  --bootstrap 500 \
+  --output_dir outputs/kappa_rank_joint_full_omnimath
+```
+
+If the hidden shard path in the npz is stale:
+
+```bash
+--hidden_dir data/hidden/gsm8k
+```
+
+### How To Interpret
+
+Strong joint evidence:
+
+```text
+dual_high_spread_high_rank has high odds ratio and useful recall at moderate FPR;
+joint_strict_zsum improves over spread and rank_resid with bootstrap CI > 0;
+pre->first jumps are larger than correct-chain adjacent jumps for both spread
+and rank_resid.
+```
+
+Mechanism-only evidence:
+
+```text
+joint score does not improve AUROC, but trajectory profiles show spread and
+rank_resid co-activate at first-error and the dual-high quadrant is enriched.
+```
+
+Negative result:
+
+```text
+rank_resid does not rise at first-error after continuous controls, or dual-high
+is no more enriched than consensus_loss_only.
+```
+
+If negative, the honest conclusion is:
+
+```text
+residual rank was a coarse-bin artifact; kappa/spread remains the saturated
+direction-only signal, and coherent wrong must be handled by source attribution.
+```
