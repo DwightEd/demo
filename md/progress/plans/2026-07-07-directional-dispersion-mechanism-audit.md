@@ -508,3 +508,152 @@ Gram/spectral variants failed and motivates moving to source-aware anchors.
 Either outcome is useful.  The experiment is worth running because it tells us
 whether the current kappa observation can be mechanized internally, or whether
 we must move entirely to anchor-source / semantic-flow variables.
+
+## 2026-07-07 Implementation V1
+
+Implemented `directional_dispersion_mechanism_audit.py` with a step-level
+mechanism protocol rather than another detector sweep.
+
+### What the code verifies
+
+1. **Kappa identity check**
+
+   For unit token directions:
+
+   ```text
+   C = sum_i w_i (u_i - mu)(u_i - mu)^T
+   trace(C) + ||mu||^2 = 1
+   ```
+
+   The script reports median and q90 numerical error.  This prevents us from
+   accidentally presenting residual energy as a new signal.
+
+2. **Residual-shape mechanism tests**
+
+   The four explicit hypotheses are:
+
+   | hypothesis | feature |
+   | --- | --- |
+   | H1a high-rank dispersion | `res_eff_rank` |
+   | H1b bipolar cancellation | `bipolarity` |
+   | H1c multi-cluster mixing | `signed_clusterability` |
+   | H1d ordered substep shift | `ordered_shift` |
+
+   Each is evaluated by error-vs-correct pair comparisons inside matched
+   `(length bin, kappa bin, position bin)` strata, with chain-cluster bootstrap
+   confidence intervals.
+
+3. **Low-kappa taxonomy**
+
+   Low-kappa rows are assigned multi-label flags and a primary visual class:
+
+   ```text
+   high_rank_dispersion
+   bipolar_split
+   multi_cluster
+   ordered_substep_shift
+   unclassified_low_kappa
+   ```
+
+   Thresholds are calibrated from low-kappa correct controls when available.
+   Taxonomy is descriptive; the main evidence is the conditioned morphology
+   test above.
+
+4. **Examples for qualitative audit**
+
+   The script writes top examples by morphology class to `*.examples.jsonl`.
+   If `steps_text` exists, each example includes the step text snippet.
+
+### Local validation
+
+```text
+python -m py_compile directional_dispersion_mechanism_audit.py
+python directional_dispersion_mechanism_audit.py --selftest
+python -m pytest tests/test_directional_dispersion_mechanism_audit.py -q
+python -m pytest tests/test_token_stream_geometry_audit.py tests/test_second_moment_dynamics_audit.py -q
+```
+
+Selftest constructs matched low-kappa steps where errors have zero-mean
+multi-axis residual scatter and correct controls have low-rank axial/ordered
+scatter.  It verifies that `res_eff_rank` is recovered after matching on
+length/kappa/position.
+
+### Remote ProcessBench command
+
+Use the full hidden ProcessBench files first because they contain true
+`gold_error_step` labels.
+
+```bash
+cd /gz-data/research/demo
+git pull
+
+python directional_dispersion_mechanism_audit.py \
+  --input data/features/full_gsm8k.npz \
+  --policy gold_error_step \
+  --label_mode first_error \
+  --layer 14 \
+  --nearest_layer \
+  --kappa_beta 1.0 \
+  --min_tokens 4 \
+  --length_bins 4 \
+  --kappa_bins 4 \
+  --pos_bins 3 \
+  --bootstrap 500 \
+  --output_dir outputs/directional_dispersion_full_gsm8k
+```
+
+Harder datasets should use the same command with:
+
+```bash
+--input data/features/full_math.npz
+--input data/features/full_omnimath.npz
+```
+
+If the full hidden path stored inside the npz is stale, pass:
+
+```bash
+--hidden_dir data/hidden/gsm8k
+```
+
+or the corresponding hidden shard directory for the dataset.
+
+### Same-problem descriptive command
+
+Same-problem sampled GSM8K does not have first-error step labels, so this is
+only descriptive and must not be used for first-error mechanism claims:
+
+```bash
+python directional_dispersion_mechanism_audit.py \
+  --input data/gsm8k_v2_custom.npz \
+  --policy answer_format_ok \
+  --label_mode chain_final \
+  --layer 16 \
+  --kappa_beta 1.0 \
+  --length_bins 4 \
+  --kappa_bins 4 \
+  --pos_bins 3 \
+  --bootstrap 500 \
+  --output_dir outputs/directional_dispersion_gsm8k_v2_custom
+```
+
+### How to read the result
+
+Pass as a mechanism claim if:
+
+```text
+H1a/H1b/H1c/H1d has positive conditioned delta with CI excluding 0,
+and taxonomy enrichment agrees with the direction of the conditioned test.
+```
+
+Kill the spectral-mechanism story if:
+
+```text
+All morphology differences vanish after matching length/kappa/position.
+```
+
+In that case the correct conclusion is not "try another spectrum"; it is:
+
+```text
+direction-only geometry is saturated by kappa, so coherent wrong requires
+source-aware anchor analysis.
+```
