@@ -1,0 +1,76 @@
+{
+  "dataset": "gsm8k",
+  "layer_idx": 14,
+  "npz_path": "/gz-data/research/demo/data/features/full_gsm8k.npz",
+  "n_chains": 395,
+  "n_correct": 199,
+  "n_error": 196,
+  "test_results": {
+    "concentration": {
+      "n_correct": 199,
+      "n_error": 196,
+      "correct_mean": 0.8997538685798645,
+      "error_mean": 0.9011393785476685,
+      "mean_diff": 0.001385509967803955,
+      "statistic": 20288.0,
+      "p_value": 0.4887086002733628,
+      "cohens_d": 0.05888935551047325,
+      "auroc": 0.5201517793046867,
+      "significant": false
+    },
+    "effective_rank": {
+      "n_correct": 199,
+      "n_error": 196,
+      "correct_mean": 2.086960792541504,
+      "error_mean": 2.052488327026367,
+      "mean_diff": -0.03447246551513672,
+      "statistic": 18688.0,
+      "p_value": 0.47334673650248993,
+      "cohens_d": -0.10164530575275421,
+      "auroc": 0.4791303456055789,
+      "significant": false
+    },
+    "geometric_deviation_score": {
+      "n_correct": 199,
+      "n_error": 196,
+      "correct_mean": 1.534190058708191,
+      "error_mean": 1.5005123615264893,
+      "mean_diff": -0.03367769718170166,
+      "statistic": 18703.0,
+      "p_value": 0.48154308739194074,
+      "cohens_d": -0.10305022448301315,
+      "auroc": 0.47951492154650804,
+      "significant": false
+    },
+    "combined_instability_score": {
+      "n_correct": 199,
+      "n_error": 196,
+      "correct_mean": 0.10024608671665192,
+      "error_mean": 0.09886062145233154,
+      "mean_diff": -0.0013854652643203735,
+      "statistic": 18716.0,
+      "p_value": 0.4887086002733628,
+      "cohens_d": -0.058887459337711334,
+      "auroc": 0.4798482206953133,
+      "significant": false
+    },
+    "combined_anomaly_flag": {
+      "n_correct": 199,
+      "n_error": 196,
+      "correct_anomaly_rate": 0.0,
+      "error_anomaly_rate": 0.0,
+      "correct_anomaly": 0,
+      "error_anomaly": 0,
+      "odds_ratio": NaN,
+      "p_value": 1.0,
+      "auroc": 0.5,
+      "significant": false
+    }
+  },
+  "per_chain_results": [
+    {
+      "chain_idx": 0,
+      "problem_id": 0,
+      "is_correct": true,
+      "metrics": {
+        "concentration": 

@@ -1,0 +1,11 @@
+
+===== premise constraint audit | gsm8k_v2_5shot.npz | answer_format_ok =====
+samples 2035 | err 279 | contrastive problems 94
+text coverage: steps 2646 samples | equation samples 2509 | equation steps 7127/14754
+best constraint constraint_invalid_eq_mean within=0.548 cross=0.542
+best baseline   baseline_cloud_resultant_max within=0.634 cross=0.826
+increment over baseline: -0.0853920515574651 CI=[-0.15946853346131928, -0.015500034989231123] sig=True
+baseline misses rescued: 49/341 (0.1436950146627566)
+
+saved: outputs/premise_constraint_audit_5shot/gsm8k_v2_5shot_answer_format_ok.json
+saved: outputs/premise_constraint_audit_5shot/gsm8k_v2_5shot_answer_format_ok.md
