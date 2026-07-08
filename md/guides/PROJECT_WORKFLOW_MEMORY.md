@@ -33,6 +33,13 @@ After each confirmed update:
 - Progress summaries and dated implementation plans go under `md/progress/`.
 - Operational instructions, data conventions, and workflow memory go under `md/guides/`.
 
+## Writing And Formula Policy
+
+- Present all mathematical formulas in LaTeX-rendered form.
+- Use inline math delimiters for short formulas, e.g. `\(R_t(W,\ell)\)`.
+- Use display math delimiters for standalone equations, e.g. `\[ ... \]`.
+- Avoid plain-text formula notation when a LaTeX form is readable.
+
 ## Result Loop
 
 The intended loop is:
