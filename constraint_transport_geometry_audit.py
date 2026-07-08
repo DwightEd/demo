@@ -49,6 +49,7 @@ import numpy as np
 
 
 EPS = 1e-12
+REMOTE_DATA_ROOT = Path("/gz-data/research/demo/data")
 
 
 try:
@@ -170,6 +171,113 @@ def parse_layers(text: str) -> List[int]:
     if not vals:
         raise ValueError("--layers must contain at least one layer")
     return vals
+
+
+def infer_subset(npz_path: Optional[str], dataset: str = "") -> str:
+    if dataset:
+        return str(dataset).strip().lower()
+    if not npz_path:
+        return ""
+    stem = Path(str(npz_path)).stem.lower()
+    if stem.startswith("full_"):
+        return stem[len("full_") :]
+    if stem.endswith("_features"):
+        stem = stem[: -len("_features")]
+    for name in ("gsm8k", "math", "omnimath", "olympiadbench"):
+        if name in stem:
+            return name
+    return stem
+
+
+def candidate_existing_path(candidates: Sequence[Path]) -> Optional[Path]:
+    seen = set()
+    for cand in candidates:
+        c = Path(cand)
+        key = str(c)
+        if key in seen:
+            continue
+        seen.add(key)
+        if c.exists():
+            return c
+    return None
+
+
+def resolve_npz_path(npz_path: Optional[str], dataset: str = "") -> str:
+    """Resolve canonical full_*.npz paths and give a non-misleading error."""
+    envs = [
+        os.environ.get("CTG_NPZ"),
+        os.environ.get("REASONING_NPZ"),
+        os.environ.get("FULL_GSM8K_NPZ"),
+    ]
+    subset = infer_subset(npz_path, dataset) or "gsm8k"
+    name = f"full_{subset}.npz"
+    raw_candidates: List[Path] = []
+    for val in envs:
+        if val:
+            raw_candidates.append(Path(val))
+    if npz_path:
+        p = Path(npz_path)
+        raw_candidates.extend([p, Path.cwd() / p, THIS_DIR / p])
+        # Common repeated mistake: data/full_gsm8k.npz.  The canonical full
+        # files live under data/features/.
+        if p.name.startswith("full_"):
+            raw_candidates.extend(
+                [
+                    p.parent / "features" / p.name,
+                    Path.cwd() / p.parent / "features" / p.name,
+                    THIS_DIR / p.parent / "features" / p.name,
+                    REMOTE_DATA_ROOT / "features" / p.name,
+                ]
+            )
+    raw_candidates.extend(
+        [
+            Path("data") / "features" / name,
+            Path.cwd() / "data" / "features" / name,
+            THIS_DIR / "data" / "features" / name,
+            REMOTE_DATA_ROOT / "features" / name,
+        ]
+    )
+    hit = candidate_existing_path(raw_candidates)
+    if hit is not None:
+        return str(hit)
+
+    checked = "\n".join(f"  - {c}" for c in raw_candidates[:18])
+    raise FileNotFoundError(
+        "Cannot find the canonical trace npz.\n"
+        f"Requested: {npz_path!r}\n"
+        "Important: the full datasets are under data/features/, not data/.\n"
+        "Canonical GSM8K path on the remote box:\n"
+        "  /gz-data/research/demo/data/features/full_gsm8k.npz\n"
+        "Canonical hidden shards:\n"
+        "  /gz-data/research/demo/data/hidden/gsm8k/\n"
+        "Checked candidates:\n"
+        f"{checked}\n\n"
+        "To discover the actual file on the server, run:\n"
+        "  find /gz-data/research/demo/data -name 'full_gsm8k.npz' -o -name '*gsm8k*.npz'\n"
+        "Or set:\n"
+        "  export CTG_NPZ=/gz-data/research/demo/data/features/full_gsm8k.npz\n"
+        "  export CTG_HIDDEN_DIR=/gz-data/research/demo/data/hidden/gsm8k\n"
+    )
+
+
+def resolve_hidden_dir(hidden_dir: Optional[str], npz_path: str, dataset: str = "") -> Optional[str]:
+    if hidden_dir:
+        return str(Path(hidden_dir))
+    env = os.environ.get("CTG_HIDDEN_DIR") or os.environ.get("REASONING_HIDDEN_DIR")
+    if env:
+        return str(Path(env))
+    subset = infer_subset(npz_path, dataset)
+    if not subset:
+        return None
+    p = Path(npz_path)
+    candidates = [
+        REMOTE_DATA_ROOT / "hidden" / subset,
+        p.parent.parent / "hidden" / subset,
+        Path.cwd() / "data" / "hidden" / subset,
+        THIS_DIR / "data" / "hidden" / subset,
+    ]
+    hit = candidate_existing_path(candidates)
+    return str(hit) if hit is not None else None
 
 
 def phase_for(gold: int, step_idx: int) -> str:
@@ -1789,7 +1897,15 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("npz_path", nargs="?", help="Canonical trace npz, e.g. data/full_gsm8k.npz")
+    p.add_argument(
+        "npz_path",
+        nargs="?",
+        help=(
+            "Canonical trace npz. Use data/features/full_gsm8k.npz or "
+            "/gz-data/research/demo/data/features/full_gsm8k.npz; "
+            "data/full_gsm8k.npz is the old wrong location."
+        ),
+    )
     p.add_argument("--hidden_dir", default=None, help="Directory containing per-chain raw hidden .npy/.npz files")
     p.add_argument("--dataset", default="")
     p.add_argument("--layers", default="14", help="Comma-separated layers to analyze")
@@ -1830,7 +1946,9 @@ def main() -> None:
             run(args)
         return
     if not args.npz_path:
-        raise SystemExit("npz_path is required unless --selftest is used")
+        args.npz_path = None
+    args.npz_path = resolve_npz_path(args.npz_path, args.dataset)
+    args.hidden_dir = resolve_hidden_dir(args.hidden_dir, args.npz_path, args.dataset)
     run(args)
 
 
