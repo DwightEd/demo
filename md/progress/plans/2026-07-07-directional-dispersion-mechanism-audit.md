@@ -2176,3 +2176,265 @@ To address coherent-but-wrong failures, the method must move from geometry of
 dispersion to geometry of source attribution: what premise, prior step, or
 self-generated claim the current step is anchored to.
 ```
+
+## 2026-07-08 Hidden Graph Signal / Chain Risk / Anchor Attribution Plan
+
+### Hidden Graph Signal Means Graph Fourier Energy Of Hidden States
+
+In the attention-graph papers, a hidden state matrix is not treated as an
+ordinary token cloud.  It is treated as a **graph signal**:
+
+```text
+tokens = graph nodes
+attention weights = graph edges
+hidden state coordinates = scalar/vector signals living on nodes
+```
+
+For one layer `l`:
+
+```text
+A_l^h in R^{N x N}       attention matrix for head h
+A_l = aggregate_h(A_l^h) aggregated token graph
+W_l = symmetrize(A_l)    undirected weighted graph for spectral analysis
+D_l = diag(W_l 1)
+L_l = I - D_l^{-1/2} W_l D_l^{-1/2} normalized graph Laplacian
+H_l in R^{N x d}         hidden states for the same tokens
+L_l = U Lambda U^T
+C_l = U^T H_l            graph Fourier coefficients of hidden states
+e_k = ||C_l[k, :]||_2^2  hidden energy in graph frequency k
+```
+
+Then the usable features are:
+
+```text
+HFER          = sum_{lambda_k > cutoff} e_k / sum_k e_k
+smoothness    = tr(H_l^T L_l H_l) / ||H_l||_F^2
+spectral_ent  = -sum_k q_k log q_k, q_k = e_k / sum_j e_j
+graph_effrank = exp(spectral_ent)
+fiedler       = second-smallest eigenvalue of L_l
+```
+
+This is different from hidden-token Gram effective rank:
+
+```text
+hidden Gram eff_rank: spectrum of H H^T
+graph signal spectrum: energy of H after projection onto attention-Laplacian modes
+```
+
+The second one asks whether hidden representations vary smoothly over the
+model's own attention graph.  It can catch a failure mode that a token cloud
+cannot: the hidden states may still look concentrated, but their energy may move
+to high-frequency attention modes, meaning neighboring / mutually attending
+tokens no longer carry compatible information.
+
+### Whole-Chain Effective Rank Is Already Computable
+
+`whole_chain_gram_metrics_audit.py` already computes response-level Gram
+statistics:
+
+```text
+H_l = all generated tokens in one response at layer l
+G_l = H_l H_l^T
+q_i = lambda_i / trace(G_l)
+paper_me = -sum_i q_i log q_i
+paper_eff_rank = exp(paper_me)
+paper_lam1 = max_i q_i
+paper_hs = mean_i log lambda_i, only if full rank
+```
+
+It also computes prefix versions at step endpoints:
+
+```text
+prefix_eff_rank
+prefix_me
+prefix_lam1
+delta_eff_rank
+delta_me
+delta_lam1
+```
+
+The important distinction:
+
+```text
+step-local eff_rank     = local mechanism / first-error subtype
+whole-chain eff_rank    = final response-level geometry
+prefix delta eff_rank   = online adaptation for first-error localization
+```
+
+Whole-chain effective rank may have high final-answer AUROC, but it is very
+likely entangled with response length, task difficulty, and verbosity.  It must
+therefore be reported with length/problem controls, not as a standalone
+"reasoning detector".
+
+### Keeping Step Detection Power While Predicting Whole Response Correctness
+
+The clean response-level object is not an average of step scores.  Averaging
+dilutes local failures and recreates the length confound.  Use a survival /
+hazard view:
+
+```text
+h_j = P(step j is the first wrong step | no previous wrong step, prefix up to j)
+P(response wrong) = 1 - product_j (1 - h_j)
+```
+
+Recommended chain-level detector:
+
+```text
+step hazard features:
+  spread_j
+  residual_rank_j
+  dual_high_j
+  entropy_j
+  anchor/source features_j
+  length_j, position_j, problem controls
+
+chain aggregators:
+  noisy_or = 1 - prod_j(1 - h_j)
+  max_hazard
+  top2_mean_hazard
+  early_prefix_hazard
+
+chain global features:
+  whole_spread
+  whole_eff_rank / ME / HS
+  whole attention-graph HFER / smoothness if attention is available
+```
+
+Evaluation must include:
+
+```text
+chain-level AUROC / AUPRC for final answer correctness
+same-problem grouped splits
+length- and entropy-controlled baselines
+calibration / ECE
+rescue cases where step hazard catches errors missed by whole-chain features
+```
+
+This preserves the local detection power because a single high-risk step can
+raise `noisy_or`, while whole-chain geometry acts as a slower response-level
+context variable.
+
+### Anchor / Source Attribution Implementation
+
+The current AnchorFlow code is a first-pass scaffold.  It parses anchors from
+prompt text, but if prompt-span hidden vectors are unavailable it builds anchor
+vectors by partitioning `qvec`.  That mode is explicitly named
+`q_partition_fallback`; it is useful as a software scaffold but not enough for a
+semantic "失锚" claim.
+
+The real implementation should define source spans:
+
+```text
+prompt anchors:
+  goal span
+  number spans
+  entity/context spans
+  constraint spans
+
+generated anchors:
+  previous step spans
+  current recent-token span
+  first-error / tainted-step spans when labels are available for analysis
+  answer span
+```
+
+Then build two source-attribution channels.
+
+#### Channel A: Direct Attention Source Attribution
+
+If full attention maps are saved:
+
+```text
+for current step tokens T_j and source span S_k:
+  mass_{j,k}^{layer,head} = mean_{t in T_j} sum_{i in S_k} A_{layer,head}[t, i]
+```
+
+Features:
+
+```text
+prompt_core_mass      mass to goal/number/constraint anchors
+previous_step_mass    mass to earlier generated reasoning
+self_recent_mass      mass to current local text
+tainted_mass          mass to wrong previous step, analysis-only when labels exist
+anchor_entropy        entropy over source spans
+source_jump           ||mass_j - mass_{j-1}||
+detach                1 - max_k mass_{j,k}
+coherent_wrong_flag   high kappa + low prompt_core_mass + high self/tainted mass
+```
+
+Attention is necessary if the claim is "the model is reading from / routing
+through the wrong source", because attention is closer to an internal routing
+object than hidden-vector similarity.
+
+#### Channel B: Hidden Source Transport
+
+If attention is not stored, use hidden states but with real source-span vectors,
+not qvec partitions:
+
+```text
+a_k = pooled hidden vector of source span S_k
+v_j = pooled hidden vector of current step j
+P_{j,k} = softmax(cos(v_j, a_k) / tau)
+```
+
+Features mirror attention:
+
+```text
+hidden_core_mass
+hidden_self_mass
+hidden_tainted_mass
+hidden_anchor_entropy
+hidden_detach
+hidden_transport_jump
+```
+
+This can be useful and cheaper than attention, but it supports a weaker claim:
+
+```text
+current representation is geometrically closer to source X
+```
+
+not the stronger causal/routing claim:
+
+```text
+the model attends to source X while computing the current tokens
+```
+
+### Minimal Strong Experiment
+
+The next serious experiment should compare four models of evidence:
+
+```text
+M0: length + position + entropy
+M1: M0 + spread / kappa
+M2: M1 + whole-chain / prefix Gram features
+M3: M1 + attention source attribution
+M4: M1 + hidden source transport
+M5: M1 + attention source + hidden source
+```
+
+Required controls:
+
+```text
+random anchors
+shuffled anchor kinds
+wrong-problem anchors
+q_partition_fallback explicitly separated from real prompt-span anchors
+same-problem grouped split
+bootstrap CI for increments over M1
+coherent-wrong subset: high kappa but wrong final answer / wrong step
+```
+
+The decisive outcome is not only global AUROC.  The key paper-level question is:
+
+```text
+Can source attribution rescue coherent-but-wrong cases where spread/kappa is
+high and ordinary dispersion geometry says the step looks healthy?
+```
+
+If yes, the method becomes a two-axis theory:
+
+```text
+fragmented failure = loss of directional consensus
+coherent wrong     = coherent anchoring to the wrong source
+```
