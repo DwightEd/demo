@@ -364,6 +364,12 @@ The concrete audit script is `trajectory_phase_transition_audit.py`.  It
 reports aligned profiles around the gold first-error step, event ranks within
 each chain, and mode counts for the three cases above.
 
+The visualization companion is `trajectory_signal_visualization.py`.  It should
+be run before fitting any response-level model.  It produces all-chain heatmaps,
+first-error-aligned heatmaps, response dynamic-score comparisons, and per-chain
+case cards.  This makes the data shape visible at both population and sample
+granularity.
+
 Required pass condition:
 
 ```text
@@ -537,7 +543,62 @@ z^{\mathrm{break}}_j
 This script should be treated as the bridge between step-local geometry and
 response-level hazard modeling, not as another final detector.
 
-### Script 3: `response_hazard_audit.py`
+### Script 3: `trajectory_signal_visualization.py`
+
+Purpose: visualize all reasoning-chain signal trajectories before committing
+to a response-level model.
+
+Inputs:
+
+- the same inputs as `trajectory_phase_transition_audit.py`;
+- optional event metrics such as `break_z`, `level_z`, `jump_z`, and
+  `shock_z`.
+
+Outputs:
+
+- raw-step heatmaps, one chain per row;
+- normalized-step heatmaps for length-invariant comparison;
+- first-error-aligned heatmaps for wrong chains;
+- selected or all per-chain case cards;
+- chain-level CSV with dynamic scores that preserve local peaks.
+
+The response-level visualization should compare coarse summaries with
+peak-preserving dynamic scores:
+
+\[
+\mathrm{LME}_{\tau}(b_{1:T})
+=
+\tau \log\left(
+\frac{1}{T}\sum_j \exp(b_j/\tau)
+\right),
+\]
+
+\[
+\mathrm{TopK}(b_{1:T})
+=
+\frac{1}{K}\sum_{j \in \mathrm{topK}} b_j,
+\]
+
+\[
+\hat R_{\mathrm{burst}}
+=
+1-\prod_j (1-\hat p_j),
+\quad
+\hat p_j
+=
+\mathrm{clip}
+\left(
+\frac{b_j-q_{0.90}^{\mathrm{ctrl}}}
+{q_{0.995}^{\mathrm{ctrl}}-q_{0.90}^{\mathrm{ctrl}}},
+0,1
+\right).
+\]
+
+These are not final trained detectors.  They are diagnostic aggregators that
+ask whether response-level signal is lost because averaging diluted a local
+event.
+
+### Script 4: `response_hazard_audit.py`
 
 Purpose: turn step signals into response-level risk without destroying
 localization.
@@ -564,7 +625,7 @@ Main score:
 1-\prod_j(1-\hat p_j).
 \]
 
-### Script 4: `coherent_wrong_source_audit.py`
+### Script 5: `coherent_wrong_source_audit.py`
 
 Purpose: test source anchoring only where geometry should fail.
 
@@ -621,11 +682,11 @@ the diagnostic signal supports corrective inference-time control.
 
 ## Immediate Next Step
 
-Run `trajectory_phase_transition_audit.py` first to inspect whether the
-geometry signal is a local phase transition, gradual drift, or persistent
-instability.  Then build `signal_validity_mechanism_audit.py`; it should not
-introduce a new method.  It should make existing signals accountable by
-reporting:
+Run `trajectory_signal_visualization.py` and
+`trajectory_phase_transition_audit.py` first to inspect whether the geometry
+signal is a local phase transition, gradual drift, or persistent instability.
+Then build `signal_validity_mechanism_audit.py`; it should not introduce a new
+method.  It should make existing signals accountable by reporting:
 
 ```text
 distribution -> monotonicity -> residual increment -> calibration ->
