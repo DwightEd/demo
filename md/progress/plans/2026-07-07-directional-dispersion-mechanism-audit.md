@@ -2438,3 +2438,169 @@ If yes, the method becomes a two-axis theory:
 fragmented failure = loss of directional consensus
 coherent wrong     = coherent anchoring to the wrong source
 ```
+
+## 2026-07-08 ReDeEP Paper-Strategy Notes
+
+Reference: `REDEEP: Detecting Hallucination in Retrieval-Augmented Generation
+via Mechanistic Interpretability`, ICLR 2025.
+
+### What ReDeEP Actually Uses
+
+ReDeEP is powerful partly because it does **not** introduce many metrics.  It
+uses two mechanism-grounded scores:
+
+```text
+ECS: External Context Score
+PKS: Parametric Knowledge Score
+```
+
+ECS measures whether external context attended by a head is semantically retained
+in the generated token:
+
+```text
+1. For generated token t, take attention from t to retrieved-context tokens.
+2. Select top-k% attended context tokens for a layer/head.
+3. Mean-pool final-layer hidden states of those attended context tokens.
+4. Compute cosine similarity to the final-layer hidden state of t.
+5. Average over response tokens.
+```
+
+Chunk ECS replaces token hidden cosine with chunk-level attention pairing plus
+embedding cosine between response chunk and highest-attended context chunk.
+
+PKS measures how much a FFN layer changes the token's vocabulary distribution:
+
+```text
+x_mid^l = residual stream after attention, before FFN
+x^l     = residual stream after FFN
+q(x)    = softmax(LogitLens(x))
+PKS_l   = JSD(q(x_mid^l), q(x^l))
+```
+
+The detector is a simple signed combination:
+
+```text
+hallucination_score = sum_l alpha * PKS_l - sum_{l,h} beta * ECS_{l,h}
+```
+
+Attention heads and FFN layers are selected by validation-set correlation /
+grid search.  The intervention AARF then amplifies Copying Head outputs and
+reduces Knowledge FFN outputs when the token-level score exceeds a threshold.
+
+### How The Paper Is Organized
+
+The paper's strength is not metric complexity.  It is the evidence chain:
+
+```text
+1. Problem reframing:
+   RAG hallucination is separated from knowledge conflict.  The retrieved
+   context can be correct while the response still conflicts with it.
+
+2. Causal framing:
+   Existing methods are grouped by what they confound:
+   - parametric knowledge confounded by external context;
+   - external context confounded by parametric knowledge;
+   - mixed methods that do not decouple the two.
+
+3. Mechanistic empirical study before the method:
+   RQ1: Are ECS/PKS statistically related to hallucination?
+   RQ2: Do Copying Heads / Knowledge FFNs matter under intervention?
+   RQ3: What changes when parametric knowledge already knows the answer?
+
+4. Method:
+   A very simple regression / threshold detector becomes credible because the
+   mechanism study already made the variables meaningful.
+
+5. Necessary experiments:
+   - multiple datasets: RAGTruth and Dolly(AC);
+   - multiple backbones: LLaMA2-7B/13B and LLaMA3-8B;
+   - broad baselines across parametric-only, external-only, and mixed methods;
+   - ablation: Only PKS, Only ECS, Full ReDeEP;
+   - intervention: noise Copying Heads, amplify FFNs, matched controls;
+   - mitigation: AARF pairwise truthfulness comparison;
+   - efficiency analysis;
+   - sensitivity to Top-K heads / FFNs and weights;
+   - case study.
+```
+
+### What We Should Borrow
+
+We should not copy their metrics.  The transferable pattern is:
+
+```text
+few telemetry variables + strong mechanism story + hard controls
+```
+
+For our reasoning project, the analogous structure should be:
+
+```text
+Axis 1: directional consensus / fragmentation
+  spread, kappa, residual effective rank
+
+Axis 2: anchor-source attribution
+  prompt/source mass, self-source mass, tainted-prefix mass,
+  transport jump, anchor entropy
+
+Optional Axis 3: graph-signal roughness
+  attention-graph HFER / smoothness if attention maps are stored
+```
+
+Then the paper-level RQs become:
+
+```text
+RQ1: Do first-error steps show a stable directional-consensus loss after
+     length, position, entropy, and problem controls?
+
+RQ2: Does residual rank explain what kind of low-kappa event this is, or is it
+     merely a proxy for spread?
+
+RQ3: Do coherent-but-wrong cases preserve directional consensus but shift source
+     anchoring toward self-generated or tainted prefixes?
+
+RQ4: Can a step-hazard / noisy-or model turn local telemetry into final response
+     correctness without losing localization?
+
+RQ5: Do interventions or re-anchoring prompts reduce downstream errors when
+     triggered by the telemetry state?
+```
+
+The novelty should not be `q_frac`, `sink_frac`, or `attn_entropy`.  Those are
+standard-ish attention lookback / sink / focus summaries.  The novelty must be
+the **typed reasoning-state model**:
+
+```text
+fragmented wrong = direction consensus collapses;
+coherent wrong   = direction remains stable but source attribution is wrong;
+response risk    = accumulated first-error hazard, not averaged scalar scores.
+```
+
+### Current Local Attention Metrics Are Not The Novel Contribution
+
+Our existing attention features are:
+
+```text
+q_frac       = attention mass from current step tokens to prompt/question span
+sink_frac    = attention mass to position 0 / BOS sink
+attn_entropy = entropy of token attention distributions
+```
+
+They are extracted in `extract_features.py --attn_sink` and audited in
+`attn_audit.py` as an increment over length, uncertainty, and geometry.  They
+are useful as baseline source-flow summaries, but they are close to existing
+ideas:
+
+```text
+q_frac       resembles attention lookback / context-use ratio;
+sink_frac    resembles attention-sink / massive-activation diagnostics;
+entropy      is a generic attention focus/diffuseness measure.
+```
+
+Therefore they should be presented as controls or first-pass proxies.  A genuine
+contribution needs typed anchors and source attribution:
+
+```text
+goal / number / constraint / entity / previous-step / self-recent /
+tainted-prefix source masses,
+plus source jump and anchor entropy,
+tested specifically on coherent-but-wrong failures.
+```
