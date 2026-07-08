@@ -2604,3 +2604,224 @@ tainted-prefix source masses,
 plus source jump and anchor entropy,
 tested specifically on coherent-but-wrong failures.
 ```
+
+## 2026-07-08 Core Hypothesis And Organic Metric Synthesis
+
+The working hypothesis should be stated more narrowly than "correct reasoning
+is concentrated":
+
+```text
+During stepwise reasoning, a step is reliable when the model maintains a
+coherent local computation and keeps that computation anchored to valid
+sources: the question constraints and the verified prefix.  Errors arise when
+either the local computation fragments, or the computation remains coherent but
+is anchored to the wrong source.
+```
+
+This gives two distinct failure modes:
+
+```text
+fragmented wrong:
+  the step has low directional consensus / high residual rank;
+  this is the phenomenon already observed by kappa and spread.
+
+coherent-but-wrong:
+  the step can keep high directional consensus and low entropy;
+  the hidden state is internally stable, but attention/source flow points to a
+  self-generated, tainted, stale, or irrelevant anchor.
+```
+
+The role of attention is therefore not "another feature."  It is the missing
+source-attribution axis.  Hidden geometry answers:
+
+```text
+Are the tokens in this semantic step forming one computation or many competing
+directions?
+```
+
+Attention/source flow answers:
+
+```text
+Which earlier evidence is this computation using?
+```
+
+Entropy dynamics answers:
+
+```text
+Is the output distribution unstable while this computation is generated?
+```
+
+### Metric Blocks
+
+For step `j`, define the following blocks with problem / length / position
+controls and leak-free same-problem splits.
+
+```text
+H_j: hidden consensus block
+  spread_j = 1 - ||sum_t u_t|| / n_j
+  rank_j   = effective_rank of residual token covariance
+  frag_j   = relu(z(spread_j)) * relu(z(rank_resid_j))
+
+A_j: typed source-flow block
+  prompt_mass_j      = attention/saliency mass to question and constants
+  verified_mass_j    = mass to previous correct / non-tainted steps
+  self_recent_mass_j = mass to current step and immediately previous text
+  tainted_mass_j     = mass to steps after the first known wrong step
+  anchor_entropy_j   = entropy over typed source bins
+  source_jump_j      = distance between source distributions at j-1 and j
+
+G_j: hidden-source alignment block
+  hidden anchor vector for source bin b:
+    a_b^l = mean hidden vector of tokens in source bin b
+  step vector:
+    s_j^l = mean / resultant direction of tokens in step j
+  align_j(b) = cosine(s_j^l, a_b^l)
+```
+
+The key interaction is not linear fusion but typed state assignment:
+
+```text
+fragmentation risk:
+  high frag_j
+
+lost-anchor risk:
+  low prompt/verified flow + high self_recent/tainted flow
+
+coherent-wrong risk:
+  low spread_j + low entropy_j + high source_mismatch_j
+
+uncertain-wrong risk:
+  high EDIS-style entropy instability + high frag_j
+```
+
+This can be implemented as a step hazard model:
+
+```text
+p(error at step j | prefix) =
+  sigmoid(b + controls
+          + beta_f * frag_j
+          + beta_a * lost_anchor_j
+          + beta_c * coherent_wrong_j
+          + beta_u * uncertainty_instability_j
+          + beta_fa * frag_j * lost_anchor_j)
+
+p(chain wrong) = 1 - product_j (1 - p(error at step j)).
+```
+
+This preserves localization while producing a whole-response risk.  It also
+gives a clean ablation story:
+
+```text
+hidden only        -> detects fragmented wrong;
+attention only     -> detects source loss but may miss internal fragmentation;
+entropy only       -> detects unstable uncertainty;
+typed interaction  -> targets coherent-but-wrong and propagated-error cases.
+```
+
+### Relation To StepFlow And EDIS
+
+StepFlow is an attention-gradient flow paper.  It pools token saliency into
+question / thinking-step / summary blocks and identifies two recurring failures:
+
+```text
+shallow lock-in:
+  shallow layers over-focus on current or adjacent steps.
+
+deep decay:
+  deep layers lose saliency on the thinking segment, and the summary becomes
+  dominated by itself and the last few steps.
+```
+
+Its intervention repairs those failure modes:
+
+```text
+Odds-Equal Bridge:
+  shallow-layer attention mass is rebalanced toward bridge context.
+
+Step Momentum Injection:
+  a small residual vector from the previous step is injected at selected deep
+  layers to maintain step-to-step continuity.
+```
+
+EDIS is an output-entropy dynamics paper.  It computes token entropy over the
+generated trajectory and detects:
+
+```text
+burst spikes:
+  sustained entropy growth over a local window.
+
+peak-valley spikes:
+  rebounds from a previous low-entropy valley.
+
+EDIS = instability_count * (1 + entropy_variance).
+```
+
+EDIS is strong for unstable failures, but it is not designed for confident
+wrong steps.  StepFlow is strong for information-flow failures, but it does not
+use our hidden consensus phenomenon.  Our story should therefore be:
+
+```text
+Reasoning failure is a coupled hidden-flow event.
+  hidden geometry tells whether the local computation is coherent;
+  source flow tells whether the coherent computation is anchored correctly;
+  entropy dynamics tells whether the decoder is uncertain.
+```
+
+### Step-Labeled Datasets To Use
+
+Priority datasets:
+
+```text
+ProcessBench:
+  human first-error labels for stepwise mathematical reasoning; best match for
+  our first-error localization setting.
+
+PRM800K:
+  large human step-level correctness labels on MATH solutions; good for scale,
+  but labels are step rewards rather than necessarily first-error trajectories.
+
+MR-GSM8K:
+  includes first-error step and error reason annotations for meta-reasoning
+  variants; useful for easier GSM-style controlled validation.
+
+AgentProcessBench:
+  human step-level annotations for tool-using agent trajectories; useful only
+  after the method works on math, because the task semantics are broader.
+```
+
+Secondary / synthetic supervision:
+
+```text
+Math-Shepherd:
+  automatically constructed process supervision for GSM8K/MATH; useful for
+  pretraining or stress tests, weaker as final evidence because labels are not
+  human first-error labels.
+
+FG-PRM:
+  synthetic fine-grained hallucination categories at the reasoning-step level;
+  useful for testing whether source-attribution separates error types.
+```
+
+### Next Code Tasks
+
+```text
+1. Build typed step-source bins from available token/step spans:
+   prompt, current step, previous step, earlier verified prefix, tainted prefix,
+   summary/answer.
+
+2. Implement source-flow summaries from stored attention if available:
+   source mass, source entropy, source jump, shallow/deep layer split.
+
+3. Implement hidden-source alignment without attention:
+   source anchor vectors from hidden states, step-to-source cosine and nearest
+   source type.  This tests whether residual geometry alone can recover
+   anchor/source attribution.
+
+4. Fit the step hazard model with grouped same-problem splits:
+   controls -> hidden -> source-flow -> entropy -> typed interactions.
+
+5. Evaluate three endpoints:
+   first-error step AUROC / AUPRC,
+   coherent-wrong subset lift,
+   whole-chain wrong risk via noisy-or aggregation.
+```
