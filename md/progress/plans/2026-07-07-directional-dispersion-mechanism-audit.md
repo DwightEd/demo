@@ -2962,3 +2962,88 @@ readout.  If anchor effects vanish there, the current hidden/text posterior
 definition should be retired or replaced by a more causal anchor attribution
 method.
 ```
+
+### Implemented: Prefix Innovation Audit
+
+The coarse anchor-posterior branch is not the right object for the next test.
+The more direct question is:
+
+```text
+Does the first-error transition leave the subspace spanned by the previous
+reasoning prefix?
+```
+
+`prefix_innovation_audit.py` changes the row definition from isolated steps to
+transitions:
+
+```text
+row_t = transition from step t-1 to step t
+```
+
+Core signals:
+
+```text
+off_prefix_subspace:
+  fraction of current step token-cloud energy outside the subspace of all
+  previous steps in the same chain.
+
+off_prev_subspace:
+  fraction of current step token-cloud energy outside the immediate previous
+  step subspace.
+
+innovation_off_prefix:
+  fraction of the mean displacement vector mu_t - mu_{t-1} outside the prefix
+  subspace.
+
+q_align_drop:
+  cosine(mu_{t-1}, qvec) - cosine(mu_t, qvec).
+
+prefix_z_*:
+  dimension-wise over-activation of the current step mean relative to the
+  previous prefix token distribution.
+```
+
+This is the audit that compares the first-error step with the previous step.
+It also reports the hidden dimensions most over-activated at first-error
+transitions relative to control transitions.
+
+Run:
+
+```bash
+python prefix_innovation_audit.py \
+  --input data/features/full_gsm8k.npz \
+  --layer 14 \
+  --nearest_layer \
+  --hidden_dir data/hidden/gsm8k \
+  --rank 8 \
+  --control_pool pre_and_correct \
+  --folds 5 \
+  --bootstrap 1000 \
+  --output_dir outputs/prefix_innovation_full_gsm8k
+```
+
+For `sv_clouds` files:
+
+```bash
+python prefix_innovation_audit.py \
+  --input data/gsm8k_v2_custom.npz \
+  --layer 16 \
+  --nearest_layer \
+  --rank 8 \
+  --control_pool pre_and_correct \
+  --folds 5 \
+  --bootstrap 1000 \
+  --output_dir outputs/prefix_innovation_custom
+```
+
+Decision rule:
+
+```text
+Support the step-flow-break hypothesis if off_prefix_subspace or
+innovation_off_prefix gives same-problem and OOF lift over baseline controls,
+and if the top over-activated dimensions show a stable first-error profile.
+
+Reject this particular mechanism if only prefix_z or innovation_norm works but
+off-prefix ratios do not, because that would mean first errors are activation
+magnitude shocks rather than escapes from the previous reasoning subspace.
+```
