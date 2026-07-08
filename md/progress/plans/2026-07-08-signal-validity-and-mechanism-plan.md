@@ -330,6 +330,40 @@ Compare against:
 - whole-chain Gram metrics;
 - CUSUM variants.
 
+Before fitting a response hazard, diagnose whether the step signal actually
+appears as a phase transition.  For a risk-high step signal \(s_j\), compute
+prefix-relative scores:
+
+\[
+z^{\mathrm{level}}_j
+=
+\frac{s_j-\mathrm{median}(s_{<j})}{\mathrm{scale}(s_{<j})},
+\]
+
+\[
+z^{\mathrm{jump}}_j
+=
+\frac{s_j-s_{j-1}}{\mathrm{scale}(s_{<j})},
+\]
+
+\[
+z^{\mathrm{break}}_j
+=
+\max(0,z^{\mathrm{level}}_j)
++
+\max(0,z^{\mathrm{jump}}_j).
+\]
+
+This separates three cases that min/mean aggregation collapses:
+
+- stable prefix, sharp first-error break;
+- gradual drift before the first error;
+- persistently unstable but not locally diagnostic trajectories.
+
+The concrete audit script is `trajectory_phase_transition_audit.py`.  It
+reports aligned profiles around the gold first-error step, event ranks within
+each chain, and mode counts for the three cases above.
+
 Required pass condition:
 
 ```text
@@ -470,7 +504,40 @@ GPU policy: if hidden clouds or Gram/eigendecomposition are required, use
 `--backend auto|cpu|torch|cuda`, `--device`, and move each chain to GPU once.
 Pure scalar reports can stay CPU.
 
-### Script 2: `response_hazard_audit.py`
+### Script 2: `trajectory_phase_transition_audit.py`
+
+Purpose: explain why step-level signals may vanish under response-level
+aggregation.
+
+Inputs:
+
+- `stepcloud` and `cloud_feature_names`;
+- `gold_error_step`;
+- optional `tok_U_D` and `step_token_ranges` for entropy summaries.
+
+Outputs:
+
+- event-level first-error AUROC for `signal_value`, `level_z`, `jump_z`,
+  `break_z`, and `shock_z`;
+- response-level AUROC for max/mean aggregates;
+- gold first-error rank within each chain;
+- aligned transition profiles around the first error;
+- first-error mode taxonomy.
+
+Main diagnostic:
+
+\[
+z^{\mathrm{break}}_j
+=
+\max(0,z^{\mathrm{level}}_j)
++
+\max(0,z^{\mathrm{jump}}_j).
+\]
+
+This script should be treated as the bridge between step-local geometry and
+response-level hazard modeling, not as another final detector.
+
+### Script 3: `response_hazard_audit.py`
 
 Purpose: turn step signals into response-level risk without destroying
 localization.
@@ -497,7 +564,7 @@ Main score:
 1-\prod_j(1-\hat p_j).
 \]
 
-### Script 3: `coherent_wrong_source_audit.py`
+### Script 4: `coherent_wrong_source_audit.py`
 
 Purpose: test source anchoring only where geometry should fail.
 
@@ -554,8 +621,11 @@ the diagnostic signal supports corrective inference-time control.
 
 ## Immediate Next Step
 
-Build `signal_validity_mechanism_audit.py` first.  It should not introduce a
-new method.  It should make existing signals accountable by reporting:
+Run `trajectory_phase_transition_audit.py` first to inspect whether the
+geometry signal is a local phase transition, gradual drift, or persistent
+instability.  Then build `signal_validity_mechanism_audit.py`; it should not
+introduce a new method.  It should make existing signals accountable by
+reporting:
 
 ```text
 distribution -> monotonicity -> residual increment -> calibration ->
