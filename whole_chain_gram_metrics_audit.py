@@ -87,6 +87,17 @@ def scalar_str(x: Any) -> str:
     return str(x)
 
 
+def sort_value(x: Any, default: float = -1.0) -> float:
+    """Finite numeric sort key that survives JSON-cleaned None values."""
+    try:
+        if x is None:
+            return float(default)
+        v = float(x)
+        return v if math.isfinite(v) else float(default)
+    except Exception:
+        return float(default)
+
+
 def select_layer(layers: Sequence[int], target: int, nearest: bool) -> Tuple[int, int]:
     vals = [int(x) for x in layers]
     if int(target) in vals:
@@ -563,7 +574,7 @@ def evaluate_step_scores(rows: Sequence[StepRow]) -> Dict[str, Any]:
             "within_error_chain_pairs": int(pairs),
             "direction": "error_high" if np.nan_to_num(loc, nan=cross) >= np.nan_to_num(loc_rev, nan=1.0 - cross) else "error_low",
         }
-    return dict(sorted(out.items(), key=lambda kv: np.nan_to_num(kv[1]["within_error_chain_loc_best"], nan=-1.0), reverse=True))
+    return dict(sorted(out.items(), key=lambda kv: sort_value(kv[1].get("within_error_chain_loc_best")), reverse=True))
 
 
 def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
@@ -580,7 +591,7 @@ def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
         name: evaluate_score(name, feature_matrix(rows, [name])[:, 0], y=y, mask=mask, groups=groups)
         for name in single_names
     }
-    single_scores = dict(sorted(single_scores.items(), key=lambda kv: np.nan_to_num(kv[1]["within_best_direction"], nan=-1.0), reverse=True))
+    single_scores = dict(sorted(single_scores.items(), key=lambda kv: sort_value(kv[1].get("within_best_direction")), reverse=True))
 
     paper_all = usable_feature_names(rows, "paper_", args.min_feature_coverage, mask)
     exact_hsme = [n for n in ("paper_hs_raw", "paper_me_raw") if n in paper_all]
@@ -630,7 +641,7 @@ def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
 
     ranked_groups = sorted(
         group_scores.items(),
-        key=lambda kv: np.nan_to_num(kv[1].get("within_best_direction", kv[1].get("within_pair_auroc_error_high")), nan=-1.0),
+        key=lambda kv: sort_value(kv[1].get("within_best_direction", kv[1].get("within_pair_auroc_error_high"))),
         reverse=True,
     )
     step_scores = evaluate_step_scores(step_rows)
@@ -702,7 +713,7 @@ def write_markdown(path: str, res: Mapping[str, Any]) -> None:
     ]
     for name, row in sorted(
         res["group_scores"].items(),
-        key=lambda kv: np.nan_to_num(kv[1].get("within_best_direction"), nan=-1.0),
+        key=lambda kv: sort_value(kv[1].get("within_best_direction")),
         reverse=True,
     ):
         inc = row.get("increment_over_primary_baseline", {})
@@ -777,7 +788,7 @@ def print_result(res: Mapping[str, Any]) -> None:
     print("\nGroup scores:")
     for name, row in sorted(
         res["group_scores"].items(),
-        key=lambda kv: np.nan_to_num(kv[1].get("within_best_direction"), nan=-1.0),
+        key=lambda kv: sort_value(kv[1].get("within_best_direction")),
         reverse=True,
     ):
         inc = row.get("increment_over_primary_baseline", {})
