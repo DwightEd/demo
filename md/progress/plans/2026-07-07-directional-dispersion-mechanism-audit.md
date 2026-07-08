@@ -2825,3 +2825,84 @@ FG-PRM:
    coherent-wrong subset lift,
    whole-chain wrong risk via noisy-or aggregation.
 ```
+
+### Implemented: Constraint Anchor Flow Audit
+
+`constraint_anchor_flow_audit.py` implements the first falsifiable version of
+the anchor-flow idea.
+
+Core object:
+
+```text
+p_hidden_j(a), a in {question, earlier_prefix, recent_prev, other}
+```
+
+This is not a single hidden-vector cosine.  For each source type it builds a
+small hidden subspace from the corresponding token rows, computes the current
+step's projection-density into that subspace, and converts the source scores
+into an anchor posterior.
+
+The script also builds a numeric text posterior:
+
+```text
+p_text_j(a)
+```
+
+from the step's surface numbers and their support in the question / earlier
+prefix / immediate previous step.  The key tests are:
+
+```text
+text_hidden_kl:
+  the step claims to use one set of constraints, but hidden energy is anchored
+  elsewhere.
+
+anchor_transition_js:
+  the hidden anchor posterior changes abruptly from the previous step.
+
+risk_coherent_hijack:
+  kappa is high, but hidden source mass moves toward recent/self/other anchors.
+```
+
+Run:
+
+```bash
+python constraint_anchor_flow_audit.py \
+  --input data/full_gsm8k.npz \
+  --layer 14 \
+  --nearest_layer \
+  --hidden_dir data/hidden/gsm8k \
+  --anchor_rank 4 \
+  --posterior_temp 0.08 \
+  --control_pool pre_and_correct \
+  --folds 5 \
+  --bootstrap 1000 \
+  --output_dir outputs/constraint_anchor_flow_full_gsm8k
+```
+
+For `sv_clouds` files:
+
+```bash
+python constraint_anchor_flow_audit.py \
+  --input data/gsm8k_v2_custom.npz \
+  --layer 16 \
+  --nearest_layer \
+  --anchor_rank 4 \
+  --posterior_temp 0.08 \
+  --control_pool pre_and_correct \
+  --folds 5 \
+  --bootstrap 1000 \
+  --output_dir outputs/constraint_anchor_flow_custom
+```
+
+Decision rule:
+
+```text
+Support the anchor-flow hypothesis only if:
+  OOF:baseline+anchor or an anchor score improves same-problem paired AUROC over
+  the strongest spread/length/entropy baseline, and
+  the coherent low-spread slice still shows useful lift.
+
+Reject or revise if:
+  gains disappear after same-problem pairing, or the best anchor score is just
+  position/length in disguise.
+```
