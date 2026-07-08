@@ -2015,3 +2015,164 @@ The required evidence chain is:
 This is the exact role played by the Structural Decay Law and ECE analyses in
 `Know More, Know Clearer`, and it should become the validity backbone of our
 paper.
+
+## 2026-07-08 Geometry / Topology Reference Audit
+
+### Why Run More Geometry If AUROC Does Not Increase?
+
+The purpose cannot be "try another geometry scalar and hope for AUROC".  The
+results so far already show that many token-direction geometry variants are
+mostly proxies for the same dispersion axis:
+
+```text
+resultant = 1 - spread
+lambda_1 / spectral entropy / effective rank = spectral views of concentration
+unit effective rank = angular dispersion proxy
+raw effective rank = angular dispersion + norm/length/difficulty proxy
+```
+
+Therefore a geometry experiment is necessary only if it serves one of three
+roles:
+
+1. **Detector role**: it gives a leak-free same-problem / length-controlled
+   increment over spread, entropy, and difficulty baselines.
+2. **Mechanism role**: it explains what kind of failure a low-kappa step is
+   (for example high-rank residual dispersion vs bipolar cancellation), even if
+   it does not improve global AUROC.
+3. **Boundary role**: it cleanly rules out a tempting family of explanations, so
+   the paper can justify moving from "shape of a token cloud" to source-aware
+   anchor attribution.
+
+If an experiment satisfies none of these roles, it should not be repeated.  The
+stop rule is: once a leak-free controlled audit shows no increment, the signal is
+kept only as a mechanism/control variable, not as a proposed detector.
+
+### What Gram Matrix Are We Talking About?
+
+Different papers and scripts use different matrices.  They should not be
+collapsed into one "Gram" bucket.
+
+```text
+Step-local token Gram:
+  G_j = H_j H_j^T for tokens inside one reasoning step.
+  This is the matrix behind step-level spread / effective-rank mechanism tests.
+
+Sliding-window token Gram:
+  G_t(W) = H_{t-W:t} H_{t-W:t}^T along the generated stream.
+  This asks whether dispersion evolves continuously without step segmentation.
+
+Whole-chain token Gram:
+  G = H_all H_all^T over all generated tokens in the answer.
+  This is closest to geometric hallucination metrics such as HS / ME.
+
+Step-trajectory Gram:
+  S_{ij} = v_i^T v_j over step embeddings or step summary vectors.
+  This is about path geometry across reasoning steps, not token scatter inside a
+  step.
+
+Attention graph Laplacian:
+  L = graph_laplacian(A) from token attention weights.
+  This is not a hidden-state Gram.  It treats hidden states as graph signals over
+  an attention-induced token graph.
+
+TDA distance matrix:
+  D_{ij} = distance(e_i, e_j) over step or sentence embeddings.
+  This is a point-cloud topology object, usually analyzed via persistent
+  homology rather than Gram eigenvalues.
+```
+
+### `Geometry of Reason` Implementation
+
+`Geometry of Reason: Spectral Signatures of Valid Mathematical Reasoning` does
+not simply compute the effective rank of hidden-token Gram matrices.  Its core
+object is an **attention graph**:
+
+1. Tokens are graph nodes.
+2. Attention weights define weighted edges, aggregated across heads into one
+   graph per layer.
+3. The graph is symmetrized / normalized into a Laplacian.
+4. Layer hidden states are treated as graph signals living on this token graph.
+5. The hidden signal is projected onto Laplacian eigenmodes.
+6. The paper extracts graph-spectral diagnostics:
+   - high-frequency energy ratio (HFER),
+   - graph smoothness / Dirichlet energy,
+   - spectral entropy,
+   - Fiedler value / algebraic connectivity.
+
+The classifier is deliberately simple: select a layer / metric / threshold on
+validation data, then classify by threshold.  The paper reports strong
+valid/invalid proof separation, but this is not directly equivalent to our
+setting because their signal combines two sources:
+
+```text
+attention topology  +  hidden-state graph signal
+```
+
+This is genuinely different from our step-local kappa family.  If we can store
+attention maps, this is worth testing as an attention-graph spectral audit.  If
+we only use hidden states, then re-implementing HFER as another hidden Gram
+spectral scalar would not reproduce the paper's method.
+
+### `The Shape of Reasoning` Implementation
+
+`The Shape of Reasoning: Topological Analysis of Reasoning Traces in Large
+Language Models` is also not a token-hidden Gram method.  It operates on
+reasoning traces as paths / point clouds:
+
+1. Split model and expert solutions into reasoning steps.
+2. Embed each step in a semantic embedding space.
+3. Use Smith-Waterman local alignment to compare model traces with expert
+   traces.
+4. Construct Vietoris-Rips filtrations from pairwise step distances.
+5. Compute persistent homology features, especially H0 and H1:
+   - H0: fragmentation / connected components / clustering.
+   - H1: loops, detours, leaving and returning to reasoning regions.
+6. Regress alignment quality using graph features, TDA features, and combined
+   features.
+
+Its target is not first-error AUROC.  Its target is how well the geometry /
+topology of a reasoning path explains alignment with expert reasoning.  For our
+project, this becomes useful only if we have either:
+
+```text
+expert/reference traces, or
+same-problem multi-sampling where high-confidence correct traces act as an
+empirical reference manifold.
+```
+
+Without a reference path, TDA can still describe trajectory shape, but it cannot
+by itself prove that a loop or component is an error rather than a valid
+alternative route.
+
+### Concrete Implication For This Project
+
+The next geometry work should be split into three bins:
+
+```text
+Stop as detector:
+  More kappa / effective-rank / hidden Gram variants inside the same step token
+  cloud, unless they show controlled increment.
+
+Keep as mechanism:
+  Residual effective rank and dual-high spread+rank quadrants.  They identify a
+  high-risk fragmented subtype but do not beat spread globally.
+
+Test as genuinely new information:
+  Attention-graph spectral metrics from Geometry of Reason, if attention maps
+  are available.
+  Reference-relative TDA / path topology from Shape of Reasoning, if expert
+  traces or same-problem correct-trace references are available.
+  Anchor-source attribution, because it asks where the coherent direction points
+  rather than only how concentrated it is.
+```
+
+The paper narrative should therefore be:
+
+```text
+Directional consensus loss is the validated base phenomenon.
+Hidden-token geometry around this phenomenon is mostly saturated by spread.
+Residual rank reveals a fragmented-error mechanism but not a stronger detector.
+To address coherent-but-wrong failures, the method must move from geometry of
+dispersion to geometry of source attribution: what premise, prior step, or
+self-generated claim the current step is anchored to.
+```
