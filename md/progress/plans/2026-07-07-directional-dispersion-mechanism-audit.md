@@ -2867,7 +2867,7 @@ Run:
 
 ```bash
 python constraint_anchor_flow_audit.py \
-  --input data/full_gsm8k.npz \
+  --input data/features/full_gsm8k.npz \
   --layer 14 \
   --nearest_layer \
   --hidden_dir data/hidden/gsm8k \
