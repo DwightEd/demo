@@ -630,13 +630,57 @@ def problem_row_groups(problem_ids: np.ndarray, y: np.ndarray, mask: np.ndarray,
     return groups
 
 
-def eval_score(name: str, score: np.ndarray, y: np.ndarray, groups: Sequence[np.ndarray], mask: np.ndarray) -> Dict[str, Any]:
+def position_matched_within_pair_auroc(
+    rows: Sequence[AnchorStepRow],
+    vals: np.ndarray,
+    y: np.ndarray,
+    mask: np.ndarray,
+    *,
+    step_gap: int,
+) -> Tuple[float, int]:
+    """Same-problem paired AUROC with exact/near step-position matching.
+
+    Ordinary first-error localization can be dominated by the fact that errors
+    occur late.  This stricter metric only compares a first-error row with
+    control rows from the same problem whose step index is within `step_gap`.
+    """
+    v = np.asarray(vals, dtype=np.float64)
+    conc = 0.0
+    pairs = 0
+    problems = sorted({r.problem_id for i, r in enumerate(rows) if mask[i]})
+    for p in problems:
+        idx = [i for i, r in enumerate(rows) if mask[i] and r.problem_id == p and np.isfinite(v[i])]
+        err = [i for i in idx if y[i] == 1]
+        ctrl = [i for i in idx if y[i] == 0]
+        for e in err:
+            matched = [c for c in ctrl if abs(rows[c].step_idx - rows[e].step_idx) <= int(step_gap)]
+            for c in matched:
+                conc += 1.0 if v[e] > v[c] else (0.5 if v[e] == v[c] else 0.0)
+            pairs += len(matched)
+    return (conc / pairs if pairs else float("nan")), int(pairs)
+
+
+def eval_score(
+    name: str,
+    score: np.ndarray,
+    y: np.ndarray,
+    groups: Sequence[np.ndarray],
+    mask: np.ndarray,
+    *,
+    rows: Optional[Sequence[AnchorStepRow]] = None,
+    pos_match_step_gap: int = 0,
+) -> Dict[str, Any]:
     s = np.asarray(score, dtype=np.float64)
     mm = mask & np.isfinite(s)
     raw_auc = auroc(s[mm], y[mm]) if mm.any() else float("nan")
     sign = 1.0 if (not np.isfinite(raw_auc) or raw_auc >= 0.5) else -1.0
     ss = sign * s
     within, pairs = within_pair_auroc(groups, ss, y)
+    pm_within, pm_pairs = (
+        position_matched_within_pair_auroc(rows, ss, y, mask, step_gap=pos_match_step_gap)
+        if rows is not None
+        else (float("nan"), 0)
+    )
     return {
         "score": name,
         "n": int(mm.sum()),
@@ -645,6 +689,8 @@ def eval_score(name: str, score: np.ndarray, y: np.ndarray, groups: Sequence[np.
         "sign": float(sign),
         "within_pair_auroc_error_high": float(within),
         "within_pairs": int(pairs),
+        "pos_matched_within_auroc_error_high": float(pm_within),
+        "pos_matched_pairs": int(pm_pairs),
         "err_median": float(np.nanmedian(ss[mm & (y == 1)])) if np.any(mm & (y == 1)) else float("nan"),
         "ctrl_median": float(np.nanmedian(ss[mm & (y == 0)])) if np.any(mm & (y == 0)) else float("nan"),
     }
@@ -696,7 +742,7 @@ def summarize_coherent_slice(
     if not groups:
         return out
     for name, vals in scores.items():
-        out["scores"].append(eval_score(name, vals, y, groups, coh))
+        out["scores"].append(eval_score(name, vals, y, groups, coh, rows=rows, pos_match_step_gap=0))
     out["scores"].sort(key=lambda r: np.nan_to_num(r["within_pair_auroc_error_high"], nan=-1.0), reverse=True)
     return out
 
@@ -772,7 +818,15 @@ def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
     single_scores: Dict[str, np.ndarray] = {}
     for name in baseline_names + anchor_names:
         vals = feature_array(rows, name)
-        ev = eval_score(name, vals, y, groups, eval_mask)
+        ev = eval_score(
+            name,
+            vals,
+            y,
+            groups,
+            eval_mask,
+            rows=rows,
+            pos_match_step_gap=args.pos_match_step_gap,
+        )
         single_rows.append(ev)
         sign = ev["sign"]
         single_scores[name] = sign * vals
@@ -784,33 +838,102 @@ def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
         yy = y[eval_mask]
         gg = problem_ids[eval_mask]
         rr = [rows[i] for i in np.where(eval_mask)[0]]
+        baseline_no_pos = [n for n in baseline_names if n != "pos"]
         if baseline_names:
             sb = oof_scores(design(rr, baseline_names), yy, gg, folds=args.folds, seed=args.seed)
             full = np.full(len(rows), np.nan)
             full[np.where(eval_mask)[0]] = sb
             model_scores["OOF:baseline"] = full
-            model_rows.append(eval_score("OOF:baseline", full, y, groups, eval_mask))
+            model_rows.append(
+                eval_score(
+                    "OOF:baseline",
+                    full,
+                    y,
+                    groups,
+                    eval_mask,
+                    rows=rows,
+                    pos_match_step_gap=args.pos_match_step_gap,
+                )
+            )
+        if baseline_no_pos:
+            sb_np = oof_scores(design(rr, baseline_no_pos), yy, gg, folds=args.folds, seed=args.seed)
+            full = np.full(len(rows), np.nan)
+            full[np.where(eval_mask)[0]] = sb_np
+            model_scores["OOF:baseline_no_pos"] = full
+            model_rows.append(
+                eval_score(
+                    "OOF:baseline_no_pos",
+                    full,
+                    y,
+                    groups,
+                    eval_mask,
+                    rows=rows,
+                    pos_match_step_gap=args.pos_match_step_gap,
+                )
+            )
         if anchor_names:
             sa = oof_scores(design(rr, anchor_names), yy, gg, folds=args.folds, seed=args.seed)
             full = np.full(len(rows), np.nan)
             full[np.where(eval_mask)[0]] = sa
             model_scores["OOF:anchor"] = full
-            model_rows.append(eval_score("OOF:anchor", full, y, groups, eval_mask))
+            model_rows.append(
+                eval_score(
+                    "OOF:anchor",
+                    full,
+                    y,
+                    groups,
+                    eval_mask,
+                    rows=rows,
+                    pos_match_step_gap=args.pos_match_step_gap,
+                )
+            )
         if baseline_names and anchor_names:
             sj = oof_scores(design(rr, baseline_names + anchor_names), yy, gg, folds=args.folds, seed=args.seed)
             full = np.full(len(rows), np.nan)
             full[np.where(eval_mask)[0]] = sj
             model_scores["OOF:baseline+anchor"] = full
-            model_rows.append(eval_score("OOF:baseline+anchor", full, y, groups, eval_mask))
+            model_rows.append(
+                eval_score(
+                    "OOF:baseline+anchor",
+                    full,
+                    y,
+                    groups,
+                    eval_mask,
+                    rows=rows,
+                    pos_match_step_gap=args.pos_match_step_gap,
+                )
+            )
+        if baseline_no_pos and anchor_names:
+            sj_np = oof_scores(design(rr, baseline_no_pos + anchor_names), yy, gg, folds=args.folds, seed=args.seed)
+            full = np.full(len(rows), np.nan)
+            full[np.where(eval_mask)[0]] = sj_np
+            model_scores["OOF:baseline_no_pos+anchor"] = full
+            model_rows.append(
+                eval_score(
+                    "OOF:baseline_no_pos+anchor",
+                    full,
+                    y,
+                    groups,
+                    eval_mask,
+                    rows=rows,
+                    pos_match_step_gap=args.pos_match_step_gap,
+                )
+            )
     model_rows.sort(key=lambda r: np.nan_to_num(r["within_pair_auroc_error_high"], nan=-1.0), reverse=True)
 
     best_baseline = max(
-        [r for r in single_rows if r["score"] in baseline_names] + [r for r in model_rows if r["score"] == "OOF:baseline"],
+        [r for r in single_rows if r["score"] in baseline_names]
+        + [r for r in model_rows if r["score"] in {"OOF:baseline", "OOF:baseline_no_pos"}],
         key=lambda r: np.nan_to_num(r["within_pair_auroc_error_high"], nan=-1.0),
         default=None,
     )
     best_anchor = max(
-        [r for r in single_rows if r["score"] in anchor_names] + [r for r in model_rows if r["score"] in {"OOF:anchor", "OOF:baseline+anchor"}],
+        [r for r in single_rows if r["score"] in anchor_names]
+        + [
+            r
+            for r in model_rows
+            if r["score"] in {"OOF:anchor", "OOF:baseline+anchor", "OOF:baseline_no_pos+anchor"}
+        ],
         key=lambda r: np.nan_to_num(r["within_pair_auroc_error_high"], nan=-1.0),
         default=None,
     )
@@ -883,6 +1006,7 @@ def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
             "post_error_rows": int(np.sum(phases == "post_error")),
             "problem_groups": int(len(groups)),
             "within_pairs": int(sum(int(np.sum(y[g] == 1)) * int(np.sum(y[g] == 0)) for g in groups)),
+            "pos_match_step_gap": int(args.pos_match_step_gap),
             "baseline_features": baseline_names,
             "anchor_features": anchor_names,
         },
@@ -948,11 +1072,13 @@ def write_markdown(path: str, res: Mapping[str, Any]) -> None:
     if bb:
         lines.append(
             f"- Best baseline `{bb['score']}` within {bb['within_pair_auroc_error_high']:.3f} "
+            f"pos-matched {bb.get('pos_matched_within_auroc_error_high')} "
             f"cross {bb['cross_auroc_error_high']:.3f}."
         )
     if ba:
         lines.append(
             f"- Best anchor `{ba['score']}` within {ba['within_pair_auroc_error_high']:.3f} "
+            f"pos-matched {ba.get('pos_matched_within_auroc_error_high')} "
             f"cross {ba['cross_auroc_error_high']:.3f}."
         )
     inc = head.get("increment_over_best_baseline") or {}
@@ -966,26 +1092,35 @@ def write_markdown(path: str, res: Mapping[str, Any]) -> None:
         )
     lines.append("")
     lines.append("## Model Scores\n")
-    lines.append("| score | within | cross | pairs |")
-    lines.append("|---|---:|---:|---:|")
+    lines.append("| score | within | pos-matched | cross | pairs | pos pairs |")
+    lines.append("|---|---:|---:|---:|---:|---:|")
     for r in res.get("model_scores", []):
-        lines.append(f"| {r['score']} | {r['within_pair_auroc_error_high']:.3f} | {r['cross_auroc_error_high']:.3f} | {r['within_pairs']} |")
+        lines.append(
+            f"| {r['score']} | {r['within_pair_auroc_error_high']:.3f} | "
+            f"{r.get('pos_matched_within_auroc_error_high')} | {r['cross_auroc_error_high']:.3f} | "
+            f"{r['within_pairs']} | {r.get('pos_matched_pairs')} |"
+        )
     lines.append("")
     lines.append("## Top Single Scores\n")
-    lines.append("| score | within | cross | sign | err med | ctrl med |")
-    lines.append("|---|---:|---:|---:|---:|---:|")
+    lines.append("| score | within | pos-matched | cross | sign | err med | ctrl med |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|")
     for r in res.get("single_scores", [])[:16]:
         lines.append(
-            f"| {r['score']} | {r['within_pair_auroc_error_high']:.3f} | {r['cross_auroc_error_high']:.3f} | "
+            f"| {r['score']} | {r['within_pair_auroc_error_high']:.3f} | "
+            f"{r.get('pos_matched_within_auroc_error_high')} | {r['cross_auroc_error_high']:.3f} | "
             f"{r['sign']:.0f} | {r['err_median']:.3f} | {r['ctrl_median']:.3f} |"
         )
     if coh and coh.get("scores"):
         lines.append("")
         lines.append("## Coherent Low-Spread Slice\n")
-        lines.append("| score | within | cross | pairs |")
-        lines.append("|---|---:|---:|---:|")
+        lines.append("| score | within | pos-matched | cross | pairs | pos pairs |")
+        lines.append("|---|---:|---:|---:|---:|---:|")
         for r in coh["scores"][:10]:
-            lines.append(f"| {r['score']} | {r['within_pair_auroc_error_high']:.3f} | {r['cross_auroc_error_high']:.3f} | {r['within_pairs']} |")
+            lines.append(
+                f"| {r['score']} | {r['within_pair_auroc_error_high']:.3f} | "
+                f"{r.get('pos_matched_within_auroc_error_high')} | {r['cross_auroc_error_high']:.3f} | "
+                f"{r['within_pairs']} | {r.get('pos_matched_pairs')} |"
+            )
     lines.append("")
     lines.append("## Trajectory Transitions\n")
     lines.append("| feature | pre->first mean | correct delta mean | first->post mean |")
@@ -1119,9 +1254,15 @@ def print_result(res: Mapping[str, Any]) -> None:
     bb = res["headline"].get("best_baseline") or {}
     ba = res["headline"].get("best_anchor") or {}
     if bb:
-        print(f"best baseline {bb['score']} within={bb['within_pair_auroc_error_high']:.3f} cross={bb['cross_auroc_error_high']:.3f}")
+        print(
+            f"best baseline {bb['score']} within={bb['within_pair_auroc_error_high']:.3f} "
+            f"posmatch={bb.get('pos_matched_within_auroc_error_high')} cross={bb['cross_auroc_error_high']:.3f}"
+        )
     if ba:
-        print(f"best anchor   {ba['score']} within={ba['within_pair_auroc_error_high']:.3f} cross={ba['cross_auroc_error_high']:.3f}")
+        print(
+            f"best anchor   {ba['score']} within={ba['within_pair_auroc_error_high']:.3f} "
+            f"posmatch={ba.get('pos_matched_within_auroc_error_high')} cross={ba['cross_auroc_error_high']:.3f}"
+        )
     inc = res["headline"].get("increment_over_best_baseline") or {}
     if inc:
         print(f"increment over baseline: {inc.get('point')} CI=[{inc.get('lo')}, {inc.get('hi')}] sig={inc.get('sig')}")
@@ -1133,10 +1274,16 @@ def print_result(res: Mapping[str, Any]) -> None:
         )
     print("\nModel scores:")
     for r in res.get("model_scores", [])[:8]:
-        print(f"  {r['score']:<24} within {r['within_pair_auroc_error_high']:.3f} cross {r['cross_auroc_error_high']:.3f}")
+        print(
+            f"  {r['score']:<30} within {r['within_pair_auroc_error_high']:.3f} "
+            f"posmatch {r.get('pos_matched_within_auroc_error_high')} cross {r['cross_auroc_error_high']:.3f}"
+        )
     print("\nTop single scores:")
     for r in res.get("single_scores", [])[:12]:
-        print(f"  {r['score']:<32} within {r['within_pair_auroc_error_high']:.3f} cross {r['cross_auroc_error_high']:.3f}")
+        print(
+            f"  {r['score']:<32} within {r['within_pair_auroc_error_high']:.3f} "
+            f"posmatch {r.get('pos_matched_within_auroc_error_high')} cross {r['cross_auroc_error_high']:.3f}"
+        )
     print("\nTrajectory transitions:")
     for name, st in list(res.get("trajectory_transitions", {}).items())[:8]:
         a = st.get("pre_to_first_error", {}).get("mean")
@@ -1163,6 +1310,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--min_per_class", type=int, default=1)
     ap.add_argument("--min_feature_coverage", type=float, default=0.55)
     ap.add_argument("--coherent_spread_q", type=float, default=0.50)
+    ap.add_argument(
+        "--pos_match_step_gap",
+        type=int,
+        default=0,
+        help="extra strict paired AUROC: compare only controls within this absolute step-index gap",
+    )
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--bootstrap", type=int, default=500)
     ap.add_argument("--seed", type=int, default=0)

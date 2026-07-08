@@ -24,6 +24,7 @@ def _args(tmp_path, npz):
         min_per_class=1,
         min_feature_coverage=0.55,
         coherent_spread_q=0.50,
+        pos_match_step_gap=0,
         folds=5,
         bootstrap=10,
         seed=11,
@@ -51,6 +52,7 @@ def test_constraint_anchor_flow_selftest_runs_and_writes_outputs(tmp_path):
 
     best = res["headline"]["best_anchor"]
     assert best["within_pair_auroc_error_high"] >= 0.80
+    assert "pos_matched_within_auroc_error_high" in best
     assert res["headline"]["coherent_slice"]["ok"]
     assert "text_hidden_kl" in [r["score"] for r in res["single_scores"][:6]]
 

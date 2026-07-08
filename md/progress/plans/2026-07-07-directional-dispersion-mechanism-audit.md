@@ -2906,3 +2906,59 @@ Reject or revise if:
   gains disappear after same-problem pairing, or the best anchor score is just
   position/length in disguise.
 ```
+
+### First Remote Readout And Evaluation Fix
+
+Remote result:
+
+```text
+OOF:baseline        within 0.831 cross 0.810
+OOF:baseline+anchor within 0.829 cross 0.816
+OOF:anchor          within 0.792 cross 0.796
+
+Top single:
+  pos                    within 1.000 cross 0.524
+  hidden_anchor_entropy  within 0.909 cross 0.572
+  risk_anchor_fragment   within 0.904 cross 0.675
+  risk_text_hidden_kl    within 0.873 cross 0.537
+  spread                 within 0.699 cross 0.772
+```
+
+Interpretation:
+
+```text
+The current anchor-flow implementation is not yet supported as an incremental
+detector.  The best OOF anchor model is below the baseline, and
+baseline+anchor is essentially unchanged.
+
+The high within scores are not trustworthy because position alone reaches
+within AUROC 1.000 while cross AUROC is only 0.524.  This confirms the earlier
+warning that first-error steps are late, so uncorrected step-level within
+ranking can be dominated by position.
+
+The most interesting descriptive pattern is still consistent with a weak
+anchor-flow story: p_hidden_question drops more at first error than in correct
+transitions, while p_hidden_recent_prev rises.  But the margin over the correct
+transition is small, and OOF fusion does not exploit it.
+```
+
+Code fix:
+
+```text
+constraint_anchor_flow_audit.py now reports:
+  pos_matched_within_auroc_error_high
+  pos_matched_pairs
+
+and adds:
+  OOF:baseline_no_pos
+  OOF:baseline_no_pos+anchor
+```
+
+Rerun criterion:
+
+```text
+Treat position-matched AUROC and OOF baseline_no_pos+anchor as the useful
+readout.  If anchor effects vanish there, the current hidden/text posterior
+definition should be retired or replaced by a more causal anchor attribution
+method.
+```
