@@ -3015,6 +3015,8 @@ python prefix_innovation_audit.py \
   --layer 14 \
   --nearest_layer \
   --hidden_dir data/hidden/gsm8k \
+  --prefix_backend cuda \
+  --prefix_device cuda:0 \
   --rank 8 \
   --control_pool pre_and_correct \
   --folds 5 \
@@ -3029,6 +3031,8 @@ python prefix_innovation_audit.py \
   --input data/gsm8k_v2_custom.npz \
   --layer 16 \
   --nearest_layer \
+  --prefix_backend cuda \
+  --prefix_device cuda:0 \
   --rank 8 \
   --control_pool pre_and_correct \
   --folds 5 \
@@ -3046,4 +3050,13 @@ and if the top over-activated dimensions show a stable first-error profile.
 Reject this particular mechanism if only prefix_z or innovation_norm works but
 off-prefix ratios do not, because that would mean first errors are activation
 magnitude shocks rather than escapes from the previous reasoning subspace.
+```
+
+Implementation note:
+
+```text
+prefix_innovation_audit.py supports --prefix_backend auto|cpu|torch|cuda.
+The CUDA path moves one chain to GPU once, then computes transition SVD,
+subspace projection, prefix-relative z vectors, and q alignment on device.
+Use CPU only for local selftests or reproducibility checks.
 ```

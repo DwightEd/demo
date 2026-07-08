@@ -19,6 +19,14 @@ After each confirmed update:
 3. Make the command block copy-pasteable and include output paths.
 4. When the user returns results, analyze them, write new findings into the appropriate `md/` file, and update the next implementation plan.
 
+## Performance Policy
+
+- For hidden-state audits, all batchable heavy linear algebra should default to GPU when available.
+- This includes Gram/eigendecomposition, SVD/PCA, subspace projection, token-window convolution, large cosine/similarity matrices, and batched trajectory statistics.
+- Prefer a `--*_backend auto|cpu|torch|cuda`, `--*_device`, and batch-size option for new scripts. `auto` should use CUDA when available and fall back to CPU cleanly.
+- Keep CPU paths for reproducibility, selftests, and environments without torch/CUDA.
+- Avoid per-sample CPU loops for operations that can be expressed as batched tensor ops; when variable-length data prevents full batching, move each chain/block to GPU once and compute all internal transitions before returning scalars to CPU.
+
 ## Documentation Policy
 
 - New findings go under `md/insights/`.
@@ -42,4 +50,3 @@ Then Codex should:
 3. Record durable findings in Markdown.
 4. Revise the next experiment or implementation plan.
 5. Push the update again when complete.
-

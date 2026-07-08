@@ -237,6 +237,165 @@ def off_subspace_energy(X: np.ndarray, V: np.ndarray) -> float:
     return float(1.0 - frac) if np.isfinite(frac) else float("nan")
 
 
+def resolve_prefix_backend(args: argparse.Namespace):
+    requested = str(getattr(args, "prefix_backend", "auto")).lower()
+    if requested == "cpu":
+        return "cpu", None, None, None
+    try:
+        import torch
+    except Exception as exc:
+        if requested == "auto":
+            return "cpu", None, None, None
+        raise SystemExit(f"--prefix_backend={requested} requires torch: {exc}") from exc
+
+    device_arg = str(getattr(args, "prefix_device", "") or "")
+    if requested == "auto":
+        if torch.cuda.is_available():
+            device = torch.device(device_arg or "cuda")
+            _configure_torch_fast_math(torch)
+            return "torch", torch, device, _torch_dtype(torch, getattr(args, "prefix_dtype", "float32"))
+        return "cpu", None, None, None
+    if requested == "cuda":
+        if not torch.cuda.is_available():
+            raise SystemExit("--prefix_backend=cuda requested, but torch.cuda.is_available() is false")
+        device = torch.device(device_arg or "cuda")
+        _configure_torch_fast_math(torch)
+        return "torch", torch, device, _torch_dtype(torch, getattr(args, "prefix_dtype", "float32"))
+    if requested == "torch":
+        device = torch.device(device_arg or ("cuda" if torch.cuda.is_available() else "cpu"))
+        _configure_torch_fast_math(torch)
+        return "torch", torch, device, _torch_dtype(torch, getattr(args, "prefix_dtype", "float32"))
+    raise SystemExit(f"unknown --prefix_backend={requested!r}")
+
+
+def _configure_torch_fast_math(torch_mod) -> None:
+    try:
+        torch_mod.backends.cuda.matmul.allow_tf32 = True
+        torch_mod.backends.cudnn.allow_tf32 = True
+    except Exception:
+        pass
+
+
+def _torch_dtype(torch_mod, name: str):
+    name = str(name or "float32").lower()
+    if name == "float64":
+        return torch_mod.float64
+    if name == "float32":
+        return torch_mod.float32
+    raise SystemExit(f"unknown --prefix_dtype={name!r}")
+
+
+def torch_normalize_rows(X, *, center, unitize: bool, torch_mod):
+    if X.ndim == 1:
+        X = X.unsqueeze(0)
+    if X.ndim != 2 or X.shape[0] == 0:
+        d = int(X.shape[-1]) if X.ndim >= 1 else 0
+        return X.new_empty((0, d))
+    ok = torch_mod.isfinite(X).all(dim=1)
+    X = X[ok]
+    if X.shape[0] == 0:
+        return X
+    if center is not None and center.numel() == X.shape[1]:
+        X = X - center.unsqueeze(0)
+    if unitize:
+        norms = torch_mod.linalg.norm(X, dim=1)
+        ok = norms > EPS
+        X = X[ok]
+        norms = norms[ok]
+        if X.shape[0] == 0:
+            return X
+        X = X / norms.clamp_min(EPS).unsqueeze(1)
+    return X
+
+
+def torch_basis_from_rows(X, *, rank: int, torch_mod):
+    if X.ndim == 1:
+        X = X.unsqueeze(0)
+    if X.ndim != 2 or X.shape[0] == 0:
+        d = int(X.shape[-1]) if X.ndim >= 1 else 0
+        return X.new_empty((d, 0))
+    if X.shape[0] == 1:
+        v = X[0]
+        n = torch_mod.linalg.norm(v)
+        return (v / n.clamp_min(EPS)).unsqueeze(1) if float(n.detach().cpu()) > EPS else X.new_empty((X.shape[1], 0))
+    Xc = X - X.mean(dim=0, keepdim=True) if X.shape[0] > 2 else X
+    try:
+        _u, _s, vh = torch_mod.linalg.svd(Xc, full_matrices=False)
+    except Exception:
+        return X.new_empty((X.shape[1], 0))
+    k = int(min(rank, vh.shape[0]))
+    if k <= 0:
+        return X.new_empty((X.shape[1], 0))
+    V = vh[:k].transpose(0, 1).contiguous()
+    n = torch_mod.linalg.norm(V, dim=0)
+    ok = n > EPS
+    if int(ok.sum().detach().cpu()) == 0:
+        return X.new_empty((X.shape[1], 0))
+    return V[:, ok] / n[ok].clamp_min(EPS).unsqueeze(0)
+
+
+def torch_projection_fraction(X, V, *, torch_mod) -> float:
+    if X.ndim != 2 or V.ndim != 2 or X.shape[0] == 0 or V.shape[1] == 0 or X.shape[1] != V.shape[0]:
+        return float("nan")
+    denom = torch_mod.sum(X * X)
+    if float(denom.detach().cpu()) <= EPS:
+        return float("nan")
+    P = X @ V
+    return float((torch_mod.sum(P * P) / denom.clamp_min(EPS)).detach().cpu())
+
+
+def torch_off_subspace_energy(X, V, *, torch_mod) -> float:
+    frac = torch_projection_fraction(X, V, torch_mod=torch_mod)
+    return float(1.0 - frac) if np.isfinite(frac) else float("nan")
+
+
+def torch_exp_weights(n: int, beta: float, *, torch_mod, device, dtype):
+    if n <= 0:
+        return torch_mod.empty((0,), device=device, dtype=dtype)
+    if n == 1 or abs(beta) <= EPS:
+        return torch_mod.ones((n,), device=device, dtype=dtype) / max(1, n)
+    pos = torch_mod.linspace(0.0, 1.0, n, device=device, dtype=dtype)
+    z = float(beta) * pos
+    z = z - z.max()
+    w = torch_mod.exp(z)
+    return w / w.sum().clamp_min(EPS)
+
+
+def torch_pooled_mean(X, *, beta: float, torch_mod, device, dtype):
+    if X.ndim != 2 or X.shape[0] == 0:
+        return X.new_empty((0,))
+    w = torch_exp_weights(int(X.shape[0]), beta, torch_mod=torch_mod, device=device, dtype=dtype)
+    return w @ X
+
+
+def torch_cosine(a, b, *, torch_mod) -> float:
+    if a.numel() != b.numel() or a.numel() == 0:
+        return float("nan")
+    nx = torch_mod.linalg.norm(a)
+    ny = torch_mod.linalg.norm(b)
+    if float(nx.detach().cpu()) <= EPS or float(ny.detach().cpu()) <= EPS:
+        return float("nan")
+    return float((torch_mod.dot(a.reshape(-1), b.reshape(-1)) / (nx * ny).clamp_min(EPS)).detach().cpu())
+
+
+def torch_prefix_z_vector(current_step, prefix, *, beta: float, std_floor_frac: float, torch_mod, device, dtype):
+    if current_step.ndim != 2 or prefix.ndim != 2 or prefix.shape[0] < 2:
+        return current_step.new_empty((0,))
+    cur_ok = torch_mod.isfinite(current_step).all(dim=1)
+    pre_ok = torch_mod.isfinite(prefix).all(dim=1)
+    C = current_step[cur_ok]
+    P = prefix[pre_ok]
+    if C.shape[0] == 0 or P.shape[0] < 2:
+        return current_step.new_empty((0,))
+    cur = torch_pooled_mean(C, beta=beta, torch_mod=torch_mod, device=device, dtype=dtype)
+    mu = P.mean(dim=0)
+    sd = P.std(dim=0, unbiased=False)
+    finite = sd[torch_mod.isfinite(sd) & (sd > EPS)]
+    floor = torch_mod.median(finite) * float(std_floor_frac) if finite.numel() else sd.new_tensor(1.0)
+    denom = torch_mod.maximum(sd, floor.clamp_min(EPS))
+    return (cur - mu) / denom.clamp_min(EPS)
+
+
 def exp_weights(n: int, beta: float) -> np.ndarray:
     if n <= 0:
         return np.empty(0, dtype=np.float64)
@@ -433,7 +592,78 @@ def transition_features(
     return feats, z
 
 
+def transition_features_torch(
+    prev_raw,
+    current_raw,
+    prefix_raw,
+    *,
+    qvec,
+    chain_center,
+    rank: int,
+    beta: float,
+    unitize: bool,
+    z_top_k: int,
+    z_thresh: float,
+    std_floor_frac: float,
+    torch_mod,
+    device,
+    dtype,
+) -> Tuple[Dict[str, float], np.ndarray]:
+    prev = torch_normalize_rows(prev_raw, center=chain_center, unitize=unitize, torch_mod=torch_mod)
+    cur = torch_normalize_rows(current_raw, center=chain_center, unitize=unitize, torch_mod=torch_mod)
+    prefix = torch_normalize_rows(prefix_raw, center=chain_center, unitize=unitize, torch_mod=torch_mod)
+    Vprev = torch_basis_from_rows(prev, rank=rank, torch_mod=torch_mod)
+    Vprefix = torch_basis_from_rows(prefix, rank=rank, torch_mod=torch_mod)
+
+    mu_prev = torch_pooled_mean(prev, beta=beta, torch_mod=torch_mod, device=device, dtype=dtype)
+    mu_cur = torch_pooled_mean(cur, beta=beta, torch_mod=torch_mod, device=device, dtype=dtype)
+    delta = mu_cur - mu_prev if mu_prev.numel() == mu_cur.numel() and mu_cur.numel() else prev_raw.new_empty((0,))
+    dmat = delta.unsqueeze(0) if delta.numel() else prev_raw.new_empty((0, 0))
+    off_prev = torch_off_subspace_energy(cur, Vprev, torch_mod=torch_mod)
+    off_prefix = torch_off_subspace_energy(cur, Vprefix, torch_mod=torch_mod)
+    delta_off_prev = torch_off_subspace_energy(dmat, Vprev, torch_mod=torch_mod)
+    delta_off_prefix = torch_off_subspace_energy(dmat, Vprefix, torch_mod=torch_mod)
+
+    z_t = torch_prefix_z_vector(
+        current_raw,
+        prefix_raw,
+        beta=beta,
+        std_floor_frac=std_floor_frac,
+        torch_mod=torch_mod,
+        device=device,
+        dtype=dtype,
+    )
+    z = z_t.detach().cpu().numpy().astype(np.float64, copy=False) if z_t.numel() else np.empty(0, dtype=np.float64)
+    feats = {
+        "off_prev_subspace": off_prev,
+        "off_prefix_subspace": off_prefix,
+        "in_prev_subspace": float(1.0 - off_prev) if np.isfinite(off_prev) else float("nan"),
+        "in_prefix_subspace": float(1.0 - off_prefix) if np.isfinite(off_prefix) else float("nan"),
+        "innovation_norm": float(torch_mod.linalg.norm(delta).detach().cpu()) if delta.numel() else float("nan"),
+        "innovation_off_prev": delta_off_prev,
+        "innovation_off_prefix": delta_off_prefix,
+        "innovation_in_prev": float(1.0 - delta_off_prev) if np.isfinite(delta_off_prev) else float("nan"),
+        "innovation_in_prefix": float(1.0 - delta_off_prefix) if np.isfinite(delta_off_prefix) else float("nan"),
+        "subspace_rank_prev": float(Vprev.shape[1]),
+        "subspace_rank_prefix": float(Vprefix.shape[1]),
+        "mean_step_cos_prev": torch_cosine(mu_cur, mu_prev, torch_mod=torch_mod),
+    }
+    feats.update(z_features(z, top_k=z_top_k, z_thresh=z_thresh))
+    if qvec is not None and mu_cur.numel() == qvec.numel():
+        feats["q_align_current"] = torch_cosine(mu_cur, qvec, torch_mod=torch_mod)
+        feats["q_align_prev"] = torch_cosine(mu_prev, qvec, torch_mod=torch_mod)
+        feats["q_align_drop"] = feats["q_align_prev"] - feats["q_align_current"]
+        feats["innovation_q_cos"] = torch_cosine(delta, qvec, torch_mod=torch_mod) if delta.numel() else float("nan")
+    else:
+        feats["q_align_current"] = float("nan")
+        feats["q_align_prev"] = float("nan")
+        feats["q_align_drop"] = float("nan")
+        feats["innovation_q_cos"] = float("nan")
+    return feats, z
+
+
 def build_rows(path: str, args: argparse.Namespace) -> Tuple[List[TransitionRow], Dict[str, Any]]:
+    backend_kind, torch_mod, device, torch_dtype = resolve_prefix_backend(args)
     data = np.load(path, allow_pickle=True)
     if "gold_error_step" not in data.files:
         raise SystemExit("prefix_innovation_audit requires gold_error_step")
@@ -464,28 +694,66 @@ def build_rows(path: str, args: argparse.Namespace) -> Tuple[List[TransitionRow]
         T = len(step_mats)
         chain_center = np.mean(H, axis=0) if args.center_chain else None
         qvec = select_qvec(data, idx, layer_used, H.shape[1])
+        if backend_kind == "torch":
+            np_dtype = np.float64 if str(getattr(args, "prefix_dtype", "float32")).lower() == "float64" else np.float32
+            H_t = torch_mod.as_tensor(np.asarray(H, dtype=np_dtype), device=device, dtype=torch_dtype)
+            starts = np.cumsum(np.r_[0, np.asarray(lengths[:-1], dtype=int)])
+            ends = np.minimum(H.shape[0], starts + np.asarray(lengths, dtype=int))
+            starts = np.minimum(H.shape[0], starts)
+            center_t = H_t[torch_mod.isfinite(H_t).all(dim=1)].mean(dim=0) if args.center_chain else None
+            if center_t is not None and not bool(torch_mod.isfinite(center_t).all().detach().cpu()):
+                center_t = None
+            qvec_t = None
+            if qvec is not None and np.asarray(qvec).size == H.shape[1]:
+                qvec_t = torch_mod.as_tensor(np.asarray(qvec, dtype=np_dtype), device=device, dtype=torch_dtype).reshape(-1)
+        else:
+            H_t = None
+            starts = ends = None
+            center_t = None
+            qvec_t = None
         entropy_trace = step_entropy_trace(data, idx, lengths)
         for t in range(1, T):
-            prefix_raw = np.concatenate(step_mats[:t], axis=0)
-            feats, z = transition_features(
-                step_mats[t - 1],
-                step_mats[t],
-                prefix_raw,
-                qvec=qvec,
-                chain_center=chain_center,
-                rank=args.rank,
-                beta=args.beta,
-                unitize=not args.raw_hidden,
-                z_top_k=args.z_top_k,
-                z_thresh=args.z_thresh,
-                std_floor_frac=args.std_floor_frac,
-            )
+            if backend_kind == "torch" and H_t is not None and starts is not None and ends is not None:
+                prefix_raw_t = H_t[: int(starts[t])]
+                feats, z = transition_features_torch(
+                    H_t[int(starts[t - 1]) : int(ends[t - 1])],
+                    H_t[int(starts[t]) : int(ends[t])],
+                    prefix_raw_t,
+                    qvec=qvec_t,
+                    chain_center=center_t,
+                    rank=args.rank,
+                    beta=args.beta,
+                    unitize=not args.raw_hidden,
+                    z_top_k=args.z_top_k,
+                    z_thresh=args.z_thresh,
+                    std_floor_frac=args.std_floor_frac,
+                    torch_mod=torch_mod,
+                    device=device,
+                    dtype=torch_dtype,
+                )
+                prefix_n = int(starts[t])
+            else:
+                prefix_raw = np.concatenate(step_mats[:t], axis=0)
+                feats, z = transition_features(
+                    step_mats[t - 1],
+                    step_mats[t],
+                    prefix_raw,
+                    qvec=qvec,
+                    chain_center=chain_center,
+                    rank=args.rank,
+                    beta=args.beta,
+                    unitize=not args.raw_hidden,
+                    z_top_k=args.z_top_k,
+                    z_thresh=args.z_thresh,
+                    std_floor_frac=args.std_floor_frac,
+                )
+                prefix_n = int(prefix_raw.shape[0])
             phase = phase_for(int(gold[idx]), t)
             y = y_for_phase(phase, args.control_pool)
             feats["n_tok_current"] = float(step_mats[t].shape[0])
-            feats["n_tok_prefix"] = float(prefix_raw.shape[0])
+            feats["n_tok_prefix"] = float(prefix_n)
             feats["logN_current"] = float(math.log1p(max(0, step_mats[t].shape[0])))
-            feats["logN_prefix"] = float(math.log1p(max(0, prefix_raw.shape[0])))
+            feats["logN_prefix"] = float(math.log1p(max(0, prefix_n)))
             feats["pos"] = float(t / max(1, T - 1))
             feats["entropy_current"] = float(entropy_trace[t]) if t < entropy_trace.size else float("nan")
             feats["risk_off_prefix"] = feats["off_prefix_subspace"]
@@ -526,6 +794,9 @@ def build_rows(path: str, args: argparse.Namespace) -> Tuple[List[TransitionRow]
         "control_pool": args.control_pool,
         "dim_activation": dim_acc.summary(top_k=args.dim_top_k),
         "has_qvec": bool("qvec" in data.files),
+        "prefix_backend": backend_kind,
+        "prefix_device": str(device) if device is not None else "cpu",
+        "prefix_dtype": str(getattr(args, "prefix_dtype", "float32")),
     }
     return rows, meta
 
@@ -723,6 +994,7 @@ def write_markdown(path: str, res: Mapping[str, Any]) -> None:
         f"- Rows {meta['eval_rows']} | first-error transitions {meta['first_error_rows']} | "
         f"controls {meta['control_rows']} | problems {meta['problem_groups']} | source {meta['source']} L{meta['layer']}."
     )
+    lines.append(f"- Prefix backend `{meta.get('prefix_backend', 'cpu')}` on `{meta.get('prefix_device', 'cpu')}`.")
     bb = head.get("best_baseline") or {}
     bt = head.get("best_transition") or {}
     if bb:
@@ -866,7 +1138,8 @@ def print_result(res: Mapping[str, Any]) -> None:
     print(f"===== prefix innovation audit | {os.path.basename(str(meta['npz']))} =====")
     print(
         f"rows {meta['eval_rows']} | first-error transitions {meta['first_error_rows']} | "
-        f"controls {meta['control_rows']} | problems {meta['problem_groups']} | source {meta['source']} L{meta['layer']}"
+        f"controls {meta['control_rows']} | problems {meta['problem_groups']} | source {meta['source']} L{meta['layer']} | "
+        f"backend {meta.get('prefix_backend', 'cpu')}:{meta.get('prefix_device', 'cpu')}"
     )
     bb = res["headline"].get("best_baseline") or {}
     bt = res["headline"].get("best_transition") or {}
@@ -906,6 +1179,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--z_thresh", type=float, default=3.0)
     ap.add_argument("--std_floor_frac", type=float, default=0.10)
     ap.add_argument("--dim_top_k", type=int, default=20)
+    ap.add_argument("--prefix_backend", default="auto", choices=["auto", "cpu", "torch", "cuda"])
+    ap.add_argument("--prefix_device", default="", help="torch device for prefix SVD/projection, e.g. cuda, cuda:0, or cpu")
+    ap.add_argument("--prefix_dtype", default="float32", choices=["float32", "float64"], help="torch dtype for GPU prefix computations")
     ap.add_argument("--min_per_class", type=int, default=1)
     ap.add_argument("--min_feature_coverage", type=float, default=0.60)
     ap.add_argument("--folds", type=int, default=5)
