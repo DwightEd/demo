@@ -1,5 +1,37 @@
 # SMCD / NTS data map (box: `/gz-data/research/demo/data/`)
 
+## 2026-07-09 current ProcessBench feature inputs
+
+Use these files for learned-latent / hidden-state reasoning experiments:
+
+```text
+/gz-data/research/demo/data/features/full_gsm8k.npz
+/gz-data/research/demo/data/features/full_math.npz
+/gz-data/research/demo/data/features/full_omnimath.npz
+```
+
+From repo root on the GPU box, the relative paths are:
+
+```text
+data/features/full_gsm8k.npz
+data/features/full_math.npz
+data/features/full_omnimath.npz
+```
+
+Do **not** use `data/full_gsm8k.npz` or
+`data/processbench_gsm8k_stepvec.npz`; those are not canonical files in this
+project layout.
+
+For `latent_separatrix_audit.py`, the required fields are:
+
+```text
+stepvec              object array, each chain shaped (T, L, d)
+gold_error_step      -1 for correct response, otherwise first wrong step index
+problem_ids          grouping id for leakage-safe CV
+steps_text           optional, used only for nuisance operation bins
+step_token_ranges    optional, used to estimate step length
+```
+
 Confirmed 2026-06-29 via `inspect_data.py`. `data/` is gitignored (big files live only on the box).
 
 ## ⚠️ LABEL CONVENTION (red line, audited 2026-07-03)
