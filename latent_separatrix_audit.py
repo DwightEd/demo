@@ -1302,6 +1302,36 @@ def grouped_auc(rows: Sequence[dict[str, Any]], score_key: str, label_key: str, 
     }
 
 
+def problem_group_diagnostics(records: Sequence[ChainRecord]) -> dict[str, Any]:
+    by_problem: dict[str, list[ChainRecord]] = defaultdict(list)
+    for r in records:
+        by_problem[str(r.problem_id)].append(r)
+    sizes = np.asarray([len(v) for v in by_problem.values()], dtype=int)
+    mixed = 0
+    multi = 0
+    for rr in by_problem.values():
+        labels = {int(r.gold_error_step >= 0) for r in rr}
+        if len(rr) > 1:
+            multi += 1
+        if len(labels) >= 2:
+            mixed += 1
+    if sizes.size == 0:
+        return {
+            "problem_groups": 0,
+            "multi_chain_problem_groups": 0,
+            "mixed_label_problem_groups": 0,
+            "max_chains_per_problem": 0,
+            "mean_chains_per_problem": float("nan"),
+        }
+    return {
+        "problem_groups": int(len(by_problem)),
+        "multi_chain_problem_groups": int(multi),
+        "mixed_label_problem_groups": int(mixed),
+        "max_chains_per_problem": int(np.max(sizes)),
+        "mean_chains_per_problem": float(np.mean(sizes)),
+    }
+
+
 def rank_first_errors(records: Sequence[ChainRecord], rows: Sequence[dict[str, Any]], score_key: str) -> dict[str, Any]:
     by_chain: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
@@ -1405,6 +1435,7 @@ def evaluate_all(
         "response_within_problem": {},
         "response_within_problem_models": {},
         "latent_separability": latent_separability(rows),
+        "problem_groups": problem_group_diagnostics(records),
     }
     summary["tasks"]["first_error"] = {
         "rows": len(first_rows),
@@ -1707,12 +1738,42 @@ def save_outputs(result: dict[str, Any], args: argparse.Namespace) -> None:
     print(f"\nSaved: {json_path}")
 
 
+def grouped_auc_console_value(d: dict[str, Any], *, group_name: str = "groups") -> str:
+    eligible = int(d.get("eligible_groups", 0))
+    groups = int(d.get("groups", 0))
+    skipped = int(d.get("skipped_single_class", 0))
+    weighted = float(d.get("weighted", float("nan")))
+    if eligible <= 0 or not math.isfinite(weighted):
+        return f"undefined (eligible_{group_name}=0/{groups}; single-class groups={skipped})"
+    return f"{weighted:.3f} (eligible_{group_name}={eligible}/{groups})"
+
+
+def grouped_auc_markdown_value(d: dict[str, Any]) -> tuple[str, str]:
+    eligible = int(d.get("eligible_groups", 0))
+    if eligible <= 0:
+        return "NA", "NA"
+    macro = float(d.get("macro", float("nan")))
+    weighted = float(d.get("weighted", float("nan")))
+    return (
+        f"{macro:.4f}" if math.isfinite(macro) else "NA",
+        f"{weighted:.4f}" if math.isfinite(weighted) else "NA",
+    )
+
+
 def render_console(summary: dict[str, Any]) -> str:
     lines = ["===== Latent Separatrix summary ====="]
     lines.append(f"chains {summary['n_chains']} | rows {summary['n_rows']}")
     if "layers" in summary:
         lines.append(f"layer positions {summary['layers'].get('layer_positions')}")
         lines.append(f"layer ids {summary['layers'].get('layer_ids')}")
+    pg = summary.get("problem_groups", {})
+    if pg:
+        lines.append(
+            "problem groups "
+            f"{pg.get('problem_groups')} | multi-chain {pg.get('multi_chain_problem_groups')} | "
+            f"mixed-label {pg.get('mixed_label_problem_groups')} | "
+            f"max chains/problem {pg.get('max_chains_per_problem')}"
+        )
     lines.append("\nResponse diagnosis (primary):")
     for k, d in sorted(summary["response"].items(), key=lambda kv: (-(kv[1]["auc"] if math.isfinite(kv[1]["auc"]) else -1), kv[0])):
         lines.append(f"  raw    {k:<24} AUROC {d['auc']:.3f} AUPRC {d['auprc']:.3f}")
@@ -1726,17 +1787,13 @@ def render_console(summary: dict[str, Any]) -> str:
         )[:5]
         lines.append("  within-problem raw weighted AUROC:")
         for k, d in best:
-            lines.append(
-                f"    {k:<24} {d['weighted']:.3f} "
-                f"(eligible_groups={d['eligible_groups']}/{d['groups']})"
-            )
+            lines.append(f"    {k:<24} {grouped_auc_console_value(d)}")
     rwpm = summary.get("response_within_problem_models", {})
     if rwpm:
         lines.append("  within-problem model weighted AUROC:")
         for k, d in sorted(rwpm.items(), key=lambda kv: (-(kv[1].get("weighted", float("nan")) if math.isfinite(kv[1].get("weighted", float("nan"))) else -1), kv[0])):
             lines.append(
-                f"    {k:<24} {d['weighted']:.3f} "
-                f"(eligible_groups={d['eligible_groups']}/{d['groups']})"
+                f"    {k:<24} {grouped_auc_console_value(d)}"
             )
     lines.append("\nStep diagnostics (secondary; first-error prefix-only is position-confounded):")
     for task in ["first_error", "pre_error_future"]:
@@ -1754,17 +1811,13 @@ def render_console(summary: dict[str, Any]) -> str:
             )[:5]
             lines.append("  within-problem single weighted AUROC:")
             for k, d in best:
-                lines.append(
-                    f"    {k:<14} {d['weighted']:.3f} "
-                    f"(eligible_groups={d['eligible_groups']}/{d['groups']})"
-                )
+                lines.append(f"    {k:<14} {grouped_auc_console_value(d)}")
         wpm = t.get("within_problem_models", {})
         if wpm:
             lines.append("  within-problem model weighted AUROC:")
             for k, d in sorted(wpm.items(), key=lambda kv: (-(kv[1].get("weighted", float("nan")) if math.isfinite(kv[1].get("weighted", float("nan"))) else -1), kv[0])):
                 lines.append(
-                    f"    {k:<16} {d['weighted']:.3f} "
-                    f"(eligible_groups={d['eligible_groups']}/{d['groups']})"
+                    f"    {k:<16} {grouped_auc_console_value(d)}"
                 )
         wc = t.get("within_chain", {})
         if wc:
@@ -1775,16 +1828,14 @@ def render_console(summary: dict[str, Any]) -> str:
             lines.append("  within-chain single weighted AUROC:")
             for k, d in best:
                 lines.append(
-                    f"    {k:<14} {d['weighted']:.3f} "
-                    f"(eligible_chains={d['eligible_groups']}/{d['groups']})"
+                    f"    {k:<14} {grouped_auc_console_value(d, group_name='chains')}"
                 )
         wcm = t.get("within_chain_models", {})
         if wcm:
             lines.append("  within-chain model weighted AUROC:")
             for k, d in sorted(wcm.items(), key=lambda kv: (-(kv[1].get("weighted", float("nan")) if math.isfinite(kv[1].get("weighted", float("nan"))) else -1), kv[0])):
                 lines.append(
-                    f"    {k:<16} {d['weighted']:.3f} "
-                    f"(eligible_chains={d['eligible_groups']}/{d['groups']})"
+                    f"    {k:<16} {grouped_auc_console_value(d, group_name='chains')}"
                 )
     lines.append("\nRanks:")
     for k, d in summary["rank"].items():
@@ -1808,6 +1859,15 @@ def render_markdown(summary: dict[str, Any], args: argparse.Namespace) -> str:
         f"- Layer positions: `{summary['layers']['layer_positions']}`",
         f"- Layer ids: `{summary['layers']['layer_ids']}`",
         f"- Layer pool: `{summary['layers']['layer_pool']}`",
+        "",
+        "## Data Group Diagnostics",
+        "",
+        "Within-problem AUROC is only defined for problem groups containing both positive and negative examples. "
+        "If `mixed_label_problem_groups` is zero, the within-problem table is structurally undefined rather than missing.",
+        "",
+        "```json",
+        json.dumps(finite_json(summary.get("problem_groups", {})), ensure_ascii=False, indent=2),
+        "```",
         "",
         "## Core Test",
         "",
@@ -1846,9 +1906,11 @@ def render_markdown(summary: dict[str, Any], args: argparse.Namespace) -> str:
                 ]
             )
             for k, d in sorted(t["within_problem"].items()):
-                lines.append(f"| single/{k} | {d['macro']:.4f} | {d['weighted']:.4f} | {d['eligible_groups']} | {d['groups']} |")
+                macro, weighted = grouped_auc_markdown_value(d)
+                lines.append(f"| single/{k} | {macro} | {weighted} | {d['eligible_groups']} | {d['groups']} |")
             for k, d in sorted(t.get("within_problem_models", {}).items()):
-                lines.append(f"| model/{k} | {d['macro']:.4f} | {d['weighted']:.4f} | {d['eligible_groups']} | {d['groups']} |")
+                macro, weighted = grouped_auc_markdown_value(d)
+                lines.append(f"| model/{k} | {macro} | {weighted} | {d['eligible_groups']} | {d['groups']} |")
             lines.append("")
         if task == "first_error" and t.get("within_chain"):
             lines.extend(
@@ -1860,9 +1922,11 @@ def render_markdown(summary: dict[str, Any], args: argparse.Namespace) -> str:
                 ]
             )
             for k, d in sorted(t["within_chain"].items()):
-                lines.append(f"| single/{k} | {d['macro']:.4f} | {d['weighted']:.4f} | {d['eligible_groups']} | {d['groups']} |")
+                macro, weighted = grouped_auc_markdown_value(d)
+                lines.append(f"| single/{k} | {macro} | {weighted} | {d['eligible_groups']} | {d['groups']} |")
             for k, d in sorted(t.get("within_chain_models", {}).items()):
-                lines.append(f"| model/{k} | {d['macro']:.4f} | {d['weighted']:.4f} | {d['eligible_groups']} | {d['groups']} |")
+                macro, weighted = grouped_auc_markdown_value(d)
+                lines.append(f"| model/{k} | {macro} | {weighted} | {d['eligible_groups']} | {d['groups']} |")
             lines.append("")
     lines.extend(["## Response Diagnosis (Primary)", "", "| score | AUROC | AUPRC |", "|---|---:|---:|"])
     for k, d in sorted(summary["response"].items()):
@@ -1880,9 +1944,11 @@ def render_markdown(summary: dict[str, Any], args: argparse.Namespace) -> str:
             ]
         )
         for k, d in sorted(summary["response_within_problem"].items()):
-            lines.append(f"| raw/{k} | {d['macro']:.4f} | {d['weighted']:.4f} | {d['eligible_groups']} | {d['groups']} |")
+            macro, weighted = grouped_auc_markdown_value(d)
+            lines.append(f"| raw/{k} | {macro} | {weighted} | {d['eligible_groups']} | {d['groups']} |")
         for k, d in sorted(summary.get("response_within_problem_models", {}).items()):
-            lines.append(f"| model/{k} | {d['macro']:.4f} | {d['weighted']:.4f} | {d['eligible_groups']} | {d['groups']} |")
+            macro, weighted = grouped_auc_markdown_value(d)
+            lines.append(f"| model/{k} | {macro} | {weighted} | {d['eligible_groups']} | {d['groups']} |")
     lines.extend(["", "## First-Error Rank", "", "| score | n | top1 | mean rank | mean percentile |", "|---|---:|---:|---:|---:|"])
     for k, d in summary["rank"].items():
         lines.append(f"| {k} | {d['n']} | {d['top1']:.4f} | {d['mean_rank']:.4f} | {d['mean_percentile']:.4f} |")
