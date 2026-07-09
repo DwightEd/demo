@@ -719,6 +719,24 @@ def batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, An
     return out
 
 
+def make_grad_scaler(enabled: bool) -> Any:
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        try:
+            return torch.amp.GradScaler("cuda", enabled=enabled)
+        except TypeError:
+            return torch.amp.GradScaler(enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def amp_autocast(device: torch.device, enabled: bool) -> Any:
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        try:
+            return torch.amp.autocast(device_type=device.type, enabled=enabled)
+        except TypeError:
+            return torch.amp.autocast(device.type, enabled=enabled)
+    return torch.cuda.amp.autocast(enabled=enabled)
+
+
 def train_model(
     train_dataset: ChainTensorDataset,
     input_dim: int,
@@ -744,7 +762,8 @@ def train_model(
         num_workers=0,
         drop_last=False,
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=bool(args.amp and device.type == "cuda"))
+    use_amp = bool(args.amp and device.type == "cuda")
+    scaler = make_grad_scaler(enabled=use_amp)
 
     for epoch in range(int(args.epochs)):
         model.train()
@@ -753,7 +772,7 @@ def train_model(
         for batch in loader:
             batch = batch_to_device(batch, device)
             opt.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=bool(args.amp and device.type == "cuda")):
+            with amp_autocast(device, enabled=use_amp):
                 out = model(batch["x"], grl_lambda=args.grl_lambda if not args.no_nuisance else 0.0)
                 mask = batch["mask"]
                 surv = survival_loss(out["hazard_logit"], batch["gold"], mask)
