@@ -13,7 +13,7 @@ Supported input schemas:
   1. Canonical full-trace feature files:
        stepvec           object array of (T, L, d)
        gold_error_step   -1 for fully correct, >=0 for first wrong step
-       optional ids, problem_ids, steps_text, step_token_ranges, layers_used
+       optional ids, problem_ids, steps_text, step_token_ranges, sv_layers
   2. 01_extract_spectral_field.py files:
        sv_vec_<mode>     object array of (T, L, d)
        labels            -1 for fully correct, >=0 first wrong step
@@ -230,6 +230,32 @@ def pick_vector_key(z: np.lib.npyio.NpzFile, mode: str) -> str:
     raise KeyError("Need `stepvec` or `sv_vec_<mode>` raw step vectors.")
 
 
+def infer_vector_layer_count(raw_vectors: np.ndarray) -> int:
+    for v in raw_vectors:
+        arr = np.asarray(v)
+        if arr.ndim == 3:
+            return int(arr.shape[1])
+    raise ValueError("Could not infer layer count from vector array.")
+
+
+def layer_metadata_for_vector_key(z: np.lib.npyio.NpzFile, vector_key: str, raw_vectors: np.ndarray) -> list[int]:
+    n_vec_layers = infer_vector_layer_count(raw_vectors)
+
+    candidates: list[tuple[str, list[int]]] = []
+    if vector_key == "stepvec" and "sv_layers" in z.files:
+        candidates.append(("sv_layers", [int(x) for x in np.asarray(z["sv_layers"]).tolist()]))
+    if "layers_used" in z.files:
+        candidates.append(("layers_used", [int(x) for x in np.asarray(z["layers_used"]).tolist()]))
+    if "sv_layers" in z.files and vector_key != "stepvec":
+        candidates.append(("sv_layers", [int(x) for x in np.asarray(z["sv_layers"]).tolist()]))
+
+    for _name, vals in candidates:
+        if len(vals) == n_vec_layers:
+            return vals
+
+    return list(range(n_vec_layers))
+
+
 def load_records(path: str | Path, mode: str, max_chains: int | None = None) -> tuple[list[ChainRecord], list[int], str]:
     p = Path(path)
     if not p.exists():
@@ -249,13 +275,7 @@ def load_records(path: str | Path, mode: str, max_chains: int | None = None) -> 
     else:
         raise KeyError("Need `gold_error_step` or ProcessBench `labels`.")
 
-    if "layers_used" in z.files:
-        layers = [int(x) for x in np.asarray(z["layers_used"]).tolist()]
-    elif "sv_layers" in z.files:
-        layers = [int(x) for x in np.asarray(z["sv_layers"]).tolist()]
-    else:
-        first = next(np.asarray(v) for v in raw_vectors if v is not None)
-        layers = list(range(first.shape[1]))
+    layers = layer_metadata_for_vector_key(z, vector_key, raw_vectors)
 
     ids = z["ids"] if "ids" in z.files else None
     problem_ids = None
@@ -1280,6 +1300,9 @@ def save_outputs(result: dict[str, Any], args: argparse.Namespace) -> None:
 def render_console(summary: dict[str, Any]) -> str:
     lines = ["===== Latent Separatrix summary ====="]
     lines.append(f"chains {summary['n_chains']} | rows {summary['n_rows']}")
+    if "layers" in summary:
+        lines.append(f"layer positions {summary['layers'].get('layer_positions')}")
+        lines.append(f"layer ids {summary['layers'].get('layer_ids')}")
     for task in ["first_error", "pre_error_future"]:
         t = summary["tasks"][task]
         lines.append(f"\nTask {task}: rows {t['rows']} pos {t['pos']}")
