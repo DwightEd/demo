@@ -637,7 +637,114 @@ class LatentSeparatrixNet(nn.Module):
         return {"z": z, "hazard_logit": hazard_logit, "energy": energy, "nuisance": nuis}
 
 
+class VAESeparatrixNet(nn.Module):
+    """Beta-VAE latent chart with the existing separatrix heads on top.
+
+    The VAE part is trained on raw step states only. Supervised losses then shape
+    the same latent chart for first-error hazard/energy detection.  Heads consume
+    posterior means rather than sampled z so the detector is deterministic at
+    inference time.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        latent_dim: int,
+        dropout: float,
+        pos_bins: int,
+        length_bins: int,
+        n_steps_bins: int,
+        op_bins: int,
+        enc_logvar_clip: float,
+        dec_logvar_min: float,
+        dec_logvar_max: float,
+    ) -> None:
+        super().__init__()
+        self.enc_logvar_clip = float(enc_logvar_clip)
+        self.dec_logvar_min = float(dec_logvar_min)
+        self.dec_logvar_max = float(dec_logvar_max)
+        self.encoder = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.z_mu = nn.Linear(hidden_dim, latent_dim)
+        self.z_logvar = nn.Linear(hidden_dim, latent_dim)
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.x_mu = nn.Linear(hidden_dim, input_dim)
+        self.x_logvar = nn.Linear(hidden_dim, input_dim)
+        self.hazard = nn.Linear(latent_dim, 1)
+        self.energy = nn.Sequential(
+            nn.Linear(latent_dim, max(16, hidden_dim // 2)),
+            nn.GELU(),
+            nn.Linear(max(16, hidden_dim // 2), 1),
+        )
+        self.nuisance = nn.ModuleDict(
+            {
+                "pos": nn.Linear(latent_dim, pos_bins),
+                "length": nn.Linear(latent_dim, length_bins),
+                "op": nn.Linear(latent_dim, op_bins),
+                "n_steps": nn.Linear(latent_dim, n_steps_bins),
+            }
+        )
+
+    def encode_flat(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        h = self.encoder(x.float())
+        mu = self.z_mu(h)
+        logvar = torch.clamp(self.z_logvar(h), -self.enc_logvar_clip, self.enc_logvar_clip)
+        return mu, logvar
+
+    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        if not self.training:
+            return mu
+        eps = torch.randn_like(mu)
+        return mu + torch.exp(0.5 * logvar) * eps
+
+    def decode_flat(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        h = self.decoder(z.float())
+        mu = self.x_mu(h)
+        logvar = torch.clamp(self.x_logvar(h), self.dec_logvar_min, self.dec_logvar_max)
+        return mu, logvar
+
+    def forward(self, x: torch.Tensor, grl_lambda: float = 0.0) -> dict[str, torch.Tensor]:
+        B, T, D = x.shape
+        flat = x.reshape(B * T, D).float()
+        mu_z, logvar_z = self.encode_flat(flat)
+        z_sample = self.reparameterize(mu_z, logvar_z)
+        mu_x, logvar_x = self.decode_flat(z_sample)
+        z = mu_z.reshape(B, T, -1)
+        hazard_logit = self.hazard(z).squeeze(-1)
+        energy = self.energy(z).squeeze(-1)
+        zr = grad_reverse(z, grl_lambda) if grl_lambda > 0 else z
+        nuis = {k: head(zr).reshape(B, T, -1) for k, head in self.nuisance.items()}
+        return {
+            "z": z,
+            "z_sample": z_sample.reshape(B, T, -1),
+            "mu_z": mu_z.reshape(B, T, -1),
+            "logvar_z": logvar_z.reshape(B, T, -1),
+            "mu_x": mu_x.reshape(B, T, D),
+            "logvar_x": logvar_x.reshape(B, T, D),
+            "hazard_logit": hazard_logit,
+            "energy": energy,
+            "nuisance": nuis,
+        }
+
+
 def survival_loss(hazard_logit: torch.Tensor, gold: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    hazard_logit = hazard_logit.float()
+    mask = mask.float()
     log_h = F.logsigmoid(hazard_logit)
     log_not = F.logsigmoid(-hazard_logit)
     losses = []
@@ -662,6 +769,8 @@ def survival_loss(hazard_logit: torch.Tensor, gold: torch.Tensor, mask: torch.Te
 
 
 def energy_loss(energy: torch.Tensor, state_y: torch.Tensor, mask: torch.Tensor, margin: float) -> torch.Tensor:
+    energy = energy.float()
+    mask = mask.float()
     valid = mask > 0.5
     if not bool(valid.any()):
         return torch.zeros((), device=energy.device)
@@ -687,7 +796,7 @@ def supervised_contrastive_loss(
     max_points: int,
 ) -> torch.Tensor:
     valid = mask > 0.5
-    zz = z[valid]
+    zz = z[valid].float()
     yy = labels[valid].long()
     if zz.shape[0] < 4 or torch.unique(yy).numel() < 2:
         return torch.zeros((), device=z.device)
@@ -696,7 +805,7 @@ def supervised_contrastive_loss(
         zz = zz[perm]
         yy = yy[perm]
     zz = F.normalize(zz, dim=-1)
-    sim = zz @ zz.T / max(float(temperature), EPS)
+    sim = (zz @ zz.T).float() / max(float(temperature), EPS)
     eye = torch.eye(sim.shape[0], device=z.device, dtype=torch.bool)
     sim = sim.masked_fill(eye, -1e9)
     same = (yy[:, None] == yy[None, :]) & (~eye)
@@ -711,6 +820,7 @@ def supervised_contrastive_loss(
 
 
 def nuisance_loss(out: dict[str, torch.Tensor], batch: dict[str, torch.Tensor], mask: torch.Tensor) -> torch.Tensor:
+    mask = mask.float()
     valid = mask > 0.5
     losses = []
     specs = [
@@ -720,7 +830,7 @@ def nuisance_loss(out: dict[str, torch.Tensor], batch: dict[str, torch.Tensor], 
         ("n_steps", "n_steps_bin"),
     ]
     for name, target_key in specs:
-        logits = out["nuisance"][name][valid]
+        logits = out["nuisance"][name][valid].float()
         target = batch[target_key][valid].long()
         if logits.numel() == 0:
             continue
@@ -730,6 +840,40 @@ def nuisance_loss(out: dict[str, torch.Tensor], batch: dict[str, torch.Tensor], 
     if not losses:
         return torch.zeros((), device=mask.device)
     return torch.stack(losses).mean()
+
+
+def vae_regularization_loss(
+    out: dict[str, torch.Tensor],
+    x: torch.Tensor,
+    mask: torch.Tensor,
+    beta: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    if "mu_x" not in out:
+        zero = torch.zeros((), device=mask.device)
+        return zero, {"vae_rec": zero.detach(), "vae_kl": zero.detach(), "vae_beta": zero.detach()}
+    valid = mask.float() > 0.5
+    if not bool(valid.any()):
+        zero = torch.zeros((), device=mask.device)
+        return zero, {"vae_rec": zero.detach(), "vae_kl": zero.detach(), "vae_beta": zero.detach()}
+    target = x.float()[valid]
+    mu_x = out["mu_x"].float()[valid]
+    logvar_x = out["logvar_x"].float()[valid]
+    inv_var = torch.exp(-logvar_x)
+    rec = 0.5 * (logvar_x + (target - mu_x).pow(2) * inv_var)
+    rec = rec.sum(dim=-1).mean()
+
+    mu_z = out["mu_z"].float()[valid]
+    logvar_z = out["logvar_z"].float()[valid]
+    kl = -0.5 * (1.0 + logvar_z - mu_z.pow(2) - torch.exp(logvar_z))
+    kl = kl.sum(dim=-1).mean()
+
+    total = rec + float(beta) * kl
+    total = torch.nan_to_num(total, nan=1e6, posinf=1e6, neginf=1e6)
+    return total, {
+        "vae_rec": rec.detach(),
+        "vae_kl": kl.detach(),
+        "vae_beta": torch.tensor(float(beta), device=target.device),
+    }
 
 
 def batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -763,16 +907,31 @@ def train_model(
     args: argparse.Namespace,
     device: torch.device,
 ) -> LatentSeparatrixNet:
-    model = LatentSeparatrixNet(
-        input_dim=input_dim,
-        hidden_dim=args.hidden_dim,
-        latent_dim=args.latent_dim,
-        dropout=args.dropout,
-        pos_bins=args.pos_bins,
-        length_bins=args.length_bins,
-        n_steps_bins=args.n_steps_bins,
-        op_bins=4,
-    ).to(device)
+    if float(args.vae_weight) > 0:
+        model = VAESeparatrixNet(
+            input_dim=input_dim,
+            hidden_dim=args.hidden_dim,
+            latent_dim=args.latent_dim,
+            dropout=args.dropout,
+            pos_bins=args.pos_bins,
+            length_bins=args.length_bins,
+            n_steps_bins=args.n_steps_bins,
+            op_bins=4,
+            enc_logvar_clip=args.vae_enc_logvar_clip,
+            dec_logvar_min=args.vae_dec_logvar_min,
+            dec_logvar_max=args.vae_dec_logvar_max,
+        ).to(device)
+    else:
+        model = LatentSeparatrixNet(
+            input_dim=input_dim,
+            hidden_dim=args.hidden_dim,
+            latent_dim=args.latent_dim,
+            dropout=args.dropout,
+            pos_bins=args.pos_bins,
+            length_bins=args.length_bins,
+            n_steps_bins=args.n_steps_bins,
+            op_bins=4,
+        ).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loader = DataLoader(
         train_dataset,
@@ -805,6 +964,8 @@ def train_model(
                     args.max_contrast_points,
                 )
                 nuis = nuisance_loss(out, batch, mask)
+                beta = float(args.vae_beta_max) * min(1.0, float(epoch + 1) / max(1.0, float(args.vae_warmup_epochs)))
+                vae, vae_parts = vae_regularization_loss(out, batch["x"], mask, beta)
                 loss = args.survival_weight * surv
                 if not args.no_energy:
                     loss = loss + args.energy_weight * eng
@@ -812,6 +973,8 @@ def train_model(
                     loss = loss + args.contrastive_weight * con
                 if not args.no_nuisance:
                     loss = loss + args.nuisance_weight * nuis
+                if float(args.vae_weight) > 0:
+                    loss = loss + float(args.vae_weight) * vae
             scaler.scale(loss).backward()
             if args.grad_clip > 0:
                 scaler.unscale_(opt)
@@ -824,6 +987,9 @@ def train_model(
             total["energy"] += float(eng.detach().cpu())
             total["contrastive"] += float(con.detach().cpu())
             total["nuisance"] += float(nuis.detach().cpu())
+            total["vae"] += float(vae.detach().cpu())
+            total["vae_rec"] += float(vae_parts["vae_rec"].detach().cpu())
+            total["vae_kl"] += float(vae_parts["vae_kl"].detach().cpu())
             n_batches += 1
         if args.verbose and (epoch == 0 or (epoch + 1) % max(1, args.print_every) == 0 or epoch + 1 == args.epochs):
             msg = " ".join(f"{k}={v / max(1, n_batches):.4f}" for k, v in total.items())
@@ -849,6 +1015,28 @@ def score_dataset(
         hazard = torch.sigmoid(out["hazard_logit"]).detach().cpu().numpy()
         energy = out["energy"].detach().cpu().numpy()
         z = out["z"].detach().cpu().numpy()
+        if "mu_x" in out:
+            valid_x = batch["x"].float()
+            rec_vec = 0.5 * (
+                out["logvar_x"].float()
+                + (valid_x - out["mu_x"].float()).pow(2) * torch.exp(-out["logvar_x"].float())
+            )
+            vae_rec = rec_vec.sum(dim=-1).detach().cpu().numpy()
+            kl_vec = -0.5 * (
+                1.0
+                + out["logvar_z"].float()
+                - out["mu_z"].float().pow(2)
+                - torch.exp(out["logvar_z"].float())
+            )
+            vae_kl = kl_vec.sum(dim=-1).detach().cpu().numpy()
+            vae_dec_unc = out["logvar_x"].float().mean(dim=-1).detach().cpu().numpy()
+            vae_post_unc = out["logvar_z"].float().mean(dim=-1).detach().cpu().numpy()
+        else:
+            shp = hazard.shape
+            vae_rec = np.full(shp, np.nan, dtype=float)
+            vae_kl = np.full(shp, np.nan, dtype=float)
+            vae_dec_unc = np.full(shp, np.nan, dtype=float)
+            vae_post_unc = np.full(shp, np.nan, dtype=float)
         mask = batch["mask"].detach().cpu().numpy()
         chain_index = batch["chain_index"].detach().cpu().numpy()
         for bi, idx in enumerate(chain_index.tolist()):
@@ -857,6 +1045,10 @@ def score_dataset(
             hz = hazard[bi, :T].astype(float)
             en = energy[bi, :T].astype(float)
             zz = z[bi, :T].astype(np.float32)
+            vr = vae_rec[bi, :T].astype(float)
+            vk = vae_kl[bi, :T].astype(float)
+            vu = vae_dec_unc[bi, :T].astype(float)
+            vpu = vae_post_unc[bi, :T].astype(float)
             survival = float(1.0 - np.prod(np.clip(1.0 - hz, 1e-6, 1.0)))
             chain_scores[int(idx)] = {
                 "chain_index": int(idx),
@@ -870,6 +1062,12 @@ def score_dataset(
                 "mean_hazard": float(np.mean(hz)),
                 "max_energy": float(np.max(en)),
                 "mean_energy": float(np.mean(en)),
+                "max_vae_rec_nll": float(np.nanmax(vr)) if np.isfinite(vr).any() else float("nan"),
+                "mean_vae_rec_nll": float(np.nanmean(vr)) if np.isfinite(vr).any() else float("nan"),
+                "max_vae_kl": float(np.nanmax(vk)) if np.isfinite(vk).any() else float("nan"),
+                "mean_vae_kl": float(np.nanmean(vk)) if np.isfinite(vk).any() else float("nan"),
+                "max_vae_dec_unc": float(np.nanmax(vu)) if np.isfinite(vu).any() else float("nan"),
+                "mean_vae_dec_unc": float(np.nanmean(vu)) if np.isfinite(vu).any() else float("nan"),
             }
             for t in range(T):
                 g = rec.gold_error_step
@@ -902,6 +1100,10 @@ def score_dataset(
                         "hazard": float(hz[t]),
                         "energy": float(en[t]),
                         "latent_norm": float(np.linalg.norm(zz[t])),
+                        "vae_rec_nll": float(vr[t]),
+                        "vae_kl": float(vk[t]),
+                        "vae_dec_unc": float(vu[t]),
+                        "vae_post_unc": float(vpu[t]),
                         "latent": zz[t],
                     }
                 )
@@ -925,6 +1127,10 @@ def row_latent_features(row: dict[str, Any]) -> list[float]:
         float(row["hazard"]),
         float(row["energy"]),
         float(row["latent_norm"]),
+        float(row.get("vae_rec_nll", 0.0)),
+        float(row.get("vae_kl", 0.0)),
+        float(row.get("vae_dec_unc", 0.0)),
+        float(row.get("vae_post_unc", 0.0)),
         *z.astype(float).tolist(),
     ]
 
@@ -1096,6 +1302,10 @@ def evaluate_all(
             "hazard": safe_auc(first_y, [r["hazard"] for r in first_rows]),
             "energy": safe_auc(first_y, [r["energy"] for r in first_rows]),
             "latent_norm": safe_auc(first_y, [r["latent_norm"] for r in first_rows]),
+            "vae_rec_nll": safe_auc(first_y, [r["vae_rec_nll"] for r in first_rows]),
+            "vae_kl": safe_auc(first_y, [r["vae_kl"] for r in first_rows]),
+            "vae_dec_unc": safe_auc(first_y, [r["vae_dec_unc"] for r in first_rows]),
+            "vae_post_unc": safe_auc(first_y, [r["vae_post_unc"] for r in first_rows]),
             "step_len": safe_auc(first_y, [r["step_len"] for r in first_rows]),
             "pos": safe_auc(first_y, [r["pos"] for r in first_rows]),
         },
@@ -1115,6 +1325,10 @@ def evaluate_all(
             "hazard": safe_auc(future_y, [r["hazard"] for r in future_rows]),
             "energy": safe_auc(future_y, [r["energy"] for r in future_rows]),
             "latent_norm": safe_auc(future_y, [r["latent_norm"] for r in future_rows]),
+            "vae_rec_nll": safe_auc(future_y, [r["vae_rec_nll"] for r in future_rows]),
+            "vae_kl": safe_auc(future_y, [r["vae_kl"] for r in future_rows]),
+            "vae_dec_unc": safe_auc(future_y, [r["vae_dec_unc"] for r in future_rows]),
+            "vae_post_unc": safe_auc(future_y, [r["vae_post_unc"] for r in future_rows]),
             "step_len": safe_auc(future_y, [r["step_len"] for r in future_rows]),
             "pos": safe_auc(future_y, [r["pos"] for r in future_rows]),
         },
@@ -1126,12 +1340,24 @@ def evaluate_all(
             summary["tasks"][task]["models"][fs] = safe_auc(oof_labels[task], pred)
             summary["tasks"][task].setdefault("models_auprc", {})[fs] = safe_auprc(oof_labels[task], pred)
 
-    for key in ["hazard", "energy", "latent_norm"]:
+    for key in ["hazard", "energy", "latent_norm", "vae_rec_nll", "vae_kl", "vae_dec_unc", "vae_post_unc"]:
         summary["rank"][key] = rank_first_errors(records, rows, key)
 
     chains = [chain_scores[k] for k in sorted(chain_scores)]
     y_chain = [int(c["y_chain_error"]) for c in chains]
-    for key in ["survival_score", "max_hazard", "mean_hazard", "max_energy", "mean_energy"]:
+    for key in [
+        "survival_score",
+        "max_hazard",
+        "mean_hazard",
+        "max_energy",
+        "mean_energy",
+        "max_vae_rec_nll",
+        "mean_vae_rec_nll",
+        "max_vae_kl",
+        "mean_vae_kl",
+        "max_vae_dec_unc",
+        "mean_vae_dec_unc",
+    ]:
         summary["response"][key] = {
             "auc": safe_auc(y_chain, [c[key] for c in chains]),
             "auprc": safe_auprc(y_chain, [c[key] for c in chains]),
@@ -1264,6 +1490,10 @@ def save_outputs(result: dict[str, Any], args: argparse.Namespace) -> None:
         "hazard",
         "energy",
         "latent_norm",
+        "vae_rec_nll",
+        "vae_kl",
+        "vae_dec_unc",
+        "vae_post_unc",
     ]
     chain_fields = [
         "chain_index",
@@ -1277,13 +1507,29 @@ def save_outputs(result: dict[str, Any], args: argparse.Namespace) -> None:
         "mean_hazard",
         "max_energy",
         "mean_energy",
+        "max_vae_rec_nll",
+        "mean_vae_rec_nll",
+        "max_vae_kl",
+        "mean_vae_kl",
+        "max_vae_dec_unc",
+        "mean_vae_dec_unc",
     ]
     write_csv(out_dir / f"{tag}_latent_separatrix_rows.csv", rows, row_fields)
     write_csv(out_dir / f"{tag}_latent_separatrix_chains.csv", chain_scores, chain_fields)
 
     latent = np.asarray([np.asarray(r["latent"], dtype=np.float32) for r in rows], dtype=np.float32)
     row_index = np.asarray([[int(r["chain_index"]), int(r["step_idx"]), int(r["y_first_error"]), int(r["y_chain_error"])] for r in rows], dtype=np.int32)
-    np.savez_compressed(out_dir / f"{tag}_latent_separatrix_latents.npz", latent=latent, row_index=row_index)
+    vae_scores = np.asarray(
+        [[float(r["vae_rec_nll"]), float(r["vae_kl"]), float(r["vae_dec_unc"]), float(r["vae_post_unc"])] for r in rows],
+        dtype=np.float32,
+    )
+    np.savez_compressed(
+        out_dir / f"{tag}_latent_separatrix_latents.npz",
+        latent=latent,
+        row_index=row_index,
+        vae_scores=vae_scores,
+        vae_score_names=np.asarray(["rec_nll", "kl", "dec_unc", "post_unc"], dtype="<U16"),
+    )
 
     json_path = out_dir / f"{tag}_latent_separatrix_summary.json"
     with json_path.open("w", encoding="utf-8") as f:
@@ -1443,6 +1689,12 @@ def default_selftest_args() -> argparse.Namespace:
         energy_margin=1.0,
         temperature=0.2,
         max_contrast_points=256,
+        vae_weight=0.0,
+        vae_beta_max=0.5,
+        vae_warmup_epochs=5,
+        vae_enc_logvar_clip=6.0,
+        vae_dec_logvar_min=-4.0,
+        vae_dec_logvar_max=4.0,
         no_energy=False,
         no_contrastive=False,
         no_nuisance=False,
@@ -1487,6 +1739,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--energy_margin", type=float, default=1.0)
     ap.add_argument("--temperature", type=float, default=0.2)
     ap.add_argument("--max_contrast_points", type=int, default=512)
+    ap.add_argument(
+        "--vae_weight",
+        type=float,
+        default=0.0,
+        help="If >0, train a beta-VAE latent chart jointly with separatrix heads.",
+    )
+    ap.add_argument("--vae_beta_max", type=float, default=0.5)
+    ap.add_argument("--vae_warmup_epochs", type=int, default=10)
+    ap.add_argument("--vae_enc_logvar_clip", type=float, default=6.0)
+    ap.add_argument("--vae_dec_logvar_min", type=float, default=-4.0)
+    ap.add_argument("--vae_dec_logvar_max", type=float, default=4.0)
     ap.add_argument("--no_energy", action="store_true")
     ap.add_argument("--no_contrastive", action="store_true")
     ap.add_argument("--no_nuisance", action="store_true")
