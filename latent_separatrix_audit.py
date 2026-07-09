@@ -1167,6 +1167,10 @@ def fit_predict_logreg(
     return clf.predict_proba(X_test)[:, 1].astype(float).tolist()
 
 
+def pred_column(task: str, feature_set: str) -> str:
+    return f"pred_{task}_{feature_set.replace('+', '_plus_')}"
+
+
 def weighted_bin_auc(rows: Sequence[dict[str, Any]], score_key: str, label_key: str, bin_key: str) -> dict[str, Any]:
     by_bin: dict[Any, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
@@ -1191,6 +1195,52 @@ def weighted_bin_auc(rows: Sequence[dict[str, Any]], score_key: str, label_key: 
         "macro": float(np.mean(vals_arr)),
         "weighted": float(np.sum(vals_arr * w_arr) / np.sum(w_arr)),
         "bins": details,
+    }
+
+
+def grouped_auc(rows: Sequence[dict[str, Any]], score_key: str, label_key: str, group_key: str) -> dict[str, Any]:
+    """Macro/weighted AUC computed only inside groups with both classes.
+
+    This is the diagnostic for "is the signal only using between-problem
+    difficulty, or does it still separate states inside the same problem/chain?".
+    """
+    by_group: dict[Any, list[dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        if score_key not in r:
+            continue
+        by_group[r.get(group_key, "")].append(r)
+    aucs = []
+    weights = []
+    eligible_rows = 0
+    skipped_single_class = 0
+    for rr in by_group.values():
+        y = [int(r[label_key]) for r in rr]
+        if len(set(y)) < 2:
+            skipped_single_class += 1
+            continue
+        auc = safe_auc(y, [float(r[score_key]) for r in rr])
+        if math.isfinite(auc):
+            aucs.append(auc)
+            weights.append(len(rr))
+            eligible_rows += len(rr)
+    if not aucs:
+        return {
+            "groups": int(len(by_group)),
+            "eligible_groups": 0,
+            "eligible_rows": 0,
+            "skipped_single_class": int(skipped_single_class),
+            "macro": float("nan"),
+            "weighted": float("nan"),
+        }
+    a = np.asarray(aucs, dtype=float)
+    w = np.asarray(weights, dtype=float)
+    return {
+        "groups": int(len(by_group)),
+        "eligible_groups": int(len(a)),
+        "eligible_rows": int(eligible_rows),
+        "skipped_single_class": int(skipped_single_class),
+        "macro": float(np.mean(a)),
+        "weighted": float(np.sum(a * w) / np.sum(w)),
     }
 
 
@@ -1318,6 +1368,13 @@ def evaluate_all(
             "hazard_by_len_bin": weighted_bin_auc(first_rows, "hazard", "y_first_error", "len_bin_eval"),
         },
     }
+    single_score_keys = ["hazard", "energy", "latent_norm", "vae_rec_nll", "vae_kl", "vae_dec_unc", "vae_post_unc", "step_len", "pos"]
+    summary["tasks"]["first_error"]["within_chain"] = {
+        k: grouped_auc(first_rows, k, "y_first_error", "chain_id") for k in single_score_keys
+    }
+    summary["tasks"]["first_error"]["within_problem"] = {
+        k: grouped_auc(first_rows, k, "y_first_error", "problem_id") for k in single_score_keys
+    }
     summary["tasks"]["pre_error_future"] = {
         "rows": len(future_rows),
         "pos": int(sum(future_y)),
@@ -1333,12 +1390,22 @@ def evaluate_all(
             "pos": safe_auc(future_y, [r["pos"] for r in future_rows]),
         },
     }
+    summary["tasks"]["pre_error_future"]["within_problem"] = {
+        k: grouped_auc(future_rows, k, "y_chain_error", "problem_id") for k in single_score_keys
+    }
 
     for task in ["first_error", "pre_error_future"]:
         summary["tasks"][task]["models"] = {}
         for fs, pred in oof_preds[task].items():
             summary["tasks"][task]["models"][fs] = safe_auc(oof_labels[task], pred)
             summary["tasks"][task].setdefault("models_auprc", {})[fs] = safe_auprc(oof_labels[task], pred)
+            col = pred_column(task, fs)
+            task_rows = first_rows if task == "first_error" else future_rows
+            label = "y_first_error" if task == "first_error" else "y_chain_error"
+            if any(col in r for r in task_rows):
+                summary["tasks"][task].setdefault("within_problem_models", {})[fs] = grouped_auc(task_rows, col, label, "problem_id")
+                if task == "first_error":
+                    summary["tasks"][task].setdefault("within_chain_models", {})[fs] = grouped_auc(task_rows, col, label, "chain_id")
 
     for key in ["hazard", "energy", "latent_norm", "vae_rec_nll", "vae_kl", "vae_dec_unc", "vae_post_unc"]:
         summary["rank"][key] = rank_first_errors(records, rows, key)
@@ -1428,8 +1495,16 @@ def run_cv(records: list[ChainRecord], layers: list[int], args: argparse.Namespa
         oof_labels["first_error"].extend([int(r["y_first_error"]) for r in test_first])
         oof_labels["pre_error_future"].extend([int(r["y_chain_error"]) for r in test_future])
         for fs in ["controls", "latent", "controls+latent"]:
-            oof_preds["first_error"][fs].extend(fit_predict_logreg(train_first, test_first, "y_first_error", fs))
-            oof_preds["pre_error_future"][fs].extend(fit_predict_logreg(train_future, test_future, "y_chain_error", fs))
+            first_pred = fit_predict_logreg(train_first, test_first, "y_first_error", fs)
+            future_pred = fit_predict_logreg(train_future, test_future, "y_chain_error", fs)
+            oof_preds["first_error"][fs].extend(first_pred)
+            oof_preds["pre_error_future"][fs].extend(future_pred)
+            first_col = pred_column("first_error", fs)
+            future_col = pred_column("pre_error_future", fs)
+            for r, s in zip(test_first, first_pred):
+                r[first_col] = float(s)
+            for r, s in zip(test_future, future_pred):
+                r[future_col] = float(s)
 
         fold_meta.append(
             {
@@ -1494,6 +1569,12 @@ def save_outputs(result: dict[str, Any], args: argparse.Namespace) -> None:
         "vae_kl",
         "vae_dec_unc",
         "vae_post_unc",
+        "pred_first_error_controls",
+        "pred_first_error_latent",
+        "pred_first_error_controls_plus_latent",
+        "pred_pre_error_future_controls",
+        "pred_pre_error_future_latent",
+        "pred_pre_error_future_controls_plus_latent",
     ]
     chain_fields = [
         "chain_index",
@@ -1556,6 +1637,26 @@ def render_console(summary: dict[str, Any]) -> str:
             lines.append(f"  single {k:<14} AUROC {v:.3f}")
         for k, v in sorted(t.get("models", {}).items(), key=lambda kv: (-(kv[1] if math.isfinite(kv[1]) else -1), kv[0])):
             lines.append(f"  model  {k:<16} AUROC {v:.3f}")
+        wp = t.get("within_problem", {})
+        if wp:
+            best = sorted(
+                ((k, d) for k, d in wp.items()),
+                key=lambda kv: (-(kv[1].get("weighted", float("nan")) if math.isfinite(kv[1].get("weighted", float("nan"))) else -1), kv[0]),
+            )[:5]
+            lines.append("  within-problem single weighted AUROC:")
+            for k, d in best:
+                lines.append(
+                    f"    {k:<14} {d['weighted']:.3f} "
+                    f"(eligible_groups={d['eligible_groups']}/{d['groups']})"
+                )
+        wpm = t.get("within_problem_models", {})
+        if wpm:
+            lines.append("  within-problem model weighted AUROC:")
+            for k, d in sorted(wpm.items(), key=lambda kv: (-(kv[1].get("weighted", float("nan")) if math.isfinite(kv[1].get("weighted", float("nan"))) else -1), kv[0])):
+                lines.append(
+                    f"    {k:<16} {d['weighted']:.3f} "
+                    f"(eligible_groups={d['eligible_groups']}/{d['groups']})"
+                )
     lines.append("\nResponse:")
     for k, d in sorted(summary["response"].items(), key=lambda kv: (-(kv[1]["auc"] if math.isfinite(kv[1]["auc"]) else -1), kv[0])):
         lines.append(f"  {k:<16} AUROC {d['auc']:.3f} AUPRC {d['auprc']:.3f}")
@@ -1609,6 +1710,34 @@ def render_markdown(summary: dict[str, Any], args: argparse.Namespace) -> str:
             auprc = t.get("models_auprc", {}).get(k, float("nan"))
             lines.append(f"| model/{k} | {v:.4f} | {auprc:.4f} |")
         lines.append("")
+        if t.get("within_problem"):
+            lines.extend(
+                [
+                    f"#### {task} within-problem AUC",
+                    "",
+                    "| score | macro AUROC | weighted AUROC | eligible groups | groups |",
+                    "|---|---:|---:|---:|---:|",
+                ]
+            )
+            for k, d in sorted(t["within_problem"].items()):
+                lines.append(f"| single/{k} | {d['macro']:.4f} | {d['weighted']:.4f} | {d['eligible_groups']} | {d['groups']} |")
+            for k, d in sorted(t.get("within_problem_models", {}).items()):
+                lines.append(f"| model/{k} | {d['macro']:.4f} | {d['weighted']:.4f} | {d['eligible_groups']} | {d['groups']} |")
+            lines.append("")
+        if task == "first_error" and t.get("within_chain"):
+            lines.extend(
+                [
+                    f"#### {task} within-chain AUC",
+                    "",
+                    "| score | macro AUROC | weighted AUROC | eligible chains | chains |",
+                    "|---|---:|---:|---:|---:|",
+                ]
+            )
+            for k, d in sorted(t["within_chain"].items()):
+                lines.append(f"| single/{k} | {d['macro']:.4f} | {d['weighted']:.4f} | {d['eligible_groups']} | {d['groups']} |")
+            for k, d in sorted(t.get("within_chain_models", {}).items()):
+                lines.append(f"| model/{k} | {d['macro']:.4f} | {d['weighted']:.4f} | {d['eligible_groups']} | {d['groups']} |")
+            lines.append("")
     lines.extend(["## Response", "", "| score | AUROC | AUPRC |", "|---|---:|---:|"])
     for k, d in sorted(summary["response"].items()):
         lines.append(f"| {k} | {d['auc']:.4f} | {d['auprc']:.4f} |")
