@@ -1657,6 +1657,26 @@ def render_console(summary: dict[str, Any]) -> str:
                     f"    {k:<16} {d['weighted']:.3f} "
                     f"(eligible_groups={d['eligible_groups']}/{d['groups']})"
                 )
+        wc = t.get("within_chain", {})
+        if wc:
+            best = sorted(
+                ((k, d) for k, d in wc.items()),
+                key=lambda kv: (-(kv[1].get("weighted", float("nan")) if math.isfinite(kv[1].get("weighted", float("nan"))) else -1), kv[0]),
+            )[:5]
+            lines.append("  within-chain single weighted AUROC:")
+            for k, d in best:
+                lines.append(
+                    f"    {k:<14} {d['weighted']:.3f} "
+                    f"(eligible_chains={d['eligible_groups']}/{d['groups']})"
+                )
+        wcm = t.get("within_chain_models", {})
+        if wcm:
+            lines.append("  within-chain model weighted AUROC:")
+            for k, d in sorted(wcm.items(), key=lambda kv: (-(kv[1].get("weighted", float("nan")) if math.isfinite(kv[1].get("weighted", float("nan"))) else -1), kv[0])):
+                lines.append(
+                    f"    {k:<16} {d['weighted']:.3f} "
+                    f"(eligible_chains={d['eligible_groups']}/{d['groups']})"
+                )
     lines.append("\nResponse:")
     for k, d in sorted(summary["response"].items(), key=lambda kv: (-(kv[1]["auc"] if math.isfinite(kv[1]["auc"]) else -1), kv[0])):
         lines.append(f"  {k:<16} AUROC {d['auc']:.3f} AUPRC {d['auprc']:.3f}")
