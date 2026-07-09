@@ -1056,6 +1056,9 @@ def score_dataset(
                 "problem_id": rec.problem_id,
                 "gold_error_step": rec.gold_error_step,
                 "n_steps": rec.n_steps,
+                "log_n_steps": float(math.log1p(float(rec.n_steps))),
+                "mean_step_len": float(np.mean(rec.token_lengths[:T])),
+                "max_step_len": float(np.max(rec.token_lengths[:T])),
                 "y_chain_error": int(rec.gold_error_step >= 0),
                 "survival_score": survival,
                 "max_hazard": float(np.max(hz)),
@@ -1135,6 +1138,30 @@ def row_latent_features(row: dict[str, Any]) -> list[float]:
     ]
 
 
+def chain_controls(chain: dict[str, Any]) -> list[float]:
+    return [
+        float(chain.get("log_n_steps", math.log1p(float(chain["n_steps"])))),
+        math.log1p(float(chain.get("mean_step_len", 1.0))),
+        math.log1p(float(chain.get("max_step_len", 1.0))),
+    ]
+
+
+def chain_latent_features(chain: dict[str, Any]) -> list[float]:
+    return [
+        float(chain["survival_score"]),
+        float(chain["max_hazard"]),
+        float(chain["mean_hazard"]),
+        float(chain["max_energy"]),
+        float(chain["mean_energy"]),
+        float(chain.get("max_vae_rec_nll", 0.0)),
+        float(chain.get("mean_vae_rec_nll", 0.0)),
+        float(chain.get("max_vae_kl", 0.0)),
+        float(chain.get("mean_vae_kl", 0.0)),
+        float(chain.get("max_vae_dec_unc", 0.0)),
+        float(chain.get("mean_vae_dec_unc", 0.0)),
+    ]
+
+
 def fit_predict_logreg(
     train_rows: list[dict[str, Any]],
     test_rows: list[dict[str, Any]],
@@ -1155,6 +1182,37 @@ def fit_predict_logreg(
     elif feature_set == "controls+latent":
         X_train = np.asarray([row_controls(r) + row_latent_features(r) for r in train_rows], dtype=float)
         X_test = np.asarray([row_controls(r) + row_latent_features(r) for r in test_rows], dtype=float)
+    else:
+        raise KeyError(feature_set)
+    mu = np.nanmean(X_train, axis=0)
+    sd = np.nanstd(X_train, axis=0)
+    sd = np.where(sd < EPS, 1.0, sd)
+    X_train = np.nan_to_num((X_train - mu) / sd, nan=0.0, posinf=0.0, neginf=0.0)
+    X_test = np.nan_to_num((X_test - mu) / sd, nan=0.0, posinf=0.0, neginf=0.0)
+    clf = LogisticRegression(max_iter=1000, class_weight="balanced", solver="liblinear", random_state=0)
+    clf.fit(X_train, y_train)
+    return clf.predict_proba(X_test)[:, 1].astype(float).tolist()
+
+
+def fit_predict_chain_logreg(
+    train_chains: list[dict[str, Any]],
+    test_chains: list[dict[str, Any]],
+    feature_set: str,
+) -> list[float]:
+    if not HAVE_SKLEARN or not test_chains:
+        return [float("nan")] * len(test_chains)
+    y_train = np.asarray([int(c["y_chain_error"]) for c in train_chains], dtype=int)
+    if y_train.size == 0 or np.unique(y_train).size < 2:
+        return [float("nan")] * len(test_chains)
+    if feature_set == "controls":
+        X_train = np.asarray([chain_controls(c) for c in train_chains], dtype=float)
+        X_test = np.asarray([chain_controls(c) for c in test_chains], dtype=float)
+    elif feature_set == "latent":
+        X_train = np.asarray([chain_latent_features(c) for c in train_chains], dtype=float)
+        X_test = np.asarray([chain_latent_features(c) for c in test_chains], dtype=float)
+    elif feature_set == "controls+latent":
+        X_train = np.asarray([chain_controls(c) + chain_latent_features(c) for c in train_chains], dtype=float)
+        X_test = np.asarray([chain_controls(c) + chain_latent_features(c) for c in test_chains], dtype=float)
     else:
         raise KeyError(feature_set)
     mu = np.nanmean(X_train, axis=0)
@@ -1343,6 +1401,9 @@ def evaluate_all(
         "tasks": {},
         "rank": {},
         "response": {},
+        "response_models": {},
+        "response_within_problem": {},
+        "response_within_problem_models": {},
         "latent_separability": latent_separability(rows),
     }
     summary["tasks"]["first_error"] = {
@@ -1429,6 +1490,15 @@ def evaluate_all(
             "auc": safe_auc(y_chain, [c[key] for c in chains]),
             "auprc": safe_auprc(y_chain, [c[key] for c in chains]),
         }
+        summary["response_within_problem"][key] = grouped_auc(chains, key, "y_chain_error", "problem_id")
+    for fs, pred in oof_preds.get("response", {}).items():
+        summary["response_models"][fs] = {
+            "auc": safe_auc(oof_labels.get("response", []), pred),
+            "auprc": safe_auprc(oof_labels.get("response", []), pred),
+        }
+        col = pred_column("response", fs)
+        if any(col in c for c in chains):
+            summary["response_within_problem_models"][fs] = grouped_auc(chains, col, "y_chain_error", "problem_id")
     return summary
 
 
@@ -1456,10 +1526,11 @@ def run_cv(records: list[ChainRecord], layers: list[int], args: argparse.Namespa
     all_rows: list[dict[str, Any]] = []
     all_chain_scores: dict[int, dict[str, Any]] = {}
     oof_preds: dict[str, dict[str, list[float]]] = {
+        "response": defaultdict(list),
         "first_error": defaultdict(list),
         "pre_error_future": defaultdict(list),
     }
-    oof_labels: dict[str, list[int]] = {"first_error": [], "pre_error_future": []}
+    oof_labels: dict[str, list[int]] = {"response": [], "first_error": [], "pre_error_future": []}
     fold_meta = []
 
     for fold_id, (train_idx, test_idx) in enumerate(folds):
@@ -1480,31 +1551,40 @@ def run_cv(records: list[ChainRecord], layers: list[int], args: argparse.Namespa
         test_ds = ChainTensorDataset(records, test_idx, features, nuisance_edges, args.pos_bins)
         model = train_model(train_ds, projector.dim, args, device)
 
-        train_rows, _ = score_dataset(model, train_ds, records, device, args.eval_batch_size)
+        train_rows, train_chains = score_dataset(model, train_ds, records, device, args.eval_batch_size)
         test_rows, test_chains = score_dataset(model, test_ds, records, device, args.eval_batch_size)
         for r in test_rows:
             r["fold"] = fold_id
-        all_rows.extend(test_rows)
-        all_chain_scores.update(test_chains)
 
         train_first = [r for r in train_rows if int(r["is_prefix_or_first"]) == 1]
         test_first = [r for r in test_rows if int(r["is_prefix_or_first"]) == 1]
         train_future = [r for r in train_rows if int(r["is_pre_or_correct"]) == 1]
         test_future = [r for r in test_rows if int(r["is_pre_or_correct"]) == 1]
+        train_chain_list = [train_chains[k] for k in sorted(train_chains)]
+        test_chain_list = [test_chains[k] for k in sorted(test_chains)]
 
+        oof_labels["response"].extend([int(c["y_chain_error"]) for c in test_chain_list])
         oof_labels["first_error"].extend([int(r["y_first_error"]) for r in test_first])
         oof_labels["pre_error_future"].extend([int(r["y_chain_error"]) for r in test_future])
         for fs in ["controls", "latent", "controls+latent"]:
+            response_pred = fit_predict_chain_logreg(train_chain_list, test_chain_list, fs)
             first_pred = fit_predict_logreg(train_first, test_first, "y_first_error", fs)
             future_pred = fit_predict_logreg(train_future, test_future, "y_chain_error", fs)
+            oof_preds["response"][fs].extend(response_pred)
             oof_preds["first_error"][fs].extend(first_pred)
             oof_preds["pre_error_future"][fs].extend(future_pred)
+            response_col = pred_column("response", fs)
             first_col = pred_column("first_error", fs)
             future_col = pred_column("pre_error_future", fs)
+            for c, s in zip(test_chain_list, response_pred):
+                c[response_col] = float(s)
             for r, s in zip(test_first, first_pred):
                 r[first_col] = float(s)
             for r, s in zip(test_future, future_pred):
                 r[future_col] = float(s)
+
+        all_rows.extend(test_rows)
+        all_chain_scores.update(test_chains)
 
         fold_meta.append(
             {
@@ -1594,6 +1674,9 @@ def save_outputs(result: dict[str, Any], args: argparse.Namespace) -> None:
         "mean_vae_kl",
         "max_vae_dec_unc",
         "mean_vae_dec_unc",
+        "pred_response_controls",
+        "pred_response_latent",
+        "pred_response_controls_plus_latent",
     ]
     write_csv(out_dir / f"{tag}_latent_separatrix_rows.csv", rows, row_fields)
     write_csv(out_dir / f"{tag}_latent_separatrix_chains.csv", chain_scores, chain_fields)
@@ -1630,6 +1713,32 @@ def render_console(summary: dict[str, Any]) -> str:
     if "layers" in summary:
         lines.append(f"layer positions {summary['layers'].get('layer_positions')}")
         lines.append(f"layer ids {summary['layers'].get('layer_ids')}")
+    lines.append("\nResponse diagnosis (primary):")
+    for k, d in sorted(summary["response"].items(), key=lambda kv: (-(kv[1]["auc"] if math.isfinite(kv[1]["auc"]) else -1), kv[0])):
+        lines.append(f"  raw    {k:<24} AUROC {d['auc']:.3f} AUPRC {d['auprc']:.3f}")
+    for k, d in sorted(summary.get("response_models", {}).items(), key=lambda kv: (-(kv[1]["auc"] if math.isfinite(kv[1]["auc"]) else -1), kv[0])):
+        lines.append(f"  model  {k:<24} AUROC {d['auc']:.3f} AUPRC {d['auprc']:.3f}")
+    rwp = summary.get("response_within_problem", {})
+    if rwp:
+        best = sorted(
+            ((k, d) for k, d in rwp.items()),
+            key=lambda kv: (-(kv[1].get("weighted", float("nan")) if math.isfinite(kv[1].get("weighted", float("nan"))) else -1), kv[0]),
+        )[:5]
+        lines.append("  within-problem raw weighted AUROC:")
+        for k, d in best:
+            lines.append(
+                f"    {k:<24} {d['weighted']:.3f} "
+                f"(eligible_groups={d['eligible_groups']}/{d['groups']})"
+            )
+    rwpm = summary.get("response_within_problem_models", {})
+    if rwpm:
+        lines.append("  within-problem model weighted AUROC:")
+        for k, d in sorted(rwpm.items(), key=lambda kv: (-(kv[1].get("weighted", float("nan")) if math.isfinite(kv[1].get("weighted", float("nan"))) else -1), kv[0])):
+            lines.append(
+                f"    {k:<24} {d['weighted']:.3f} "
+                f"(eligible_groups={d['eligible_groups']}/{d['groups']})"
+            )
+    lines.append("\nStep diagnostics (secondary; first-error prefix-only is position-confounded):")
     for task in ["first_error", "pre_error_future"]:
         t = summary["tasks"][task]
         lines.append(f"\nTask {task}: rows {t['rows']} pos {t['pos']}")
@@ -1677,9 +1786,6 @@ def render_console(summary: dict[str, Any]) -> str:
                     f"    {k:<16} {d['weighted']:.3f} "
                     f"(eligible_chains={d['eligible_groups']}/{d['groups']})"
                 )
-    lines.append("\nResponse:")
-    for k, d in sorted(summary["response"].items(), key=lambda kv: (-(kv[1]["auc"] if math.isfinite(kv[1]["auc"]) else -1), kv[0])):
-        lines.append(f"  {k:<16} AUROC {d['auc']:.3f} AUPRC {d['auprc']:.3f}")
     lines.append("\nRanks:")
     for k, d in summary["rank"].items():
         lines.append(f"  {k:<12} n={d['n']} top1={d['top1']:.3f} mean_rank={d['mean_rank']:.2f}")
@@ -1758,9 +1864,25 @@ def render_markdown(summary: dict[str, Any], args: argparse.Namespace) -> str:
             for k, d in sorted(t.get("within_chain_models", {}).items()):
                 lines.append(f"| model/{k} | {d['macro']:.4f} | {d['weighted']:.4f} | {d['eligible_groups']} | {d['groups']} |")
             lines.append("")
-    lines.extend(["## Response", "", "| score | AUROC | AUPRC |", "|---|---:|---:|"])
+    lines.extend(["## Response Diagnosis (Primary)", "", "| score | AUROC | AUPRC |", "|---|---:|---:|"])
     for k, d in sorted(summary["response"].items()):
-        lines.append(f"| {k} | {d['auc']:.4f} | {d['auprc']:.4f} |")
+        lines.append(f"| raw/{k} | {d['auc']:.4f} | {d['auprc']:.4f} |")
+    for k, d in sorted(summary.get("response_models", {}).items()):
+        lines.append(f"| model/{k} | {d['auc']:.4f} | {d['auprc']:.4f} |")
+    if summary.get("response_within_problem"):
+        lines.extend(
+            [
+                "",
+                "### Response Within-Problem AUC",
+                "",
+                "| score | macro AUROC | weighted AUROC | eligible groups | groups |",
+                "|---|---:|---:|---:|---:|",
+            ]
+        )
+        for k, d in sorted(summary["response_within_problem"].items()):
+            lines.append(f"| raw/{k} | {d['macro']:.4f} | {d['weighted']:.4f} | {d['eligible_groups']} | {d['groups']} |")
+        for k, d in sorted(summary.get("response_within_problem_models", {}).items()):
+            lines.append(f"| model/{k} | {d['macro']:.4f} | {d['weighted']:.4f} | {d['eligible_groups']} | {d['groups']} |")
     lines.extend(["", "## First-Error Rank", "", "| score | n | top1 | mean rank | mean percentile |", "|---|---:|---:|---:|---:|"])
     for k, d in summary["rank"].items():
         lines.append(f"| {k} | {d['n']} | {d['top1']:.4f} | {d['mean_rank']:.4f} | {d['mean_percentile']:.4f} |")
