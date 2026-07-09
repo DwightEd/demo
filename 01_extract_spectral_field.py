@@ -64,7 +64,7 @@ def load_processbench_subset(dataset_name, subset, n_correct, n_error, seed=42):
     ds = load_dataset(dataset_name, split=subset)
 
     correct = [ex for ex in ds if ex.get("label", -1) == -1]
-    error = [ex for ex in ds if ex.get("labe0l", -1) >= 0]
+    error = [ex for ex in ds if ex.get("label", -1) >= 0]
     print(f"  dataset: {len(correct)} correct, {len(error)} error")
 
     rng = np.random.default_rng(seed)
@@ -565,8 +565,10 @@ def main():
 
             rows.append({
                 "id": str(ex.get("id", len(rows))),
+                "problem": str(ex.get("problem", "")),
                 "label": mapped_label,
                 "n_steps": int(M_D.shape[0]),
+                "steps_text": np.array([steps[int(k)] for k in kept_steps], dtype=object),
                 "M_D": M_D.astype(np.float32),
                 "M_V": M_V.astype(np.float32),
                 "M_C": M_C.astype(np.float32),
@@ -587,8 +589,10 @@ def main():
 
     save_dict = dict(
         ids=np.array([r["id"] for r in rows], dtype=object),
+        problems=np.array([r["problem"] for r in rows], dtype=object),
         labels=np.array([r["label"] for r in rows], dtype=np.int32),
         n_steps=np.array([r["n_steps"] for r in rows], dtype=np.int32),
+        steps_text=np.array([r["steps_text"] for r in rows], dtype=object),
         M_D=np.array([r["M_D"] for r in rows], dtype=object),
         M_V=np.array([r["M_V"] for r in rows], dtype=object),
         M_C=np.array([r["M_C"] for r in rows], dtype=object),

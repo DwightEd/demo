@@ -5,3 +5,6 @@ __pycache__/
 /data/
 outputs/
 .ipynb_checkpoints/
+tmp_*.txt
+md/literature/**/texts/
+md/literature/**/tables/*extracted_sections*
