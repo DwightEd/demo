@@ -1,0 +1,38 @@
+﻿C:\Users\613\Desktop\papers\推理\15744_TokUR_Token_Level_Uncert.pdf
+C:\Users\613\Desktop\papers\推理\ADynamicalSystemsViewvia.pdf
+C:\Users\613\Desktop\papers\推理\Alvarez和Baheri - 2026 - Where Does Reasoning Break Step-Level Hallucination Detection via Hidden-State Transport Geometry.pdf
+C:\Users\613\Desktop\papers\推理\An Isotropic Approach to Efficient Uncertainty.pdf
+C:\Users\613\Desktop\papers\推理\Atheory of multineuronal dimensionality, dynamics and measurement.pdf
+C:\Users\613\Desktop\papers\推理\DYNAMICS WITHIN LATENT CHAIN-OF-THOUGHT.pdf
+C:\Users\613\Desktop\papers\推理\EDIS-Diagnosing LLM Reasoning via Entropy Dynamics.pdf
+C:\Users\613\Desktop\papers\推理\Effective Reasoning Chains Reduce Intrinsic Dimensionality.pdf
+C:\Users\613\Desktop\papers\推理\Entropy Phase Transitions.pdf
+C:\Users\613\Desktop\papers\推理\ENTROPY TRAJECTORY SHAPE PREDICTS LLM REASONING.pdf
+C:\Users\613\Desktop\papers\推理\GeoFaith-A Spatio-Temporal Dual View of Faithful Chain-of-Thought.pdf
+C:\Users\613\Desktop\papers\推理\Geometry of Reason Spectral Signatures of Valid Mathematical Reasoning.pdf
+C:\Users\613\Desktop\papers\推理\Hallucination Basins.pdf
+C:\Users\613\Desktop\papers\推理\Hidden Error Awareness in Chain-of-Thought Reasoning-The Signal Is Diagnostic, Not Causal.pdf
+C:\Users\613\Desktop\papers\推理\How Language Models Fail-Token-Level Signatures of Committed and Persistent Reasoning Failures.pdf
+C:\Users\613\Desktop\papers\推理\HowLLMsDetectandCorrect Their Own Errors-The Role of Internal Confidence Signals.pdf
+C:\Users\613\Desktop\papers\推理\KnowMore, KnowClearer.pdf
+C:\Users\613\Desktop\papers\推理\Large Vision–Language Models Get Lost in Attention.pdf
+C:\Users\613\Desktop\papers\推理\Latent Spatio-Temporal Chain-of-Thought for Robotic.pdf
+C:\Users\613\Desktop\papers\推理\Limited Reasoning Space.pdf
+C:\Users\613\Desktop\papers\推理\LLMReasoning as Trajectories.pdf
+C:\Users\613\Desktop\papers\推理\Lyapunov Probes for Hallucination Detection in Large Foundation Models.pdf
+C:\Users\613\Desktop\papers\推理\Muon Dynamics as a Spectral Wasserstein Flow.pdf
+C:\Users\613\Desktop\papers\推理\Reasoning emerges from constrained inference.pdf
+C:\Users\613\Desktop\papers\推理\Reasoning Fails Where Step Flow Breaks.pdf
+C:\Users\613\Desktop\papers\推理\Reasoning Models Don’t Just Think Longer,.pdf
+C:\Users\613\Desktop\papers\推理\REVOLUTIONIZING REINFORCEMENT LEARNING.pdf
+C:\Users\613\Desktop\papers\推理\The Origins of Representation Manifolds in Large.pdf
+C:\Users\613\Desktop\papers\推理\The Shape of Reasoning - Topological Analysis of.pdf
+C:\Users\613\Desktop\papers\推理\The Spectral Geometry of Thought Phase Transitions, Instruction Reversal, Token-Level Dynamics, and Perfect Correctness Prediction in How Transformers Reason.pdf
+C:\Users\613\Desktop\papers\推理\TheGeometryofTruth.pdf
+C:\Users\613\Desktop\papers\推理\TowardsLong-HorizonInterpretability.pdf
+C:\Users\613\Desktop\papers\推理\Tracing Uncertainty in Language Model Reasoning.pdf
+C:\Users\613\Desktop\papers\推理\Truth as a Trajectory.pdf
+C:\Users\613\Desktop\papers\推理\Two Pathways to Truthfulness-On the Intrinsic.pdf
+C:\Users\613\Desktop\papers\推理\VERIFYING CHAIN-OF-THOUGHT REASONING VIA ITS.pdf
+C:\Users\613\Desktop\papers\推理\What do Geometric Hallucination Detection Metrics Actually Measure.pdf
+C:\Users\613\Desktop\papers\推理\WhereDoesReasoningBreak.pdf

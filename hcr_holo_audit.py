@@ -176,8 +176,11 @@ def load_records(path: str | Path, mode: str, max_chains: int | None = None) -> 
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(
-            f"{p} does not exist. For ProcessBench, first extract with "
-            "`01_extract_spectral_field.py --step_vectors --sv_modes step_exp --store_vectors`."
+            f"{p} does not exist. Existing full-trace ProcessBench files are usually "
+            "`data/features/full_gsm8k.npz`, `data/features/full_math.npz`, or "
+            "`data/features/full_omnimath.npz` on the GPU box. If you want a new "
+            "01_extract_spectral_field.py extraction, use `data/<subset>_sv.npz` "
+            "with `--step_vectors --sv_modes step_exp --store_vectors`."
         )
     z = np.load(p, allow_pickle=True)
     vector_key = pick_vector_key(z, mode)

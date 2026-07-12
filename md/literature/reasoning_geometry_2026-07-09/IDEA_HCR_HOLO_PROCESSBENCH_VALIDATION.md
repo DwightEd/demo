@@ -139,7 +139,32 @@ This is the part that can produce a stronger story than AUC alone: the model may
 
 ## Required ProcessBench Data
 
-The validation script expects a ProcessBench extraction with raw step vectors:
+The canonical existing ProcessBench files are:
+
+```text
+data/features/full_gsm8k.npz
+data/features/full_math.npz
+data/features/full_omnimath.npz
+```
+
+On the GPU box the full paths are:
+
+```text
+/gz-data/research/demo/data/features/full_gsm8k.npz
+/gz-data/research/demo/data/features/full_math.npz
+/gz-data/research/demo/data/features/full_omnimath.npz
+```
+
+These files already contain `stepvec` shaped approximately `(T, 8, 4096)`, so the first HCR-Holo validation can run directly on them:
+
+```bash
+python hcr_holo_audit.py \
+  data/features/full_gsm8k.npz \
+  --output_dir outputs/hcr_holo_full_gsm8k \
+  --tag full_gsm8k
+```
+
+If a new `01_extract_spectral_field.py` extraction is needed, follow the existing step-vector pipeline naming convention:
 
 ```bash
 python 01_extract_spectral_field.py \
@@ -152,7 +177,7 @@ python 01_extract_spectral_field.py \
   --step_vectors \
   --sv_modes step_exp \
   --store_vectors \
-  --output data/processbench_gsm8k_stepvec.npz
+  --output data/gsm8k_sv.npz
 ```
 
 The key fields are:
@@ -162,7 +187,7 @@ The key fields are:
 - `sv_vec_step_exp`: object array of hidden-state step vectors shaped `(T, L, d)`.
 - optional `ids`, `kept_steps`, `n_steps`, and `sv_pr_step_exp`.
 
-The script also supports older files with `stepvec` and `gold_error_step`.
+The script also supports canonical full-trace files with `stepvec` and `gold_error_step`.
 
 ## First Implementation
 

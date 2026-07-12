@@ -1,0 +1,229 @@
+# arXiv API Search: Reasoning Geometry / Manifolds / Dynamics
+
+- Created: 2026-07-09T01:51:33.064614
+- Queries: 10
+- Unique records: 28
+
+## 1. Reasoning emerges from constrained inference manifolds in large language models
+- arXiv: `2605.08142v1`
+- Published: 2026-05-02T10:41:20Z
+- Authors: Yanbiao Ma, Fei Luo, Linfeng Zhang, Chuangxin Zhao, Mingxuan Wang, Yinan Wu, Zhe Qian, Yang Lu, Long Chen, Zhao Cao, Xiaoshuai Hao, Ji-Rong Wen
+- Query hit: `all:"reasoning emerges" AND all:manifold AND cat:cs.CL`
+- Links: {'text/html': 'https://arxiv.org/abs/2605.08142v1', 'pdf': 'https://arxiv.org/pdf/2605.08142v1'}
+- Abstract: Reasoning in large language models is predominantly evaluated through labeled benchmarks, conflating task performance with the quality of internal inference. Here we study reasoning as an intrinsic dynamical process by examining the evolution of internal representations during inference. We find that inference-time dynamics consistently self-organize into low-dimensional manifolds embedded within high-dimensional representation spaces. we find that such geometric compression, although pervasive, is not sufficient for stable or reliable reasoning. Instead, effective reasoning dynamics emerge within a constrained structural regime characterized by three conditions: adequate representational expressivity, spontaneous manifold compression, and preservation of non-degenerate information volume within the compressed subspace. Models outside this regime exhibit characteristic pathological inference dynamics. Based on these insights, we introduce a unified, label-free diagnostic computed solely from internal dynamics. These findings suggest that reasoning in LLMs is fundamentally governed by geometric and informational constraints, offering a complementary framework to benchmark-centric as...
+
+## 2. Geometry of Decision Making in Language Models
+- arXiv: `2511.20315v1`
+- Published: 2025-11-25T13:52:46Z
+- Authors: Abhinav Joshi, Divyanshu Bhatt, Ashutosh Modi
+- Query hit: `all:"reasoning emerges" AND all:manifold AND cat:cs.CL`
+- Links: {'text/html': 'https://arxiv.org/abs/2511.20315v1', 'pdf': 'https://arxiv.org/pdf/2511.20315v1'}
+- Abstract: Large Language Models (LLMs) show strong generalization across diverse tasks, yet the internal decision-making processes behind their predictions remain opaque. In this work, we study the geometry of hidden representations in LLMs through the lens of \textit{intrinsic dimension} (ID), focusing specifically on decision-making dynamics in a multiple-choice question answering (MCQA) setting. We perform a large-scale study, with 28 open-weight transformer models and estimate ID across layers using multiple estimators, while also quantifying per-layer performance on MCQA tasks. Our findings reveal a consistent ID pattern across models: early layers operate on low-dimensional manifolds, middle layers expand this space, and later layers compress it again, converging to decision-relevant representations. Together, these results suggest LLMs implicitly learn to project linguistic inputs onto structured, low-dimensional manifolds aligned with task-specific decisions, providing new geometric insights into how generalization and reasoning emerge in language models.
+
+## 3. RubricEM: Meta-RL with Rubric-guided Policy Decomposition beyond Verifiable Rewards
+- arXiv: `2605.10899v1`
+- Published: 2026-05-11T17:40:38Z
+- Authors: Gaotang Li, Bhavana Dalvi Mishra, Zifeng Wang, Jun Yan, Yanfei Chen, Chun-Liang Li, Long T. Le, Rujun Han, George Lee, Hanghang Tong, Chen-Yu Lee, Tomas Pfister
+- Query hit: `all:"truth as a trajectory"`
+- Links: {'text/html': 'https://arxiv.org/abs/2605.10899v1', 'pdf': 'https://arxiv.org/pdf/2605.10899v1'}
+- Abstract: Training deep research agents, namely systems that plan, search, evaluate evidence, and synthesize long-form reports, pushes reinforcement learning beyond the regime of verifiable rewards. Their outputs lack ground-truth answers, their trajectories span many tool-augmented decisions, and standard post-training offers little mechanism for turning past attempts into reusable experience. In this work, we argue that rubrics should serve not merely as final-answer evaluators, but as the shared interface that structures policy execution, judge feedback, and agent memory. Based on this view, we introduce RubricEM, a rubric-guided reinforcement learning framework that combines stagewise policy decomposition with reflection-based meta-policy evolution. RubricEM first makes research trajectories stage-aware by conditioning planning, evidence gathering, review, and synthesis on self-generated rubrics. It then assigns credit with Stage-Structured GRPO, which uses stagewise rubric judgments to provide denser semantic feedback for long-horizon optimization. In parallel, RubricEM trains a shared-backbone reflection meta-policy that distills judged trajectories into reusable rubric-grounded guidan...
+
+## 4. Toward Consistent World Models with Multi-Token Prediction and Latent Semantic Enhancement
+- arXiv: `2604.06155v2`
+- Published: 2026-04-07T17:54:22Z
+- Authors: Qimin Zhong, Hao Liao, Haiming Qin, Mingyang Zhou, Rui Mao, Wei Chen, Naipeng Chao
+- Query hit: `all:"truth as a trajectory"`
+- Links: {'text/html': 'https://arxiv.org/abs/2604.06155v2', 'pdf': 'https://arxiv.org/pdf/2604.06155v2'}
+- Abstract: Whether Large Language Models (LLMs) develop coherent internal world models remains a core debate. While conventional Next-Token Prediction (NTP) focuses on one-step-ahead supervision, Multi-Token Prediction (MTP) has shown promise in learning more structured representations. In this work, we provide a theoretical perspective analyzing the gradient inductive bias of MTP, supported by empirical evidence, showing that MTP promotes the convergence toward internal belief states by inducing representational contractivity via gradient coupling. However, we reveal that standard MTP often suffers from structural hallucinations, where discrete token supervision encourages illegal shortcuts in latent space that violate environmental constraints. To address this, we propose a novel method Latent Semantic Enhancement MTP (LSE-MTP), which anchors predictions to ground-truth hidden state trajectories. Experiments on synthetic graphs and real-world Manhattan Taxi Ride show that LSE-MTP effectively bridges the gap between discrete tokens and continuous state representations, enhancing representation alignment, reducing structural hallucinations, and improving robustness to perturbations.
+
+## 5. Truth as a Trajectory: What Internal Representations Reveal About Large Language Model Reasoning
+- arXiv: `2603.01326v1`
+- Published: 2026-03-01T23:52:10Z
+- Authors: Hamed Damirchi, Ignacio Meza De la Jara, Ehsan Abbasnejad, Afshar Shamsi, Zhen Zhang, Javen Shi
+- Query hit: `all:"truth as a trajectory"`
+- Links: {'text/html': 'https://arxiv.org/abs/2603.01326v1', 'pdf': 'https://arxiv.org/pdf/2603.01326v1'}
+- Abstract: Existing explainability methods for Large Language Models (LLMs) typically treat hidden states as static points in activation space, assuming that correct and incorrect inferences can be separated using representations from an individual layer. However, these activations are saturated with polysemantic features, leading to linear probes learning surface-level lexical patterns rather than underlying reasoning structures. We introduce Truth as a Trajectory (TaT), which models the transformer inference as an unfolded trajectory of iterative refinements, shifting analysis from static activations to layer-wise geometric displacement. By analyzing displacement of representations across layers, TaT uncovers geometric invariants that distinguish valid reasoning from spurious behavior. We evaluate TaT across dense and Mixture-of-Experts (MoE) architectures on benchmarks spanning commonsense reasoning, question answering, and toxicity detection. Without access to the activations themselves and using only changes in activations across layers, we show that TaT effectively mitigates reliance on static lexical confounds, outperforming conventional probing, and establishes trajectory analysis as ...
+
+## 6. MTFlow: Time-Conditioned Flow Matching for Microtubule Segmentation in Noisy Microscopy Images
+- arXiv: `2601.14841v1`
+- Published: 2026-01-21T10:14:50Z
+- Authors: Sidi Mohamed Sid El Moctar, Achraf Ait Laydi, Yousef El Mourabit, Hélène Bouvrais
+- Query hit: `all:"truth as a trajectory"`
+- Links: {'text/html': 'https://arxiv.org/abs/2601.14841v1', 'pdf': 'https://arxiv.org/pdf/2601.14841v1'}
+- Abstract: Microtubules are cytoskeletal filaments that play essential roles in many cellular processes and are key therapeutic targets in several diseases. Accurate segmentation of microtubule networks is critical for studying their organization and dynamics but remains challenging due to filament curvature, dense crossings, and image noise. We present MTFlow, a novel time-conditioned flow-matching model for microtubule segmentation. Unlike conventional U-Net variants that predict masks in a single pass, MTFlow learns vector fields that iteratively transport noisy masks toward the ground truth, enabling interpretable, trajectory-based refinement. Our architecture combines a U-Net backbone with temporal embeddings, allowing the model to capture the dynamics of uncertainty resolution along filament boundaries. We trained and evaluated MTFlow on synthetic and real microtubule datasets and assessed its generalization capability on public biomedical datasets of curvilinear structures such as retinal blood vessels and nerves. MTFlow achieves competitive segmentation accuracy comparable to state-of-the-art models, offering a powerful and time-efficient tool for filamentous structure analysis with m...
+
+## 7. ObjectForesight: Predicting Future 3D Object Trajectories from Human Videos
+- arXiv: `2601.05237v2`
+- Published: 2026-01-08T18:58:08Z
+- Authors: Rustin Soraki, Homanga Bharadhwaj, Ali Farhadi, Roozbeh Mottaghi
+- Query hit: `all:"truth as a trajectory"`
+- Links: {'text/html': 'https://arxiv.org/abs/2601.05237v2', 'pdf': 'https://arxiv.org/pdf/2601.05237v2'}
+- Abstract: Humans can effortlessly anticipate how objects might move or change through interaction--imagining a cup being lifted, a knife slicing, or a lid being closed. We aim to endow computational systems with a similar ability to predict plausible future object motions directly from passive visual observation. We introduce ObjectForesight, a 3D object-centric dynamics model that predicts future 6-DoF poses and trajectories of rigid objects from short egocentric video sequences. Unlike conventional world or dynamics models that operate in pixel or latent space, ObjectForesight represents the world explicitly in 3D at the object level, enabling geometrically grounded and temporally coherent predictions that capture object affordances and trajectories. To train such a model at scale, we leverage recent advances in segmentation, mesh reconstruction, and 3D pose estimation to curate a dataset of 2 million plus short clips with pseudo-ground-truth 3D object trajectories. Through extensive experiments, we show that ObjectForesight achieves significant gains in accuracy, geometric consistency, and generalization to unseen objects and scenes, establishing a scalable framework for learning physical...
+
+## 8. Towards Generalizable Safety in Crowd Navigation via Conformal Uncertainty Handling
+- arXiv: `2508.05634v1`
+- Published: 2025-08-07T17:59:43Z
+- Authors: Jianpeng Yao, Xiaopan Zhang, Yu Xia, Zejin Wang, Amit K. Roy-Chowdhury, Jiachen Li
+- Query hit: `all:"truth as a trajectory"`
+- Links: {'text/html': 'https://arxiv.org/abs/2508.05634v1', 'pdf': 'https://arxiv.org/pdf/2508.05634v1'}
+- Abstract: Mobile robots navigating in crowds trained using reinforcement learning are known to suffer performance degradation when faced with out-of-distribution scenarios. We propose that by properly accounting for the uncertainties of pedestrians, a robot can learn safe navigation policies that are robust to distribution shifts. Our method augments agent observations with prediction uncertainty estimates generated by adaptive conformal inference, and it uses these estimates to guide the agent's behavior through constrained reinforcement learning. The system helps regulate the agent's actions and enables it to adapt to distribution shifts. In the in-distribution setting, our approach achieves a 96.93% success rate, which is over 8.80% higher than the previous state-of-the-art baselines with over 3.72 times fewer collisions and 2.43 times fewer intrusions into ground-truth human future trajectories. In three out-of-distribution scenarios, our method shows much stronger robustness when facing distribution shifts in velocity variations, policy changes, and transitions from individual to group dynamics. We deploy our method on a real robot, and experiments show that the robot makes safe and rob...
+
+## 9. SoNIC: Safe Social Navigation with Adaptive Conformal Inference and Constrained Reinforcement Learning
+- arXiv: `2407.17460v2`
+- Published: 2024-07-24T17:57:21Z
+- Authors: Jianpeng Yao, Xiaopan Zhang, Yu Xia, Zejin Wang, Amit K. Roy-Chowdhury, Jiachen Li
+- Query hit: `all:"truth as a trajectory"`
+- Links: {'text/html': 'https://arxiv.org/abs/2407.17460v2', 'pdf': 'https://arxiv.org/pdf/2407.17460v2'}
+- Abstract: Reinforcement learning (RL) enables social robots to generate trajectories without relying on human-designed rules or interventions, making it generally more effective than rule-based systems in adapting to complex, dynamic real-world scenarios. However, social navigation is a safety-critical task that requires robots to avoid collisions with pedestrians, whereas existing RL-based solutions often fall short of ensuring safety in complex environments. In this paper, we propose SoNIC, which to the best of our knowledge is the first algorithm that integrates adaptive conformal inference (ACI) with constrained reinforcement learning (CRL) to enable safe policy learning for social navigation. Specifically, our method not only augments RL observations with ACI-generated nonconformity scores, which inform the agent of the quantified uncertainty but also employs these uncertainty estimates to effectively guide the behaviors of RL agents by using constrained reinforcement learning. This integration regulates the behaviors of RL agents and enables them to handle safety-critical situations. On the standard CrowdNav benchmark, our method achieves a success rate of 96.93%, which is 11.67% highe...
+
+## 10. What's Wrong with the Absolute Trajectory Error?
+- arXiv: `2212.05376v5`
+- Published: 2022-12-10T23:48:27Z
+- Authors: Seong Hun Lee, Javier Civera
+- Query hit: `all:"truth as a trajectory"`
+- Links: {'text/html': 'https://arxiv.org/abs/2212.05376v5', 'pdf': 'https://arxiv.org/pdf/2212.05376v5'}
+- Abstract: One of the limitations of the commonly used Absolute Trajectory Error (ATE) is that it is highly sensitive to outliers. As a result, in the presence of just a few outliers, it often fails to reflect the varying accuracy as the inlier trajectory error or the number of outliers varies. In this work, we propose an alternative error metric for evaluating the accuracy of the reconstructed camera trajectory. Our metric, named Discernible Trajectory Error (DTE), is computed in five steps: (1) Shift the ground-truth and estimated trajectories such that both of their geometric medians are located at the origin. (2) Rotate the estimated trajectory such that it minimizes the sum of geodesic distances between the corresponding camera orientations. (3) Scale the estimated trajectory such that the median distance of the cameras to their geometric median is the same as that of the ground truth. (4) Compute, winsorize and normalize the distances between the corresponding cameras. (5) Obtain the DTE by taking the average of the mean and the root-mean-square (RMS) of the resulting distances. This metric is an attractive alternative to the ATE, in that it is capable of discerning the varying trajecto...
+
+## 11. A time-weighted metric for sets of trajectories to assess multi-object tracking algorithms
+- arXiv: `2110.13444v1`
+- Published: 2021-10-26T07:15:52Z
+- Authors: Ángel F. García-Fernández, Abu Sajana Rahmathullah, Lennart Svensson
+- Query hit: `all:"truth as a trajectory"`
+- Links: {'text/html': 'https://arxiv.org/abs/2110.13444v1', 'pdf': 'https://arxiv.org/pdf/2110.13444v1'}
+- Abstract: This paper proposes a metric for sets of trajectories to evaluate multi-object tracking algorithms that includes time-weighted costs for localisation errors of properly detected targets, for false targets, missed targets and track switches. The proposed metric extends the metric in [1] by including weights to the costs associated to different time steps. The time-weighted costs increase the flexibility of the metric [1] to fit more applications and user preferences. We first introduce a metric based on multi-dimensional assignments, and then its linear programming relaxation, which is computable in polynomial time and is also a metric. The metrics can also be extended to metrics on random finite sets of trajectories to evaluate and rank algorithms across different scenarios, each with a ground truth set of trajectories.
+
+## 12. Introducing a Generative Adversarial Network Model for Lagrangian Trajectory Simulation
+- arXiv: `1901.03960v1`
+- Published: 2019-01-13T11:06:34Z
+- Authors: Jingwei Gan, Pai Liu, Rajan K. Chakrabarty
+- Query hit: `all:"truth as a trajectory"`
+- Links: {'text/html': 'https://arxiv.org/abs/1901.03960v1', 'pdf': 'https://arxiv.org/pdf/1901.03960v1'}
+- Abstract: We introduce a generative adversarial network (GAN) model to simulate the 3-dimensional Lagrangian motion of particles trapped in the recirculation zone of a buoyancy-opposed flame. The GAN model comprises a stochastic recurrent neural network, serving as a generator, and a convoluted neural network, serving as a discriminator. Adversarial training was performed to the point where the best-trained discriminator failed to distinguish the ground truth from the trajectory produced by the best-trained generator. The model performance was then benchmarked against a statistical analysis performed on both the simulated trajectories and the ground truth, with regard to the accuracy and generalization criteria.
+
+## 13. Beyond Scalars: Evaluating and Understanding LLM Reasoning via Geometric Progress and Stability
+- arXiv: `2603.10384v3`
+- Published: 2026-03-11T03:58:43Z
+- Authors: Xinyan Jiang, Ninghao Liu, Di Wang, Lijie Hu
+- Query hit: `all:"geometric progress" AND all:"LLM reasoning"`
+- Links: {'text/html': 'https://arxiv.org/abs/2603.10384v3', 'pdf': 'https://arxiv.org/pdf/2603.10384v3'}
+- Abstract: Evaluating LLM reliability via scalar probabilities often fails to capture the structural dynamics of reasoning. We introduce TRACED, a framework that assesses reasoning quality through theoretically grounded geometric kinematics. By decomposing reasoning traces into Progress (displacement) and Stability (curvature), we reveal a distinct topological divergence: correct reasoning manifests as high-progress, stable trajectories, whereas hallucinations are characterized by low-progress, unstable patterns (stalled displacement with high curvature fluctuations). Leveraging these signatures, our probabilistic framework achieves competitive performance and superior robustness across diverse benchmarks. Crucially, TRACED bridges geometry and cognition by mapping high curvature to ''Hesitation Loops'' and displacement to ''Certainty Accumulation'', offering a physical lens to decode the internal dynamics of machine thought.
+
+## 14. When Do LLMs Reason? A Dynamical Systems View via Entropy Phase Transitions
+- arXiv: `2605.22873v2`
+- Published: 2026-05-20T03:15:46Z
+- Authors: Wei Xia, Haoqing Wang, Zhi-Hong Deng, Yehui Tang
+- Query hit: `all:"entropy dynamics" AND all:"LLM reasoning"`
+- Links: {'text/html': 'https://arxiv.org/abs/2605.22873v2', 'pdf': 'https://arxiv.org/pdf/2605.22873v2'}
+- Abstract: Chain-of-thought (CoT) reasoning has become the default strategy for enhancing LLM capabilities, yet its application raises a fundamental question: when is explicit reasoning actually beneficial? Empirical evidence reveals a striking paradox: CoT often provides marginal or even negative gains on factual and open-ended tasks while multiplying token consumption. In this work, we show that LLM reasoning is not a static property of tasks or models, but a \emph{dynamic decoding state} that emerges during generation. Through systematic analysis, we find early-stage entropy dynamics provide a reliable signal of this state: tasks benefiting from CoT exhibit consistent entropy reduction, while others display unstable or increasing patterns. This behavior can be interpreted as a phase-transition-like shift from a high-entropy exploratory regime to a low-entropy structured reasoning regime. Based on these insights, we propose \textbf{EDRM} (Entropy Dynamics-based Reasoning Manifold), a lightweight and training-free routing framework that leverages early decoding entropy to adaptively select inference strategies. EDRM embeds entropy trajectories into a compact and interpretable manifold repres...
+
+## 15. EDIS: Diagnosing LLM Reasoning via Entropy Dynamics
+- arXiv: `2602.01288v2`
+- Published: 2026-02-01T15:43:50Z
+- Authors: Chenghua Zhu, Siyan Wu, Xiangkang Zeng, Zishan Xu, Zhaolu Kang, Yifu Guo, Yuquan Lu, Junduan Huang, Guojing Zhou
+- Query hit: `all:"entropy dynamics" AND all:"LLM reasoning"`
+- Links: {'text/html': 'https://arxiv.org/abs/2602.01288v2', 'pdf': 'https://arxiv.org/pdf/2602.01288v2'}
+- Abstract: Entropy-based confidence signals are increasingly leveraged to improve reasoning in large language models (LLMs), yet existing approaches treat confidence as a static quantity -- typically aggregated over tokens. We show that the \emph{temporal evolution} of confidence during generation carries richer information than aggregate statistics alone. Analyzing token-level entropy trajectories, we identify characteristic patterns distinguishing correct from incorrect reasoning: erroneous solutions exhibit unstable dynamics, including burst spikes (sustained uncertainty growth) and peak-valley spikes (sharp rebounds following transient confidence). These patterns persist across models and training stages, suggesting they reflect intrinsic properties of reasoning failure rather than superficial noise. To formalize this observation, we introduce the Entropy Dynamics Instability Score (\textbf{EDIS}), a trajectory-level metric quantifying instability in entropy evolution. EDIS serves as an effective diagnostic signal for inference-time selection, substantially improving reasoning accuracy, and offers a promising direction for training-time sample curation. Our findings establish entropy dyna...
+
+## 16. Towards Understanding Self-play for LLM Reasoning
+- arXiv: `2510.27072v1`
+- Published: 2025-10-31T00:41:37Z
+- Authors: Justin Yang Chae, Md Tanvirul Alam, Nidhi Rastogi
+- Query hit: `all:"entropy dynamics" AND all:"LLM reasoning"`
+- Links: {'text/html': 'https://arxiv.org/abs/2510.27072v1', 'pdf': 'https://arxiv.org/pdf/2510.27072v1'}
+- Abstract: Recent advances in large language model (LLM) reasoning, led by reinforcement learning with verifiable rewards (RLVR), have inspired self-play post-training, where models improve by generating and solving their own problems. While self-play has shown strong in-domain and out-of-domain gains, the mechanisms behind these improvements remain poorly understood. In this work, we analyze the training dynamics of self-play through the lens of the Absolute Zero Reasoner, comparing it against RLVR and supervised fine-tuning (SFT). Our study examines parameter update sparsity, entropy dynamics of token distributions, and alternative proposer reward functions. We further connect these dynamics to reasoning performance using pass@k evaluations. Together, our findings clarify how self-play differs from other post-training strategies, highlight its inherent limitations, and point toward future directions for improving LLM math reasoning through self-play.
+
+## 17. LaST-R1: Reinforcing Robotic Manipulation via Adaptive Physical Latent Reasoning
+- arXiv: `2604.28192v3`
+- Published: 2026-04-30T17:59:52Z
+- Authors: Hao Chen, Jiaming Liu, Zhonghao Yan, Nuowei Han, Renrui Zhang, Chenyang Gu, Jialin Gao, Ziyu Guo, Siyuan Qian, Yinxi Wang, Peng Jia, Shanghang Zhang
+- Query hit: `all:"latent chain-of-thought" AND all:dynamics`
+- Links: {'text/html': 'https://arxiv.org/abs/2604.28192v3', 'pdf': 'https://arxiv.org/pdf/2604.28192v3'}
+- Abstract: Robotic foundation models require reasoning over complex visual scenes to execute adaptive actions in dynamic environments. While recent studies on latent-reasoning Vision-Language-Action (VLA) models have demonstrated the capability to capture fine-grained physical dynamics, they remain predominantly confined to static imitation learning, severely limiting their adaptability and generalization. In this paper, we present LaST-R1, a novel reinforcement learning (RL) post-training framework designed to effectively harness "latent reasoning-before-acting" policies. Specifically, we propose Latent-to-Action Policy Optimization (LAPO), a core RL algorithm that jointly optimizes the latent reasoning process and the action generation. By explicitly embedding latent Chain-of-Thought (CoT) reasoning directly within the RL optimization loop, LAPO stimulates profound physical world modeling, which in turn drives robust execution in interactive environments. Furthermore, an adaptive latent CoT mechanism is introduced, allowing the policy to dynamically modulate its reasoning horizon based on diverse environment states. Experiments show that LaST-R1 achieves a near-perfect 99.9% average success...
+
+## 18. Dynamics Within Latent Chain-of-Thought: An Empirical Study of Causal Structure
+- arXiv: `2602.08783v3`
+- Published: 2026-02-09T15:25:12Z
+- Authors: Zirui Li, Xuefeng Bai, Kehai Chen, Yizhi Li, Jian Yang, Chenghua Lin, Min Zhang
+- Query hit: `all:"latent chain-of-thought" AND all:dynamics`
+- Links: {'text/html': 'https://arxiv.org/abs/2602.08783v3', 'pdf': 'https://arxiv.org/pdf/2602.08783v3'}
+- Abstract: Latent or continuous chain-of-thought methods replace explicit textual rationales with a number of internal latent steps, but these intermediate computations are difficult to evaluate beyond correlation-based probes. In this paper, we view latent chain-of-thought as a manipulable causal process in representation space by modeling latent steps as variables in a structural causal model (SCM) and analyzing their effects through step-wise do-interventions. We study two representative paradigms (i.e., Coconut and CODI) on both mathematical and general reasoning tasks to investigate three key questions: (1) which steps are causally necessary for correctness and when answers become decodable early; (2) how influence propagates across steps and how this structure compares to explicit CoT; and (3) whether intermediate trajectories retain competing answer modes and how output-level commitment differs from representational commitment across steps. We find that latent-step budgets behave less like homogeneous extra depth and more like staged functionality with non-local routing, and we identify a persistent gap between early output bias and late representational commitment. These results motiv...
+
+## 19. LoopViT: Scaling Visual ARC with Looped Transformers
+- arXiv: `2602.02156v1`
+- Published: 2026-02-02T14:32:57Z
+- Authors: Wen-Jie Shu, Xuerui Qiu, Rui-Jie Zhu, Harold Haodong Chen, Yexin Liu, Harry Yang
+- Query hit: `all:"latent chain-of-thought" AND all:dynamics`
+- Links: {'text/html': 'https://arxiv.org/abs/2602.02156v1', 'pdf': 'https://arxiv.org/pdf/2602.02156v1'}
+- Abstract: Recent advances in visual reasoning have leveraged vision transformers to tackle the ARC-AGI benchmark. However, we argue that the feed-forward architecture, where computational depth is strictly bound to parameter size, falls short of capturing the iterative, algorithmic nature of human induction. In this work, we propose a recursive architecture called Loop-ViT, which decouples reasoning depth from model capacity through weight-tied recurrence. Loop-ViT iterates a weight-tied Hybrid Block, combining local convolutions and global attention, to form a latent chain of thought. Crucially, we introduce a parameter-free Dynamic Exit mechanism based on predictive entropy: the model halts inference when its internal state ``crystallizes" into a low-uncertainty attractor. Empirical results on the ARC-AGI-1 benchmark validate this perspective: our 18M model achieves 65.8% accuracy, outperforming massive 73M-parameter ensembles. These findings demonstrate that adaptive iterative computation offers a far more efficient scaling axis for visual reasoning than simply increasing network width. The code is available at https://github.com/WenjieShu/LoopViT.
+
+## 20. Capabilities and Fundamental Limits of Latent Chain-of-Thought
+- arXiv: `2602.01148v1`
+- Published: 2026-02-01T10:46:00Z
+- Authors: Jiaxuan Zou, Yaozhong Xiong, Yong Liu
+- Query hit: `all:"latent chain-of-thought" AND all:dynamics`
+- Links: {'text/html': 'https://arxiv.org/abs/2602.01148v1', 'pdf': 'https://arxiv.org/pdf/2602.01148v1'}
+- Abstract: Latent Chain-of-Thought (Latent CoT) models promise efficient reasoning via continuous representations, yet exhibit puzzling performance inconsistencies: excelling at exploration (ProsQA: 97.0%) but failing at computation (GSM8K: 34.1%). We reveal that this trade-off is governed by decisional certainty. Our contributions are threefold: (1) We theoretically characterize the fundamental Exploration-Execution Trade-off, proving that high certainty enables precise execution but inhibits exploration, while low certainty facilitates search but causes error accumulation. (2) We introduce the Symbolic Index--quantifying decisional commitment--as the core mechanism governing this trade-off and establish its causal relationship with both execution stability and exploration capability. (3) We prove that curriculum learning is theoretically necessary, as direct training provably fails due to distributional mismatch. Our framework shifts the design paradigm from binary architectural choices toward adaptive systems that dynamically regulate decisional certainty based on task demands.
+
+## 21. Latent Chain-of-Thought as Planning: Decoupling Reasoning from Verbalization
+- arXiv: `2601.21358v2`
+- Published: 2026-01-29T07:38:18Z
+- Authors: Jiecong Wang, Hao Peng, Chunyang Liu
+- Query hit: `all:"latent chain-of-thought" AND all:dynamics`
+- Links: {'text/html': 'https://arxiv.org/abs/2601.21358v2', 'pdf': 'https://arxiv.org/pdf/2601.21358v2'}
+- Abstract: Chain-of-Thought (CoT) empowers Large Language Models (LLMs) to tackle complex problems, but remains constrained by the computational cost and reasoning path collapse when grounded in discrete token spaces. Recent latent reasoning approaches attempt to optimize efficiency by performing reasoning within continuous hidden states. However, these methods typically operate as opaque end-to-end mappings from explicit reasoning steps to latent states, and often require a pre-defined number of latent steps during inference. In this work, we introduce PLaT (Planning with Latent Thoughts), a framework that reformulates latent reasoning as planning by fundamentally decouple reasoning from verbalization. We model reasoning as a deterministic trajectory of latent planning states, while a separate Decoder grounds these thoughts into text when necessary. This decoupling allows the model to dynamically determine when to terminate reasoning rather than relying on fixed hyperparameters. Empirical results on mathematical benchmarks reveal a distinct trade-off: while PLaT achieves lower greedy accuracy than baselines, it demonstrates superior scalability in terms of reasoning diversity. This indicates...
+
+## 22. FutureX: Enhance End-to-End Autonomous Driving via Latent Chain-of-Thought World Model
+- arXiv: `2512.11226v1`
+- Published: 2025-12-12T02:12:49Z
+- Authors: Hongbin Lin, Yiming Yang, Yifan Zhang, Chaoda Zheng, Jie Feng, Sheng Wang, Zhennan Wang, Shijia Chen, Boyang Wang, Yu Zhang, Xianming Liu, Shuguang Cui
+- Query hit: `all:"latent chain-of-thought" AND all:dynamics`
+- Links: {'text/html': 'https://arxiv.org/abs/2512.11226v1', 'pdf': 'https://arxiv.org/pdf/2512.11226v1'}
+- Abstract: In autonomous driving, end-to-end planners learn scene representations from raw sensor data and utilize them to generate a motion plan or control actions. However, exclusive reliance on the current scene for motion planning may result in suboptimal responses in highly dynamic traffic environments where ego actions further alter the future scene. To model the evolution of future scenes, we leverage the World Model to represent how the ego vehicle and its environment interact and change over time, which entails complex reasoning. The Chain of Thought (CoT) offers a promising solution by forecasting a sequence of future thoughts that subsequently guide trajectory refinement. In this paper, we propose FutureX, a CoT-driven pipeline that enhances end-to-end planners to perform complex motion planning via future scene latent reasoning and trajectory refinement. Specifically, the Auto-think Switch examines the current scene and decides whether additional reasoning is required to yield a higher-quality motion plan. Once FutureX enters the Thinking mode, the Latent World Model conducts a CoT-guided rollout to predict future scene representation, enabling the Summarizer Module to further ref...
+
+## 23. Characterizing AlphaEarth Embedding Geometry for Agentic Environmental Reasoning
+- arXiv: `2604.18715v1`
+- Published: 2026-04-20T18:14:33Z
+- Authors: Mashrekur Rahman, Samuel J. Barrett, Christina Last
+- Query hit: `all:"intrinsic dimensionality" AND all:"reasoning chains"`
+- Links: {'text/html': 'https://arxiv.org/abs/2604.18715v1', 'pdf': 'https://arxiv.org/pdf/2604.18715v1'}
+- Abstract: Earth observation foundation models encode land surface information into dense embedding vectors, yet the geometric structure of these representations and its implications for downstream reasoning remain underexplored. We characterize the manifold geometry of Google AlphaEarth's 64-dimensional embeddings across 12.1 million Continental United States samples (2017--2023) and develop an agentic system that leverages this geometric understanding for environmental reasoning. The manifold is non-Euclidean: effective dimensionality is 13.3 (participation ratio) from 64 raw dimensions, with local intrinsic dimensionality of approximately 10. Tangent spaces rotate substantially, with 84\% of locations exceeding 60\textdegree{} and local-global alignment (mean$|\cosθ| = 0.17$) approaching the random baseline of 0.125. Supervised linear probes indicate that concept directions rotate across the manifold, and compositional vector arithmetic using both PCA-derived and probe-derived directions yields poor precision. Retrieval instead produces physically coherent results, with local geometry predicting retrieval coherence ($R^2 = 0.32$). Building on this characterization, we introduce an agentic ...
+
+## 24. Effective Reasoning Chains Reduce Intrinsic Dimensionality
+- arXiv: `2602.09276v2`
+- Published: 2026-02-09T23:32:12Z
+- Authors: Archiki Prasad, Mandar Joshi, Kenton Lee, Mohit Bansal, Peter Shaw
+- Query hit: `all:"intrinsic dimensionality" AND all:"reasoning chains"`
+- Links: {'text/html': 'https://arxiv.org/abs/2602.09276v2', 'pdf': 'https://arxiv.org/pdf/2602.09276v2'}
+- Abstract: Chain-of-thought (CoT) reasoning and its variants have substantially improved the performance of language models on complex reasoning tasks, yet the precise mechanisms by which different strategies facilitate generalization remain poorly understood. While current explanations often point to increased test-time computation or structural guidance, establishing a consistent, quantifiable link between these factors and generalization remains challenging. In this work, we identify intrinsic dimensionality as a quantitative measure for characterizing the effectiveness of reasoning chains. Intrinsic dimensionality quantifies the minimum number of model dimensions needed to reach a given accuracy threshold on a given task. By keeping the model architecture fixed and varying the task formulation through different reasoning strategies, we demonstrate that effective reasoning strategies consistently reduce the intrinsic dimensionality of the task. Validating this on GSM8K with Gemma-3 1B and 4B, we observe a strong inverse correlation between the intrinsic dimensionality of a reasoning strategy and its generalization performance on both in-distribution and out-of-distribution data. Our findin...
+
+## 25. Robust 3D Alignment of Generative Reconstructions via Partial Monocular Observations
+- arXiv: `2607.00498v1`
+- Published: 2026-07-01T06:30:47Z
+- Authors: Yuchen Zhang, Luanyuan Dai, Yiwei Wang, Xiwei Xu, Jianing Zhang, Johnny. r. zhang, Xianhui Meng, Yanbiao Ma, Jiayi Ma, Xiaoshuai Hao
+- Query hit: `all:"geometric hallucination" AND all:"metrics"`
+- Links: {'text/html': 'https://arxiv.org/abs/2607.00498v1', 'pdf': 'https://arxiv.org/pdf/2607.00498v1'}
+- Abstract: Aligning generative 3D reconstructions with partial monocular observations is a critical but under-explored challenge in computer vision. This task is inherently ill-posed due to severe asymmetries between noisy, sparse monocular inputs and dense generative priors, whose scale ambiguity and geometric hallucinations, combined with the lack of initial overlap, render traditional registration pipelines ineffective. To resolve these issues, we propose a training-free and interpretable geometric alignment framework that grounds generative 3D priors via a 3D similarity transformation (Sim(3)), which can recover accurate metric scale and pose. Specifically, we introduce an explicit scale factor to resolve metric ambiguity and employ a coarse-to-fine alignment strategy, leveraging geometry-aware descriptors for robust initialization and a decoupled closed-form solver for precision refinement. In addition, we introduce a Hallucination Filtering operation to effectively suppress outliers caused by hallucinated geometry. To evaluate alignment performance under these extreme conditions, we introduce GenPMOAlign--Where2Place, a rigorous benchmark specifically designed for Generative-to-Partial ...
+
+## 26. Whitening Reveals Cluster Commitment as the Geometric Separator of Hallucination Types
+- arXiv: `2603.07755v1`
+- Published: 2026-03-08T18:12:10Z
+- Authors: Matic Korun
+- Query hit: `all:"geometric hallucination" AND all:"metrics"`
+- Links: {'text/html': 'https://arxiv.org/abs/2603.07755v1', 'pdf': 'https://arxiv.org/pdf/2603.07755v1'}
+- Abstract: A geometric hallucination taxonomy distinguishes three failure types -- center-drift (Type~1), wrong-well convergence (Type~2), and coverage gaps (Type~3) -- by their signatures in embedding cluster space. Prior work found Types~1 and~2 indistinguishable in full-dimensional contextual measurement. We address this through PCA-whitening and eigenspectrum decomposition on GPT-2-small, using multi-run stability analysis (20 seeds) with prompt-level aggregation. Whitening transforms the micro-signal regime into a space where peak cluster alignment (max\_sim) separates Type~2 from Type~3 at Holm-corrected significance, with condition means following the taxonomy's predicted ordering: Type~2 (highest commitment) $>$ Type~1 (intermediate) $>$ Type~3 (lowest). A first directionally stable but underpowered hint of Type~1/2 separation emerges via the same metric, generating a capacity prediction for larger models. Prompt diversification from 15 to 30 prompts per group eliminates a false positive in whitened entropy that appeared robust at the smaller set, demonstrating prompt-set sensitivity in the micro-signal regime. Eigenspectrum decomposition localizes this artifact to the dominant princi...
+
+## 27. What do Geometric Hallucination Detection Metrics Actually Measure?
+- arXiv: `2602.09158v1`
+- Published: 2026-02-09T20:04:49Z
+- Authors: Eric Yeats, John Buckheit, Sarah Scullen, Brendan Kennedy, Loc Truong, Davis Brown, Bill Kay, Cliff Joslyn, Tegan Emerson, Michael J. Henry, John Emanuello, Henry Kvinge
+- Query hit: `all:"geometric hallucination" AND all:"metrics"`
+- Links: {'text/html': 'https://arxiv.org/abs/2602.09158v1', 'pdf': 'https://arxiv.org/pdf/2602.09158v1'}
+- Abstract: Hallucination remains a barrier to deploying generative models in high-consequence applications. This is especially true in cases where external ground truth is not readily available to validate model outputs. This situation has motivated the study of geometric signals in the internal state of an LLM that are predictive of hallucination and require limited external knowledge. Given that there are a range of factors that can lead model output to be called a hallucination (e.g., irrelevance vs incoherence), in this paper we ask what specific properties of a hallucination these geometric statistics actually capture. To assess this, we generate a synthetic dataset which varies distinct properties of output associated with hallucination. This includes output correctness, confidence, relevance, coherence, and completeness. We find that different geometric statistics capture different types of hallucinations. Along the way we show that many existing geometric detection methods have substantial sensitivity to shifts in task domain (e.g., math questions vs. history questions). Motivated by this, we introduce a simple normalization method to mitigate the effect of domain shift on geometric s...
+
+## 28. Reasoning Models Don't Just Think Longer, They Move Differently
+- arXiv: `2605.15454v2`
+- Published: 2026-05-14T22:37:33Z
+- Authors: Anders Gjølbye, Lars Kai Hansen, Sanmi Koyejo
+- Query hit: `all:"reasoning models" AND all:"move differently"`
+- Links: {'text/html': 'https://arxiv.org/abs/2605.15454v2', 'pdf': 'https://arxiv.org/pdf/2605.15454v2'}
+- Abstract: Reasoning-trained language models often spend more tokens on harder problems, but longer chains of thought do not show whether a model is merely computing for more steps or following a different internal trajectory. We study this distinction through hidden-state trajectories during chain-of-thought generation across competitive programming, mathematics, and Boolean satisfiability. Raw trajectory geometry is strongly shaped by generation length: longer generations mechanically alter path statistics, so difficulty-dependent comparisons are misleading without adjustment. After residualizing trajectory statistics on length, difficulty remains systematically coupled to corrected trajectory geometry across all domains studied. The clearest reasoning-specific separation appears in the code domain, where harder problems show more direct corrected trajectories and less heterogeneous local curvature in reasoning-trained models than in matched instruction-tuned baselines. Corrected difficulty-geometry coupling is weaker, but still present, in mathematics and Boolean satisfiability. Prompt-stage linear probes do not mirror the code-domain separation, and behavioral annotations show that strong...

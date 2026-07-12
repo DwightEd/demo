@@ -1,0 +1,31 @@
+# Agent Note: Local Geometry / Dynamics / Manifold Papers
+
+## Scope
+
+Local PDFs in `C:/Users/613/Desktop/papers/??` with geometry, manifold, phase, trajectory, latent, entropy, dynamics, faithful, reasoning-emergence keywords. `Entropy Phase Transitions.pdf` and `ADynamicalSystemsViewvia.pdf` are duplicates.
+
+| Paper | Core Hypothesis / Algorithms / Experiments | Useful For Us | Covered Points And Gap |
+|---|---|---|---|
+| When Do LLMs Reason? A Dynamical Systems View via Entropy Phase Transitions | CoT usefulness is a decoding-time dynamic state. EDRM routes Direct/CoT using early-token entropy low-dimensional ?reasoning manifold?. Claims 27-55% token reduction with possible accuracy gain. | Online routing baseline. | Hidden-state geometry: no; manifold: entropy-feature manifold; online: yes; faithful CoT: no. Gap: no hidden states, no step error localization. |
+| Where Does Reasoning Break? Step-Level Hallucination Detection via Hidden-State Transport Geometry | Correct reasoning follows stable hidden-state transition manifold; first error is a transport-cost excursion. Teacher uses cPCA + 7 transition features; student uses BiLSTM over single-forward hidden states. | Direct competitor: hidden-state geometry + step-level online detection. | Hidden-state geometry: yes; manifold: yes; online: yes; faithful CoT: partial. Gap: student distribution-shift collapse; faithfulness not central. |
+| A Theory of Multineuronal Dimensionality, Dynamics and Measurement | Neural population low-dimensional trajectories; theory of neural task complexity; monkey reaching validation. | Theoretical language for whether few dimensions recover dynamics. | Not LLM-specific. |
+| Dynamics Within Latent Chain-of-Thought | Latent CoT as intervenable SCM variable; step-wise do-interventions, influence graph, readout for Coconut/CODI. | Supports latent-step causal necessity and early preference vs late commitment. | Hidden-state geometry: partial; faithful: partial. Gap: latent CoT diagnosis, not error detection. |
+| EDIS | Error reasoning has entropy bursts / peak-valley spikes; EDIS quantifies trajectory instability. Math filtering and GRPO sample curation. | Strong entropy-dynamics baseline. | No hidden states, no semantic cause localization. |
+| Entropy Trajectory Shape Predicts LLM Reasoning Reliability | Per-step answer-distribution entropy monotonic decrease predicts correctness; monotone chains outperform non-monotone chains. | Cheap interpretable uncertainty-shape baseline. | Requires multiple completions per step; not single-forward. |
+| GeoFaith | Faithful/unfaithful CoT have different latent geometry + entropy dynamics; bootstraps 1k to 20k step labels, trains 8B detector, faithfulness-aware RL. | Closest faithful CoT geometry paper. | Covers hidden geometry/manifold/faithful CoT. Gap: label expansion/trained detector; cross-model generalization unclear. |
+| Geometry of Reason | Attention matrix as token graph; Fiedler/HFER/spectral entropy/smoothness; training-free math reasoning validity. | Attention-spectral baseline. | Attention geometry, not hidden-state CoT faithfulness. |
+| LaST0 | Latent spatio-temporal CoT for robotic VLA; MoT fast/slow systems; latent CoT is faster than explicit CoT. | Supports explicit language CoT bottleneck; latent trajectory for non-language dynamics. | Robotics, not LLM detector. |
+| LLM Reasoning as Trajectories | CoT as representation trajectory; step-specific subspaces become more separable with depth; correct/wrong late divergence; mid-reasoning AUC up to 0.87 and steering. | Supports correctness signal in trajectories. | Late-stage correctness, not first-error/faithful CoT. |
+| Muon Dynamics as a Spectral Wasserstein Flow | Spectral Wasserstein mean-field theory for optimizer Muon. | Borrow transport/Wasserstein vocabulary carefully. | Not reasoning detection. |
+| Reasoning Emerges from Constrained Inference Manifolds | Effective reasoning requires expressivity, manifold compression, and non-degenerate information volume; label-free internal diagnostic. | Highly relevant manifold-health concept. | Macro model-level diagnostic; not step-level localization. |
+| Origins of Representation Manifolds | Feature-as-manifold theory; cosine similarity encodes on-manifold geodesic geometry; embedding/GPT2 SAE examples. | Explains why representations can be manifold-like. | Not reasoning-specific. |
+| Shape of Reasoning | TDA/persistent homology for reasoning traces; topological features predict trace quality better than graph metrics. | Trace quality as high-order geometry. | Mostly explicit trace text, not hidden states. |
+| Spectral Geometry of Thought | Hidden activations spectral phase transitions; 11 models/21 tasks; spectral alpha predicts correctness, with very high AUC claims. | Strong hidden-activation spectral baseline. | Correlational, non-causal, needs careful replication. |
+| Geometry of Truth | Layer-wise semantic dynamics / contrastive alignment detects hallucination; high F1/AUROC on TruthfulQA/synthetic. | Layer-wise semantic drift as hallucination signal. | Factual hallucination, not CoT process. |
+| Truth as a Trajectory | Layer-wise displacement trajectory beats static probes, generalizes across dense/MoE. | Dynamic displacement > static layer probe. | No step-level CoT faithfulness. |
+| Two Pathways to Truthfulness | Truth cues from Question-Anchored and Answer-Anchored paths; attention knockout/token patching; MoP/PR. | Explains source of truth signals, not just geometry. | Truthfulness/hallucination, not reasoning trajectory. |
+| What Do Geometric Hallucination Detection Metrics Actually Measure? | Synthetic factorization of correctness/confidence/relevance/coherence/completeness; different metrics measure different properties; domain normalization helps. | Crucial risk/negative-control paper. | Does not propose CoT detector, but defines required evaluation controls. |
+
+## Overall Gap
+
+Existing work already covers hidden-state geometry, activation geometry, manifold compression, entropy online signals, and faithful CoT separately. GeoFaith and Where Does Reasoning Break are the closest competitors. A publishable difference must sit in **cross-domain generalization, little/no labels, online first-error localization, and causal validation of faithfulness rather than final correctness**.
