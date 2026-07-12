@@ -37,6 +37,12 @@ Prompt SVD is not assumed to be correct.  It is one chart among several:
   scores held-out response trajectories by healthy-tube distance, spectral
   leakage, tangent off-manifold motion, and error-basin committor.
 
+The implementation-aligned method draft for the current spectral-chain branch
+is [METHOD_SPECTRAL_CHAIN_DYNAMICS.md](METHOD_SPECTRAL_CHAIN_DYNAMICS.md).
+That document is the canonical description of the current method.  Older
+HoloReason / broad Reasoning Spectral Field drafts were removed from the
+literature folder because they no longer match the code.
+
 Use `--store_step_vectors` during extraction to save the shared per-step
 residual-flow vector store for PCA/VAE/spectral chart comparisons.  This is
 important: prompt SVD, VAE, and other charts should be compared on the same
