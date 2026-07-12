@@ -20,6 +20,14 @@ from multiprocessing import Pool, cpu_count
 
 HIDDEN_LAYERS = [10, 14, 18, 22]
 
+# ``eigenvalues`` is a top slice of the complete trace-normalized PSD
+# spectrum.  The slice is deliberately not renormalized, so its sum reports
+# how much total spectral mass the retained entries capture.
+TOP_SPECTRUM_SEMANTICS = (
+    "descending top-n slice of the full clipped-PSD, trace-normalized spectrum; "
+    "the retained slice is not renormalized"
+)
+
 
 def compute_step_geometry_ultra_fast(H: np.ndarray, step_id: int, layer_id: int, n_top: int = 10):
     """Step几何特征计算：优化版（float32 + eigvalsh）
@@ -72,14 +80,26 @@ def compute_step_geometry_ultra_fast(H: np.ndarray, step_id: int, layer_id: int,
             'eff_rank': np.nan,
             'spectral_entropy': np.nan,
             'eigenvalues': np.array([]),
+            'top_spectrum_mass': np.nan,
+            'spectrum_semantics': TOP_SPECTRUM_SEMANTICS,
         }
 
     # 降序排列并归一化
+    # A scatter matrix is PSD in exact arithmetic, but float32 eigensolvers
+    # can return small negative values.  Clip them before treating the
+    # spectrum as a probability distribution.
+    eigvals = np.maximum(np.asarray(eigvals, dtype=np.float64), 0.0)
     eigvals = np.sort(eigvals)[::-1]
-    eigvals = eigvals / (eigvals.sum() + eps)
+    trace = float(eigvals.sum())
+    if not np.isfinite(trace) or trace <= eps:
+        eigvals = np.zeros_like(eigvals)
+    else:
+        eigvals = eigvals / trace
 
     # 取前n_top个特征值（使用float32）
-    eigenvalues = eigvals[:n_top].astype(np.float32)
+    # Preserve mass relative to the *full* spectrum; do not renormalize the
+    # retained top-n entries after truncation.
+    eigenvalues = eigvals[:max(0, int(n_top))].astype(np.float32)
 
     # 计算有效秩 (使用完整特征值)
     lam = eigvals[eigvals > eps]
@@ -101,6 +121,8 @@ def compute_step_geometry_ultra_fast(H: np.ndarray, step_id: int, layer_id: int,
         'spectral_entropy': spectral_entropy,
         'norm': norm,
         'eigenvalues': eigenvalues,
+        'top_spectrum_mass': float(eigenvalues.sum()),
+        'spectrum_semantics': TOP_SPECTRUM_SEMANTICS,
     }
 
 
@@ -141,6 +163,8 @@ class StepGeometry:
     spectral_entropy: float = np.nan
     norm: float = np.nan
     eigenvalues: np.ndarray = None
+    top_spectrum_mass: float = np.nan
+    spectrum_semantics: str = TOP_SPECTRUM_SEMANTICS
     principal_directions: np.ndarray = None  # 兼容性
 
     def __post_init__(self):

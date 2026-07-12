@@ -239,15 +239,170 @@ def step_resultant(H: np.ndarray) -> float:
     return float(np.linalg.norm(np.nanmean(U, axis=0)))
 
 
+def _data_keys(data: Any) -> set[str]:
+    files = getattr(data, "files", None)
+    if files is not None:
+        return set(files)
+    return set(data.keys())
+
+
+def _sample_sizes(data: Any, index: int) -> Optional[np.ndarray]:
+    keys = _data_keys(data)
+    key = "cloud_sizes" if "cloud_sizes" in keys else (
+        "sv_cloud_sizes" if "sv_cloud_sizes" in keys else None
+    )
+    if key is None:
+        return None
+    obj = data[key][index]
+    if obj is None:
+        return None
+    sizes = np.asarray(obj, dtype=int).reshape(-1)
+    return sizes if sizes.size else None
+
+
+def _sample_step_ranges(data: Any, index: int) -> Optional[np.ndarray]:
+    if "step_token_ranges" not in _data_keys(data):
+        return None
+    obj = data["step_token_ranges"][index]
+    if obj is None:
+        return None
+    ranges = np.asarray(obj, dtype=int)
+    if ranges.ndim != 2 or ranges.shape[1] != 2 or ranges.shape[0] == 0:
+        return None
+    return ranges
+
+
+def infer_sample_step_count(data: Any, index: int) -> Optional[int]:
+    """Return the most authoritative stored step-axis length for one chain."""
+    sizes = _sample_sizes(data, index)
+    if sizes is not None:
+        return int(sizes.size)
+    ranges = _sample_step_ranges(data, index)
+    if ranges is not None:
+        return int(ranges.shape[0])
+
+    keys = _data_keys(data)
+    if "sv_out_entropy" in keys:
+        v = np.asarray(data["sv_out_entropy"][index]).reshape(-1)
+        if v.size:
+            return int(v.size)
+    for key in ("sv_pr_step_exp", "sv_ae_step_exp"):
+        if key in keys:
+            M = np.asarray(data[key][index])
+            if M.ndim >= 1 and M.shape[0] > 0:
+                return int(M.shape[0])
+    if "n_steps" in keys:
+        n = int(np.asarray(data["n_steps"])[index])
+        return n if n > 0 else None
+    return None
+
+
+def _finite_mean(x: np.ndarray) -> float:
+    a = np.asarray(x, dtype=np.float64)
+    a = a[np.isfinite(a)]
+    return float(a.mean()) if a.size else float("nan")
+
+
+def _pool_trace_by_ranges(
+    values: np.ndarray,
+    ranges: np.ndarray,
+    sizes: Optional[np.ndarray],
+) -> Optional[np.ndarray]:
+    """Pool a response-local token trace using absolute or relative ranges.
+
+    Both inclusive ``[start, end]`` and half-open ``[start, end)`` stored
+    conventions occur in historical files.  Select the convention that best
+    matches ``cloud_sizes`` and the observed token-trace span.
+    """
+    x = np.asarray(values, dtype=np.float64).reshape(-1)
+    R = np.asarray(ranges, dtype=int)
+    if x.size == 0 or R.ndim != 2 or R.shape[1] != 2:
+        return None
+    base = int(R[0, 0])
+    size_ref = None if sizes is None else np.asarray(sizes, dtype=int).reshape(-1)
+    candidates: List[Tuple[Tuple[int, int, int], List[Tuple[int, int]]]] = []
+    for inclusive in (True, False):
+        slices: List[Tuple[int, int]] = []
+        valid = True
+        lengths: List[int] = []
+        for start, end in R:
+            lo = int(start) - base
+            hi = int(end) - base + (1 if inclusive else 0)
+            if lo < 0 or hi <= lo or hi > x.size:
+                valid = False
+                break
+            slices.append((lo, hi))
+            lengths.append(hi - lo)
+        if not valid:
+            continue
+        size_matches = 0
+        if size_ref is not None and size_ref.size == len(lengths):
+            size_matches = int(np.sum(np.asarray(lengths) == size_ref))
+        span_matches = int(bool(slices) and slices[-1][1] == x.size)
+        candidates.append(((size_matches, span_matches, int(inclusive)), slices))
+    if not candidates:
+        return None
+    _, slices = max(candidates, key=lambda item: item[0])
+    return np.asarray([_finite_mean(x[lo:hi]) for lo, hi in slices], dtype=np.float64)
+
+
+def pool_token_trace_to_steps(
+    values: np.ndarray,
+    *,
+    cloud_sizes: Optional[np.ndarray] = None,
+    step_ranges: Optional[np.ndarray] = None,
+    expected_steps: Optional[int] = None,
+) -> Optional[np.ndarray]:
+    """Mean-pool a token-axis feature onto the explicit step axis.
+
+    A token trace is never treated as a step trace merely because the lengths
+    happen to match.  Pooling requires ``cloud_sizes`` or ``step_ranges``;
+    otherwise ``None`` is returned so callers cannot silently fuse unrelated
+    time axes.
+    """
+    x = np.asarray(values, dtype=np.float64).reshape(-1)
+    if x.size == 0:
+        return None
+    sizes = None if cloud_sizes is None else np.asarray(cloud_sizes, dtype=int).reshape(-1)
+    ranges = None if step_ranges is None else np.asarray(step_ranges, dtype=int)
+
+    pooled: Optional[np.ndarray] = None
+    if ranges is not None:
+        pooled = _pool_trace_by_ranges(x, ranges, sizes)
+    if pooled is None and sizes is not None and sizes.size and np.all(sizes > 0):
+        # Sequential splitting is valid only when the sizes account for the
+        # complete token trace.  If they do not, offsets are unknowable without
+        # explicit ranges and the channel must be skipped.
+        if int(sizes.sum()) == int(x.size):
+            cuts = np.cumsum(np.r_[0, sizes])
+            pooled = np.asarray(
+                [_finite_mean(x[int(cuts[j]) : int(cuts[j + 1])]) for j in range(sizes.size)],
+                dtype=np.float64,
+            )
+    if pooled is None:
+        return None
+    if expected_steps is not None and pooled.size != int(expected_steps):
+        return None
+    return pooled
+
+
 def add_cloud_sequences(data: np.lib.npyio.NpzFile, seqs: List[Dict[str, np.ndarray]]) -> None:
-    if "sv_clouds" not in data.files or "cloud_sizes" not in data.files:
+    keys = _data_keys(data)
+    size_key = "cloud_sizes" if "cloud_sizes" in keys else (
+        "sv_cloud_sizes" if "sv_cloud_sizes" in keys else None
+    )
+    if "sv_clouds" not in keys or size_key is None:
         return
-    for i, (obj, size_obj) in enumerate(zip(data["sv_clouds"], data["cloud_sizes"])):
+    for i, (obj, size_obj) in enumerate(zip(data["sv_clouds"], data[size_key])):
         if obj is None or size_obj is None:
             continue
         C = np.asarray(obj, dtype=np.float64)
         sizes = np.asarray(size_obj, dtype=int).reshape(-1)
         if C.ndim != 3 or C.shape[0] == 0 or sizes.size == 0:
+            continue
+        if np.any(sizes <= 0) or int(sizes.sum()) != int(C.shape[0]):
+            # A partial split would shift all subsequent step boundaries.
+            # Reject the sample instead of silently truncating either axis.
             continue
         # Multisample files currently store one full-dim cloud layer.  If there
         # are more layers later, use the first as the stable backward-compatible
@@ -296,17 +451,33 @@ def add_matrix_sequences(data: np.lib.npyio.NpzFile, seqs: List[Dict[str, np.nda
 
 
 def add_logit_sequences(data: np.lib.npyio.NpzFile, seqs: List[Dict[str, np.ndarray]]) -> None:
-    for key, name in (
-        ("sv_out_entropy", "out_entropy"),
-        ("sv_out_committal", "out_committal"),
-        ("sv_tok_entropy", "tok_entropy"),
-        ("sv_tok_committal", "tok_committal"),
+    keys = _data_keys(data)
+    # Output-boundary traces are already per-step.  Token uncertainty traces
+    # are per generated token and must be explicitly pooled before they can be
+    # compared or fused with step-native channels.
+    for key, name, token_axis in (
+        ("sv_out_entropy", "out_entropy", False),
+        ("sv_out_committal", "out_committal", False),
+        ("sv_tok_entropy", "tok_entropy", True),
+        ("sv_tok_committal", "tok_committal", True),
     ):
-        if key not in data.files:
+        if key not in keys:
             continue
         for i, obj in enumerate(data[key]):
             v = np.asarray(obj, dtype=np.float64).reshape(-1)
-            if v.size:
+            if not v.size:
+                continue
+            expected = infer_sample_step_count(data, i)
+            if token_axis:
+                pooled = pool_token_trace_to_steps(
+                    v,
+                    cloud_sizes=_sample_sizes(data, i),
+                    step_ranges=_sample_step_ranges(data, i),
+                    expected_steps=expected,
+                )
+                if pooled is not None:
+                    seqs[i][name] = pooled
+            elif expected is None or v.size == expected:
                 seqs[i][name] = v
 
 
@@ -402,12 +573,21 @@ def signal_sign(name: str) -> float:
 def build_base_sequences(data: np.lib.npyio.NpzFile, *, bands: Sequence[str]) -> List[Dict[str, np.ndarray]]:
     n = len(data["problem_ids"])
     seqs: List[Dict[str, np.ndarray]] = [dict() for _ in range(n)]
+    add_cloud_sequences(data, seqs)
     add_matrix_sequences(data, seqs, bands=bands)
     add_logit_sequences(data, seqs)
-    add_cloud_sequences(data, seqs)
-    if "n_steps" in data.files:
-        for i, T in enumerate(data["n_steps"].astype(int)):
-            seqs[i]["step_pos"] = np.arange(int(T), dtype=np.float64) / max(1, int(T) - 1)
+    for i, s in enumerate(seqs):
+        T = infer_sample_step_count(data, i)
+        if T is None:
+            lengths = [
+                np.asarray(v).reshape(-1).size
+                for k, v in s.items()
+                if not k.startswith("__") and np.asarray(v).ndim == 1
+            ]
+            T = lengths[0] if lengths and all(x == lengths[0] for x in lengths) else None
+        if T is not None and T > 0:
+            s["__step_count__"] = int(T)
+            s["step_pos"] = np.arange(int(T), dtype=np.float64) / max(1, int(T) - 1)
     return seqs
 
 
@@ -526,7 +706,9 @@ def run_policy(
     seqs = [dict(x) for x in base_seqs]
     add_mahal_sequences(data, seqs, mask=mask, y_err=y_err, bands=bands)
 
-    channel_names = sorted({k for s in seqs for k in s.keys() if k != "step_pos"})
+    channel_names = sorted(
+        {k for s in seqs for k in s.keys() if k != "step_pos" and not k.startswith("__")}
+    )
     rows: List[Dict[str, Any]] = []
     profiles: Dict[str, Any] = {}
     score_names = [
@@ -612,22 +794,29 @@ def build_multichannel_scores(
     }
     risk_channels = [c for c in channels if c != "step_token_count"]
     for i, s in enumerate(seqs):
+        step_count = s.get("__step_count__")
+        if step_count is None and "step_pos" in s:
+            step_count = np.asarray(s["step_pos"]).reshape(-1).size
+        if step_count is None or int(step_count) < 2:
+            continue
+        T = int(step_count)
         per: List[np.ndarray] = []
-        minT = None
         for ch in risk_channels:
             if ch not in s:
                 continue
             v = signal_sign(ch) * np.asarray(s[ch], dtype=np.float64).reshape(-1)
-            if v.size < 2:
+            # Every fused channel must live on the exact same explicit step
+            # axis.  Never truncate heterogeneous token/step sequences to a
+            # shared ``minT``: that silently changes temporal meaning.
+            if v.size != T:
                 continue
             z = chain_z(v)
             if not np.isfinite(z).any():
                 continue
             per.append(z)
-            minT = z.size if minT is None else min(minT, z.size)
-        if not per or minT is None or minT < 2:
+        if len(per) < 2:
             continue
-        Z = np.vstack([z[:minT] for z in per])
+        Z = np.vstack(per)
         d = Z[:, 1:] - Z[:, :-1]
         if d.size == 0:
             continue
@@ -635,21 +824,21 @@ def build_multichannel_scores(
         pos_sum = np.nansum(np.maximum(d, 0.0), axis=0)
         k = int(np.nanargmax(l2))
         out["multi.zjump_l2_max"][0][i] = float(l2[k])
-        out["multi.zjump_l2_max"][1][i] = float((k + 1) / max(1, minT - 1))
+        out["multi.zjump_l2_max"][1][i] = float((k + 1) / max(1, T - 1))
         k2 = int(np.nanargmax(pos_sum))
         out["multi.zjump_pos_sum_max"][0][i] = float(pos_sum[k2])
-        out["multi.zjump_pos_sum_max"][1][i] = float((k2 + 1) / max(1, minT - 1))
+        out["multi.zjump_pos_sum_max"][1][i] = float((k2 + 1) / max(1, T - 1))
 
         contrasts: List[float] = []
         cpos: List[float] = []
-        for t in range(1, minT):
+        for t in range(1, T):
             pre = Z[:, max(0, t - width) : t]
-            post = Z[:, t : min(minT, t + width)]
+            post = Z[:, t : min(T, t + width)]
             if pre.size == 0 or post.size == 0:
                 continue
             diff = np.nanmean(post, axis=1) - np.nanmean(pre, axis=1)
             contrasts.append(float(np.sqrt(np.nansum(diff ** 2))))
-            cpos.append(t / max(1, minT - 1))
+            cpos.append(t / max(1, T - 1))
         if contrasts:
             a = np.asarray(contrasts, dtype=np.float64)
             k3 = int(np.nanargmax(a))
@@ -676,6 +865,10 @@ def run(path: str, args: argparse.Namespace) -> Dict[str, Any]:
                 "headline": "same-problem paired AUROC for local non-cumulative temporal scores",
                 "limitation": "same-problem data has final correctness labels but no first-error step labels",
                 "orientation": "scores are risk-high; cloud_resultant is multiplied by -1",
+                "time_axis": (
+                    "token traces are pooled by cloud_sizes/step_token_ranges; "
+                    "multichannel fusion requires exact step-axis equality"
+                ),
             },
         },
         "policies": {

@@ -1,7 +1,8 @@
 """Step 1: Extract the per-trajectory (step × layer) spectral field on ProcessBench.
 
 For each reasoning chain we:
-  1. Tokenize prompt + response and align each pre-parsed step with its token range.
+  1. Tokenize prompt and response exactly once with add_special_tokens=False,
+     preserve their IDs/offsets, and align each pre-parsed step to that token axis.
   2. Run one forward pass with output_hidden_states=True to get hidden states at
      all L+1 layers (embedding + L transformer blocks).
   3. Project the per-token hidden states onto the *reasoning subspace* induced
@@ -34,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import numpy as np
 import torch
@@ -43,7 +45,6 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 
 from utils import (
-    find_step_token_ranges,
     step_layer_spectral_summary,
     step_layer_cim_summary,
     compute_unembedding_svd,
@@ -51,6 +52,14 @@ from utils import (
     project_to_reasoning,
 )
 from utils.geometry import cloud_geometry
+from utils.step_boundaries import (
+    TokenAlignmentError,
+    assert_trace_alignment,
+    attach_trace_time_axis,
+    build_exact_trace_alignment,
+    trace_records_to_npz,
+    truncate_trace_alignment,
+)
 from utils.step_vector import step_vector, participation_ratio, activation_entropy
 
 
@@ -156,6 +165,11 @@ def extract_spectral_field(
     store_clouds: bool = False,
     cloud_layer_indices: tuple | None = None,
     token_uncertainty: bool = False,
+    trace_alignment: dict | None = None,
+    question_text: str | None = None,
+    return_trace: bool = False,
+    store_prompt_hidden: bool = False,
+    prompt_hidden_layer_indices: tuple | None = None,
 ):
     """Run one forward pass and reduce each (step, layer) token cloud to (D, V, C).
 
@@ -181,24 +195,69 @@ def extract_spectral_field(
                          "mu":      (T, L_sub, p) centroids
                          "eigvals": (T, L_sub, geom_k) leading eigenvalues
                          "eigvecs": (T, L_sub, p, geom_k) leading axes
-                       where p = d_R (projected) or d (raw).
+                        where p = d_R (projected) or d (raw).
+        TRACE:         returned only when ``return_trace=True``. It contains the
+                       exact no-special-token model input, offsets, question and
+                       response spans, kept-step time axis, and optional selected
+                       prompt hidden states.
     """
-    ranges = find_step_token_ranges(tokenizer, prompt, response, steps)
-    if len(ranges) < 3:
-        return None, None, None, None, None, None, None, None
 
-    encoding = tokenizer(
-        prompt + response,
-        return_tensors="pt",
-        truncation=True,
-        max_length=max_seq_len,
-    ).to(device)
+    def empty_result():
+        base = (None, None, None, None, None, None, None, None)
+        return base + (None,) if return_trace else base
+
+    if trace_alignment is None:
+        trace = build_exact_trace_alignment(
+            tokenizer,
+            prompt,
+            response,
+            steps,
+            question_text=question_text,
+            fail_on_unmatched=True,
+        )
+    else:
+        trace = dict(trace_alignment)
+        if trace.get("rendered_prompt") != prompt:
+            raise TokenAlignmentError(
+                "teacher-forcing prompt differs from the rendered generation prompt"
+            )
+        if trace.get("response_text") != response:
+            raise TokenAlignmentError(
+                "teacher-forcing response differs from the exact generated response"
+            )
+        if list(trace.get("steps_text", [])) != [str(x) for x in steps]:
+            raise TokenAlignmentError(
+                "teacher-forcing step strings differ from the aligned generation steps"
+            )
+        assert_trace_alignment(trace)
+
+    trace = truncate_trace_alignment(trace, max_seq_len)
+    ranges = list(trace["all_step_token_ranges"])
+    if len(ranges) < 3:
+        return empty_result()
+
+    # Replay the exact generation token axis. Never re-tokenize prompt+response:
+    # doing so can add BOS twice or merge a BPE token across the prompt boundary.
+    encoding = {
+        "input_ids": torch.tensor(
+            [trace["input_ids"]], dtype=torch.long, device=device
+        ),
+        "attention_mask": torch.tensor(
+            [trace["attention_mask"]], dtype=torch.long, device=device
+        ),
+    }
     seq_len = encoding["input_ids"].shape[1]
+    prompt_len = len(trace["prompt_token_ids"])
+    if not torch.equal(
+        encoding["input_ids"][0, :prompt_len].detach().cpu(),
+        torch.as_tensor(trace["prompt_token_ids"], dtype=torch.long),
+    ):
+        raise TokenAlignmentError("model input no longer has the exact generation prompt prefix")
 
     # Keep only steps whose token range fits inside the truncated sequence.
     safe = [(j, a, b) for j, (a, b) in enumerate(ranges) if b < seq_len and b - a + 1 >= 2]
     if len(safe) < 3:
-        return None, None, None, None, None, None, None, None
+        return empty_result()
 
     outputs = model(**encoding, output_hidden_states=True)
     hidden_states = outputs.hidden_states  # tuple of (1, seq_len, d) tensors
@@ -210,6 +269,25 @@ def extract_spectral_field(
         layer_indices = list(range(n_layers_total))
     layer_indices = [l for l in layer_indices if 0 <= l < n_layers_total]
     L_sub = len(layer_indices)
+
+    if store_prompt_hidden:
+        prompt_layers = list(
+            prompt_hidden_layer_indices
+            if prompt_hidden_layer_indices is not None else layer_indices
+        )
+        if not prompt_layers:
+            raise ValueError("store_prompt_hidden requires at least one prompt hidden layer")
+        bad_layers = [l for l in prompt_layers if not 0 <= int(l) < n_layers_total]
+        if bad_layers:
+            raise ValueError(
+                f"prompt hidden layers {bad_layers} are outside 0..{n_layers_total - 1}"
+            )
+        prompt_hidden = [
+            hidden_states[int(l)][0, :prompt_len].float().cpu().numpy().astype(np.float16)
+            for l in prompt_layers
+        ]
+        trace["prompt_hidden"] = np.stack(prompt_hidden, axis=1)  # (P, L_prompt, d)
+        trace["prompt_hidden_layers"] = np.asarray(prompt_layers, dtype=np.int32)
 
     T_eff = len(safe)
     M_D = np.full((T_eff, L_sub), np.nan, dtype=np.float64)
@@ -357,6 +435,11 @@ def extract_spectral_field(
         GEOM = {"mu": geom_mu, "eigvals": geom_eigvals, "eigvecs": geom_eigvecs}
 
     kept_steps = np.array([j for j, _, _ in safe], dtype=np.int32)
+    trace = attach_trace_time_axis(
+        trace,
+        kept_steps,
+        [(a, b) for _, a, b in safe],
+    )
     CIM = None
     if cim_metrics:
         CIM = {"M_Dtle": M_Dtle, "M_Vld": M_Vld}
@@ -380,7 +463,14 @@ def extract_spectral_field(
         if tok_ent is not None:
             SV["tok_entropy"] = tok_ent
             SV["tok_committal"] = tok_com
-    return M_D, M_V, M_C, kept_steps, layer_indices, GEOM, CIM, SV
+            SV["tok_token_range"] = np.asarray([a0, b1 + 1], dtype=np.int32)
+            trace["token_uncertainty_token_range"] = (int(a0), int(b1 + 1))
+    elif CLOUDS is not None:
+        # Raw clouds are a first-class ECGH artifact and do not require the
+        # legacy step-vector feature family to be enabled.
+        SV = {"clouds": CLOUDS}
+    result = (M_D, M_V, M_C, kept_steps, layer_indices, GEOM, CIM, SV)
+    return result + (trace,) if return_trace else result
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +557,19 @@ def main():
                              "in analysis WITHOUT re-running the model. Storage ~ "
                              "n_chains x T x L x d x 2 bytes per mode; restrict with "
                              "--sv_modes step_exp to keep it small.")
+    parser.add_argument("--store_prompt_hidden", action="store_true",
+                        help="Store the exact rendered-prompt hidden span (fp16) "
+                             "at --prompt_hidden_layers for semantic anchors.")
+    parser.add_argument("--prompt_hidden_layers", default="16",
+                        help="Comma-separated hidden-state indices stored for the "
+                             "prompt span when --store_prompt_hidden is enabled.")
+    parser.add_argument("--store_clouds", action="store_true",
+                        help="Store raw per-step token clouds (fp16) for the "
+                             "selected --cloud_layers. Required by conditional "
+                             "Gram/second-moment ECGH audits.")
+    parser.add_argument("--cloud_layers", default="16",
+                        help="Comma-separated hidden-state indices stored as "
+                             "raw token clouds when --store_clouds is enabled.")
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
@@ -503,6 +606,12 @@ def main():
 
     layer_indices = None if args.layers == "all" else \
         [int(x) for x in args.layers.split(",") if x.strip()]
+    prompt_hidden_layers = tuple(
+        int(x) for x in args.prompt_hidden_layers.split(",") if x.strip()
+    ) if args.store_prompt_hidden else None
+    cloud_layers = tuple(
+        int(x) for x in args.cloud_layers.split(",") if x.strip()
+    ) if args.store_clouds else None
 
     correct_examples, error_examples = load_processbench_subset(
         args.dataset, args.subset, args.n_correct, args.n_error, seed=args.seed
@@ -525,7 +634,7 @@ def main():
                 skipped += 1
                 continue
             try:
-                M_D, M_V, M_C, kept_steps, layers_used, GEOM, CIM, SV = extract_spectral_field(
+                M_D, M_V, M_C, kept_steps, layers_used, GEOM, CIM, SV, TRACE = extract_spectral_field(
                     model, tokenizer, prompt, response, steps,
                     device, layer_indices=layer_indices,
                     max_seq_len=args.max_seq_len,
@@ -540,7 +649,17 @@ def main():
                     step_vectors=args.step_vectors,
                     sv_modes=tuple(args.sv_modes.split(",")) if args.step_vectors else (),
                     store_vectors=args.store_vectors,
+                    question_text=str(ex.get("problem", "")),
+                    return_trace=True,
+                    store_prompt_hidden=args.store_prompt_hidden,
+                    prompt_hidden_layer_indices=prompt_hidden_layers,
+                    store_clouds=args.store_clouds,
+                    cloud_layer_indices=cloud_layers,
                 )
+            except TokenAlignmentError:
+                # Trace corruption is a pipeline invariant violation, not a
+                # recoverable bad sample. Stop before writing mixed token axes.
+                raise
             except Exception as e:
                 print(f"  warn: extraction failed: {e}")
                 skipped += 1
@@ -577,6 +696,7 @@ def main():
                 "GEOM": GEOM,  # None unless --store_geometry
                 "CIM": CIM,    # None unless --cim_metrics
                 "SV": SV,      # None unless --step_vectors
+                "TRACE": TRACE,
             })
 
     if not rows:
@@ -591,6 +711,8 @@ def main():
         ids=np.array([r["id"] for r in rows], dtype=object),
         problems=np.array([r["problem"] for r in rows], dtype=object),
         labels=np.array([r["label"] for r in rows], dtype=np.int32),
+        gold_error_step=np.array([r["label"] for r in rows], dtype=np.int32),
+        is_correct=np.array([r["label"] < 0 for r in rows], dtype=np.int32),
         n_steps=np.array([r["n_steps"] for r in rows], dtype=np.int32),
         steps_text=np.array([r["steps_text"] for r in rows], dtype=object),
         M_D=np.array([r["M_D"] for r in rows], dtype=object),
@@ -604,6 +726,27 @@ def main():
         rank_mode=np.array(args.rank_mode),
         rank_topk=np.array(args.rank_topk),
         rank_energy_threshold=np.array(args.rank_energy_threshold),
+    )
+    # Shared exact-generation/teacher-forcing trace schema. This records the
+    # actual no-special-token model input, offsets, question/response spans,
+    # and the kept-step time axis for every trajectory.
+    save_dict.update(trace_records_to_npz([r["TRACE"] for r in rows]))
+    model_sampling_meta = {
+        "model_name": args.model,
+        "model_type": str(getattr(model.config, "model_type", "")),
+        "model_revision": str(getattr(model.config, "_commit_hash", "")),
+        "tokenizer_name": str(getattr(tokenizer, "name_or_path", args.model)),
+        "tokenizer_revision": str(getattr(tokenizer, "init_kwargs", {}).get("revision", "")),
+        "torch_dtype": str(dtype),
+        "device": str(device),
+        "source_mode": "teacher_forced_processbench",
+        "do_sample": False,
+        "seed": int(args.seed),
+        "max_seq_len": int(args.max_seq_len),
+        "add_special_tokens": False,
+    }
+    save_dict["model_sampling_metadata_json"] = np.array(
+        json.dumps(model_sampling_meta, sort_keys=True, ensure_ascii=False)
     )
     if V_R_meta is not None:
         for k, v in V_R_meta.items():
@@ -668,6 +811,30 @@ def main():
             save_dict["sv_stored"] = np.array(False)
     else:
         save_dict["sv_stored"] = np.array(False)
+
+    # Anchor-residual Gram geometry needs the raw token cloud and exact sizes,
+    # even when the legacy step-vector family is disabled.
+    if args.store_clouds:
+        have_clouds = any(
+            r["SV"] is not None and r["SV"].get("clouds") is not None for r in rows
+        )
+        save_dict["clouds_stored"] = np.array(have_clouds)
+        if have_clouds:
+            first = next(r["SV"]["clouds"] for r in rows
+                         if r["SV"] is not None and r["SV"].get("clouds") is not None)
+            save_dict["cloud_layers"] = first["layers"]
+            save_dict["sv_clouds"] = np.array([
+                r["SV"]["clouds"]["clouds"]
+                if r["SV"] is not None and r["SV"].get("clouds") is not None else None
+                for r in rows
+            ], dtype=object)
+            save_dict["cloud_sizes"] = np.array([
+                r["SV"]["clouds"]["sizes"]
+                if r["SV"] is not None and r["SV"].get("clouds") is not None else None
+                for r in rows
+            ], dtype=object)
+    else:
+        save_dict["clouds_stored"] = np.array(False)
 
     np.savez(args.output, **save_dict)
     print(f"Saved -> {args.output}"

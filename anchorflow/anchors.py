@@ -47,56 +47,88 @@ def _context_span(text: str, start: int, end: int, *, radius: int = 28) -> Tuple
 
 
 def _goal_span(text: str) -> Tuple[int, int]:
-    stripped = text.strip()
-    if not stripped:
+    """Return a goal span without losing offsets to surrounding whitespace."""
+    if not text or not text.strip():
         return (0, 0)
-    q = max(stripped.rfind("?"), stripped.rfind("."))
-    if q <= 0:
-        return (0, len(stripped))
-    prev = max(stripped.rfind(".", 0, q), stripped.rfind("\n", 0, q))
-    start = 0 if prev < 0 else prev + 1
-    return (start, min(len(stripped), q + 1))
+    lo = len(text) - len(text.lstrip())
+    hi = len(text.rstrip())
+    q = max(text.rfind("?", lo, hi), text.rfind(".", lo, hi))
+    if q < lo:
+        return (lo, hi)
+    prev = max(text.rfind(".", lo, q), text.rfind("\n", lo, q))
+    start = lo if prev < lo else prev + 1
+    while start < q and text[start].isspace():
+        start += 1
+    return (start, min(hi, q + 1))
 
 
-def parse_anchors(prompt_text: str, *, max_anchors: int = 24) -> List[Anchor]:
+def parse_anchors(
+    prompt_text: str,
+    *,
+    max_anchors: int = 24,
+    char_span: Optional[Tuple[int, int]] = None,
+) -> List[Anchor]:
+    """Parse anchors from the target problem span of a rendered prompt.
+
+    ``char_span`` should be the target-question span stored by the exact trace
+    schema.  Restricting parsing to it prevents few-shot demonstrations and
+    system instructions from becoming false evidence anchors.  Returned spans
+    always remain coordinates on the full rendered-prompt string.
+    """
     text = str(prompt_text or "")
+    if char_span is None:
+        base = 0
+        source = text
+    else:
+        start, end = int(char_span[0]), int(char_span[1])
+        if not 0 <= start < end <= len(text):
+            raise ValueError("char_span must be a non-empty span inside prompt_text")
+        base = start
+        source = text[start:end]
     anchors: List[Anchor] = []
 
     gid = 0
-    gs, ge = _goal_span(text)
-    goal = text[gs:ge].strip() or "question goal"
-    anchors.append(Anchor(gid, "goal", goal, (gs, ge), None, None))
+    gs, ge = _goal_span(source)
+    goal = source[gs:ge].strip() or "question goal"
+    anchors.append(Anchor(gid, "goal", goal, (base + gs, base + ge), None, None))
     gid += 1
 
     seen = {("goal", goal.lower())}
-    for m in NUMBER_RE.finditer(text):
+    for m in NUMBER_RE.finditer(source):
         if len(anchors) >= max_anchors:
             break
         raw = m.group(0)
         key = ("number", raw.lower())
         if key in seen:
             continue
-        anchors.append(Anchor(gid, "number", raw, (m.start(), m.end()), None, _parse_value(raw)))
+        anchors.append(Anchor(
+            gid, "number", raw,
+            (base + m.start(), base + m.end()), None, _parse_value(raw),
+        ))
         gid += 1
         seen.add(key)
         if len(anchors) >= max_anchors:
             break
-        cs, ce = _context_span(text, m.start(), m.end())
-        ctx = text[cs:ce].strip()
+        cs, ce = _context_span(source, m.start(), m.end())
+        ctx = source[cs:ce].strip()
         ckey = ("entity", ctx.lower())
         if ctx and ckey not in seen:
-            anchors.append(Anchor(gid, "entity", ctx, (cs, ce), None, None))
+            anchors.append(Anchor(
+                gid, "entity", ctx, (base + cs, base + ce), None, None,
+            ))
             gid += 1
             seen.add(ckey)
 
-    for m in CONSTRAINT_RE.finditer(text):
+    for m in CONSTRAINT_RE.finditer(source):
         if len(anchors) >= max_anchors:
             break
-        cs, ce = _context_span(text, m.start(), m.end(), radius=36)
-        ctx = text[cs:ce].strip()
+        cs, ce = _context_span(source, m.start(), m.end(), radius=36)
+        ctx = source[cs:ce].strip()
         key = ("constraint", ctx.lower())
         if ctx and key not in seen:
-            anchors.append(Anchor(gid, "constraint", ctx, (cs, ce), None, None))
+            anchors.append(Anchor(
+                gid, "constraint", ctx, (base + cs, base + ce), None, None,
+            ))
             gid += 1
             seen.add(key)
 

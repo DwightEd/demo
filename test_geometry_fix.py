@@ -63,7 +63,11 @@ def test_compute_step_geometry():
     eig = result['eigenvalues']
     assert len(eig) == 10, f"eigenvalues长度错误: {len(eig)}"
     assert np.all(eig >= 0), "存在负特征值"
-    assert eig.sum() > 0.9 and eig.sum() <= 1.1, f"eigenvalues sum异常: {eig.sum()}"
+    # This is an un-renormalized top-n slice of the full trace-normalized
+    # spectrum, so its retained mass is meaningful and need not equal one.
+    assert 0 < eig.sum() <= 1.0 + 1e-6, f"eigenvalues sum异常: {eig.sum()}"
+    assert np.isclose(result['top_spectrum_mass'], eig.sum())
+    assert 'not renormalized' in result['spectrum_semantics']
 
     # eff_rank
     assert result['eff_rank'] > 0, f"eff_rank应该>0: {result['eff_rank']}"
@@ -74,7 +78,6 @@ def test_compute_step_geometry():
     assert result['spectral_entropy'] >= 0, f"spectral_entropy应该>=0: {result['spectral_entropy']}"
 
     print("\n✓ 所有检查通过!")
-    return True
 
 def test_compare_with_old():
     """对比旧版（对角近似）和新版（完整分解）的差异"""
@@ -99,11 +102,11 @@ def test_compare_with_old():
     print(f"  最小值: {eig[-1]:.6f}")
     print(f"  标准差: {eig.std():.6f}")
 
-    return True
 
 if __name__ == "__main__":
     try:
-        success = test_compute_step_geometry()
+        test_compute_step_geometry()
+        success = True
         if success:
             test_compare_with_old()
             print("\n" + "="*50)

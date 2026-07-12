@@ -41,6 +41,12 @@ Output: data/<tag>_multisample_sv.npz with, per kept sample:
     responses         : raw model generation per sample
     steps_text        : list of step strings used for token-range matching
     step_split        : 'line' (new default) | 'sentence' (v1 legacy)
+  Exact trace fields (schema exact_generation_trace_v1):
+    prompts / prompt_token_ids / prompt_attention_mask
+    input_ids / attention_mask / token_offsets (+ untruncated full_* variants)
+    question_*_span, response_*_range, kept_steps, step_token_ranges
+    time_axis_original_step_indices / time_axis_token_ranges
+    generated_token_ids (including separately recorded terminal EOS/pad IDs)
 
 Judging:
   GSM8K answers are integers/decimals -> exact numeric match, no judge.
@@ -59,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import re
 
@@ -67,6 +74,13 @@ import torch
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
+
+from utils.step_boundaries import (
+    TokenAlignmentError,
+    build_exact_trace_alignment,
+    trace_records_to_npz,
+    trim_trailing_generation_tokens,
+)
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -340,14 +354,15 @@ def build_gen_inputs(tokenizer, question, device, prompt_style="custom_zeroshot"
     with the standard tokenizer call (which always returns a BatchEncoding
     whose ["input_ids"] is a (1, L) tensor). The template already adds
     special tokens, so add_special_tokens=False here.
-    Return both input_ids and attention_mask (pad==eos otherwise warns and
-    can give unreliable generation); move to device.
+    Return the exact rendered prompt together with input_ids and attention_mask
+    (pad==eos otherwise warns and can give unreliable generation). The rendered
+    string and these IDs are retained as the teacher-forcing source of truth.
     """
     messages = build_chat_messages(prompt_style, question)
     text = tokenizer.apply_chat_template(
         messages, add_generation_prompt=True, tokenize=False)
     enc = tokenizer(text, return_tensors="pt", add_special_tokens=False)
-    return {k: v.to(device) for k, v in enc.items()}
+    return text, {k: v.to(device) for k, v in enc.items()}
 
 
 def main():
@@ -406,6 +421,12 @@ def main():
                          "re-normalized (raw / healthy-standardized) in analysis "
                          "(11) WITHOUT re-sampling. Use --sv_modes step_exp to keep "
                          "storage small.")
+    ap.add_argument("--store_prompt_hidden", action="store_true",
+                    help="Store the exact rendered-prompt hidden span (fp16) "
+                         "at --prompt_hidden_layers for semantic anchors.")
+    ap.add_argument("--prompt_hidden_layers", default="16",
+                    help="Comma-separated hidden-state indices stored for the "
+                         "prompt span when --store_prompt_hidden is enabled.")
     ap.add_argument("--store_clouds", action="store_true",
                     help="ALSO store the raw per-step token clouds (n_j x d, fp16, "
                          "BEFORE reasoning-subspace projection) for the layers in "
@@ -454,6 +475,9 @@ def main():
 
     layer_indices = None if args.layers == "all" else \
         [int(x) for x in args.layers.split(",") if x.strip()]
+    prompt_hidden_layers = tuple(
+        int(x) for x in args.prompt_hidden_layers.split(",") if x.strip()
+    ) if args.store_prompt_hidden else None
     sv_modes = tuple(args.sv_modes.split(","))
     cloud_layers = tuple(int(x) for x in args.cloud_layers.split(",") if x.strip()) \
         if args.store_clouds else None
@@ -492,6 +516,11 @@ def main():
     # format / correctness audit counters (over ALL generated samples, before drop)
     n_marker = n_last_number = n_no_number = 0
     n_correct_strict_all = 0
+    generation_eos_token_id = getattr(
+        getattr(model, "generation_config", None),
+        "eos_token_id",
+        tokenizer.eos_token_id,
+    )
     gen_kwargs = dict(
         do_sample=True, temperature=args.temperature, top_p=args.top_p,
         max_new_tokens=args.max_new_tokens, num_return_sequences=args.k_samples,
@@ -502,21 +531,34 @@ def main():
         if gold is None:
             continue
 
-        gen_in = build_gen_inputs(tokenizer, question, device,
-                                  prompt_style=args.prompt_style)
+        rendered_prompt, gen_in = build_gen_inputs(
+            tokenizer, question, device, prompt_style=args.prompt_style
+        )
         plen = gen_in["input_ids"].shape[1]
         with torch.no_grad():
             out = model.generate(**gen_in, **gen_kwargs)
-        gen_only = out[:, plen:]
-        texts = tokenizer.batch_decode(
-            gen_only, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        sequences = out.sequences if hasattr(out, "sequences") else out
+        expected_prefix = gen_in["input_ids"][0]
+        if sequences.shape[1] < plen or not torch.equal(
+            sequences[:, :plen], expected_prefix.unsqueeze(0).expand(sequences.shape[0], -1)
+        ):
+            raise TokenAlignmentError(
+                f"generate() output for problem {pi} does not preserve its exact prompt prefix"
+            )
 
-        # plain extraction prompt, same style as 01 (teacher-forcing context)
-        extract_prompt = f"Problem: {question}\n\nSolution:\n\n"
-
-        for si, response in enumerate(texts):
+        for si in range(sequences.shape[0]):
             n_gen += 1
-            response = response.strip()
+            generated_tail = sequences[si, plen:].detach().cpu().tolist()
+            response_ids, terminal_ids = trim_trailing_generation_tokens(
+                generated_tail,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=generation_eos_token_id,
+            )
+            response = tokenizer.decode(
+                response_ids,
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
             # parse + record which path produced the prediction. "marker" = the
             # '#### N' line the prompt requested (trustworthy); "last_number" =
             # fallback to the last number in the response (format failure --
@@ -539,13 +581,36 @@ def main():
                 n_dropped_text += 1
                 continue
             try:
-                M_D, _, _, kept_steps, layers_used, _, _, SV = _ex.extract_spectral_field(
-                    model, tokenizer, extract_prompt, response, steps, device,
+                trace_alignment = build_exact_trace_alignment(
+                    tokenizer,
+                    rendered_prompt,
+                    response,
+                    steps,
+                    prompt_token_ids=gen_in["input_ids"][0],
+                    prompt_attention_mask=gen_in["attention_mask"][0],
+                    response_token_ids=response_ids,
+                    response_attention_mask=[1] * len(response_ids),
+                    question_text=question,
+                    fail_on_unmatched=True,
+                )
+                trace_alignment["generated_token_ids"] = list(generated_tail)
+                trace_alignment["generation_terminal_token_ids"] = list(terminal_ids)
+                M_D, _, _, kept_steps, layers_used, _, _, SV, TRACE = _ex.extract_spectral_field(
+                    model, tokenizer, rendered_prompt, response, steps, device,
                     layer_indices=layer_indices, max_seq_len=args.max_seq_len,
                     V_R=V_R, step_vectors=True, sv_modes=sv_modes, whiten=whiten,
                     store_vectors=args.store_vectors,
                     store_clouds=args.store_clouds, cloud_layer_indices=cloud_layers,
-                    token_uncertainty=args.store_token_uncertainty)
+                    token_uncertainty=args.store_token_uncertainty,
+                    trace_alignment=trace_alignment,
+                    question_text=question,
+                    return_trace=True,
+                    store_prompt_hidden=args.store_prompt_hidden,
+                    prompt_hidden_layer_indices=prompt_hidden_layers)
+            except TokenAlignmentError:
+                # A prompt/response mismatch would invalidate every downstream
+                # hidden trace. Do not silently count it as a dropped sample.
+                raise
             except Exception as e:
                 print(f"  warn: extraction failed (p{pi} s{si}): {e}")
                 n_dropped_extract += 1
@@ -566,11 +631,13 @@ def main():
                 "pred": pred if pred is not None else float("nan"),
                 "gold": gold,
                 "layers_used": np.asarray(layers_used, dtype=np.int32),
-                "response": response,                          # NEW: raw generation
+                "response": response,                          # exact decoded generation
                 "steps_text": list(steps),                     # NEW: parsed steps
+                "kept_steps": np.asarray(kept_steps, dtype=np.int32),
                 "tok_entropy": (SV.get("tok_entropy") if SV else None),
                 "tok_committal": (SV.get("tok_committal") if SV else None),
                 "SV": SV,
+                "TRACE": TRACE,
             })
 
     if not rows:
@@ -606,6 +673,35 @@ def main():
         whitened=np.array(whiten is not None),
         whiten_baseline=np.array(args.whiten_baseline or ""),
     )
+    save.update(trace_records_to_npz([r["TRACE"] for r in rows]))
+    model_sampling_meta = {
+        "model_name": args.model,
+        "model_type": str(getattr(model.config, "model_type", "")),
+        "model_revision": str(getattr(model.config, "_commit_hash", "")),
+        "tokenizer_name": str(getattr(tokenizer, "name_or_path", args.model)),
+        "tokenizer_revision": str(getattr(tokenizer, "init_kwargs", {}).get("revision", "")),
+        "torch_dtype": str(dtype),
+        "device": str(device),
+        "source_mode": "sampled_generation_then_exact_teacher_forcing",
+        "do_sample": True,
+        "temperature": float(args.temperature),
+        "top_p": float(args.top_p),
+        "max_new_tokens": int(args.max_new_tokens),
+        "num_return_sequences": int(args.k_samples),
+        "seed": int(args.seed),
+        "pad_token_id": tokenizer.pad_token_id,
+        "eos_token_id": generation_eos_token_id,
+        "max_seq_len": int(args.max_seq_len),
+        "prompt_style": args.prompt_style,
+        "add_special_tokens": False,
+    }
+    save["model_sampling_metadata_json"] = np.array(
+        json.dumps(model_sampling_meta, sort_keys=True, ensure_ascii=False)
+    )
+    save["sampling_seed"] = np.array(args.seed, dtype=np.int64)
+    save["sampling_temperature"] = np.array(args.temperature, dtype=np.float64)
+    save["sampling_top_p"] = np.array(args.top_p, dtype=np.float64)
+    save["sampling_max_new_tokens"] = np.array(args.max_new_tokens, dtype=np.int32)
     for m in modes:
         save[f"sv_pr_{m}"] = np.array(
             [r["SV"]["pr"][m] for r in rows], dtype=object)

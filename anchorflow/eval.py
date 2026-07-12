@@ -113,6 +113,7 @@ def flatten_labeled(
 
 
 def impute(X: np.ndarray) -> np.ndarray:
+    """Legacy whole-matrix imputer for descriptive, non-CV tables."""
     out = np.asarray(X, float).copy()
     if out.ndim == 1:
         out = out[:, None]
@@ -125,8 +126,44 @@ def impute(X: np.ndarray) -> np.ndarray:
     return out
 
 
+def impute_from_train(
+    train: np.ndarray,
+    test: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Impute a fold using training values only.
+
+    A column that is entirely missing in the training fold is disabled in both
+    train and test.  This prevents a finite test-only value from becoming a
+    feature the model could never have estimated during fitting.
+    """
+    tr = np.asarray(train, float).copy()
+    te = np.asarray(test, float).copy()
+    if tr.ndim == 1:
+        tr = tr[:, None]
+    if te.ndim == 1:
+        te = te[:, None]
+    if tr.shape[1] != te.shape[1]:
+        raise ValueError("train/test feature widths differ")
+    fills = np.zeros(tr.shape[1], dtype=float)
+    for j in range(tr.shape[1]):
+        good = np.isfinite(tr[:, j])
+        if not good.any():
+            tr[:, j] = 0.0
+            te[:, j] = 0.0
+            fills[j] = 0.0
+            continue
+        fill = float(np.mean(tr[good, j]))
+        fills[j] = fill
+        tr[~good, j] = fill
+        bad_test = ~np.isfinite(te[:, j])
+        te[bad_test, j] = fill
+    return tr, te, fills
+
+
 def oof_logit(X: np.ndarray, y: np.ndarray, groups: np.ndarray, *, folds: int) -> np.ndarray:
-    X = impute(X)
+    X = np.asarray(X, float)
+    if X.ndim == 1:
+        X = X[:, None]
     y = np.asarray(y, int)
     groups = np.asarray(groups)
     pred = np.full(len(y), np.nan)
@@ -136,9 +173,10 @@ def oof_logit(X: np.ndarray, y: np.ndarray, groups: np.ndarray, *, folds: int) -
     for tr, te in GroupKFold(n_splits=n_splits).split(X, y, groups):
         if len(np.unique(y[tr])) < 2:
             continue
+        Xtr, Xte, _ = impute_from_train(X[tr], X[te])
         clf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=3000, class_weight="balanced"))
-        clf.fit(X[tr], y[tr])
-        pred[te] = clf.predict_proba(X[te])[:, 1]
+        clf.fit(Xtr, y[tr])
+        pred[te] = clf.predict_proba(Xte)[:, 1]
     return pred
 
 

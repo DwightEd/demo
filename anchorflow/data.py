@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
@@ -28,6 +28,14 @@ class Trace:
     sv_layers: List[int]
     hidden_path: Optional[str]
     layer: int
+    prompt_offsets: Optional[np.ndarray] = None
+    question_char_span: Optional[Tuple[int, int]] = None
+    prompt_hidden: Optional[np.ndarray] = None
+    prompt_hidden_layers: List[int] = field(default_factory=list)
+    kept_steps: Optional[np.ndarray] = None
+    step_clouds: Optional[List[np.ndarray]] = None
+    schema_version: str = ""
+    time_axis_kind: str = "step"
 
     @property
     def n_steps(self) -> int:
@@ -68,6 +76,43 @@ def _str_array_get(arr, i, default: str = "") -> str:
     if val is None:
         return default
     return str(val)
+
+
+def _scalar_string(value, default: str = "") -> str:
+    if value is None:
+        return default
+    arr = np.asarray(value)
+    if arr.size == 0:
+        return default
+    return str(arr.reshape(-1)[0])
+
+
+def _select_layer_tensor(value, layers: List[int], layer: int) -> Optional[np.ndarray]:
+    """Select ``[tokens, hidden]`` from ``[tokens, layers, hidden]`` data."""
+    if value is None:
+        return None
+    arr = np.asarray(value, float)
+    if arr.ndim == 2:
+        return arr
+    if arr.ndim != 3 or arr.shape[1] == 0:
+        return None
+    li = layer_index(layers, layer, nearest=True) if layers else 0
+    return arr[:, int(li), :] if li is not None else None
+
+
+def _split_step_clouds(value, sizes, layers: List[int], layer: int) -> Optional[List[np.ndarray]]:
+    """Recover per-step clouds from the compact concatenated NPZ payload."""
+    if value is None or sizes is None:
+        return None
+    cloud = np.asarray(value, float)
+    counts = np.asarray(sizes, int).reshape(-1)
+    if cloud.ndim == 3:
+        li = layer_index(layers, layer, nearest=True) if layers else 0
+        cloud = cloud[:, int(li), :] if li is not None else cloud[:, 0, :]
+    if cloud.ndim != 2 or np.any(counts < 0) or int(counts.sum()) != len(cloud):
+        return None
+    cuts = np.cumsum(counts)[:-1]
+    return [np.asarray(x, float) for x in np.split(cloud, cuts)]
 
 
 def _step_ranges(rng: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -127,11 +172,22 @@ def load_traces(
 ) -> Tuple[List[Trace], Dict[str, object]]:
     z = np.load(npz_path, allow_pickle=True)
     files = set(z.files)
-    ges = z["gold_error_step"].astype(int)
+    if "gold_error_step" in files:
+        ges = z["gold_error_step"].astype(int)
+        correct_flags = ges < 0
+    elif "is_correct" in files:
+        correct_flags = z["is_correct"].astype(bool)
+        # -2 means incorrect but first-error location is not annotated.  Such
+        # chains remain usable for chain-level analysis but are masked from the
+        # first-error hazard risk set by ``make_labels``.
+        ges = np.where(correct_flags, -1, -2).astype(int)
+    else:
+        raise KeyError("NPZ needs gold_error_step or is_correct")
     groups = z["problem_ids"].astype(int) if "problem_ids" in files else np.arange(len(ges))
     ids = z["ids"] if "ids" in files else np.arange(len(ges)).astype(object)
     source = z["source"] if "source" in files else None
     ranges = z["step_token_ranges"]
+    kept_steps_arr = z["kept_steps"] if "kept_steps" in files else None
     steps_text = z["steps_text"] if "steps_text" in files else None
     responses = z["responses"] if "responses" in files else None
     prompts = None
@@ -157,6 +213,23 @@ def load_traces(
         val = np.asarray(z["hidden_dir"]).item()
         hidden_dir = str(val) if val else None
 
+    prompt_offsets_arr = z["token_offsets"] if "token_offsets" in files else None
+    prompt_counts = z["prompt_token_counts"] if "prompt_token_counts" in files else None
+    question_spans = z["question_char_spans"] if "question_char_spans" in files else None
+    prompt_hidden_arr = z["prompt_hidden"] if "prompt_hidden" in files else None
+    prompt_hidden_layers = (
+        [int(x) for x in np.asarray(z["prompt_hidden_layers"]).reshape(-1)]
+        if "prompt_hidden_layers" in files else []
+    )
+    raw_clouds = z["sv_clouds"] if "sv_clouds" in files else None
+    raw_cloud_sizes = z["cloud_sizes"] if "cloud_sizes" in files else None
+    raw_cloud_layers = (
+        [int(x) for x in np.asarray(z["cloud_layers"]).reshape(-1)]
+        if "cloud_layers" in files else []
+    )
+    schema_version = _scalar_string(z["trace_schema_version"], "") if "trace_schema_version" in files else ""
+    time_axis_kind = _scalar_string(z["time_axis_kind"], "step") if "time_axis_kind" in files else "step"
+
     n = len(ges) if not max_chains else min(int(max_chains), len(ges))
     traces: List[Trace] = []
     missing = {"stepvec": 0, "qvec": 0, "prompt_text": 0, "stepcloud": 0}
@@ -164,6 +237,17 @@ def load_traces(
         rng = np.asarray(ranges[i], int)
         if rng.ndim != 2 or len(rng) == 0:
             continue
+        kept = (
+            np.asarray(_obj_get(kept_steps_arr, i, np.arange(len(rng))), int).reshape(-1)
+            if kept_steps_arr is not None else np.arange(len(rng), dtype=int)
+        )
+        if len(kept) != len(rng):
+            continue
+        original_error = int(ges[i])
+        mapped_error = original_error
+        if original_error >= 0 and kept_steps_arr is not None:
+            hit = np.where(kept == original_error)[0]
+            mapped_error = int(hit[0]) if hit.size else -2
         T = len(rng)
         n_tok, pos = _step_ranges(rng)
         feats: Dict[str, np.ndarray] = {
@@ -194,7 +278,11 @@ def load_traces(
         if sv_sel is None:
             missing["stepvec"] += 1
         if qvec is not None:
-            qraw = np.asarray(qvec[i], float) if np.asarray(qvec[i]).ndim == 2 else np.asarray(qvec, float)
+            q_all = np.asarray(qvec)
+            if q_all.dtype != object and q_all.ndim == 1:
+                qraw = np.asarray(q_all, float)
+            else:
+                qraw = np.asarray(_obj_get(qvec, i, None), float)
             if qraw.ndim == 2:
                 qi = min(svi if svi is not None else 0, qraw.shape[0] - 1)
                 q_sel = qraw[qi]
@@ -229,14 +317,45 @@ def load_traces(
         prompt_text = _str_array_get(prompts, i, "") if prompts is not None else ""
         if not prompt_text:
             missing["prompt_text"] += 1
+
+        p_offsets = None
+        if prompt_offsets_arr is not None:
+            raw_offsets = np.asarray(_obj_get(prompt_offsets_arr, i, None), int)
+            if raw_offsets.ndim == 2 and raw_offsets.shape[1] == 2:
+                pcount = int(prompt_counts[i]) if prompt_counts is not None else len(raw_offsets)
+                p_offsets = raw_offsets[:pcount]
+                feats["prompt_offsets"] = p_offsets
+        p_hidden = _select_layer_tensor(
+            _obj_get(prompt_hidden_arr, i, None) if prompt_hidden_arr is not None else None,
+            prompt_hidden_layers,
+            layer,
+        )
+        if p_hidden is not None:
+            if p_offsets is not None and len(p_hidden) != len(p_offsets):
+                p_hidden = None
+            else:
+                feats["prompt_hidden"] = p_hidden
+        q_span = None
+        if question_spans is not None:
+            raw_span = np.asarray(question_spans[i], int).reshape(-1)
+            if len(raw_span) == 2 and raw_span[0] >= 0:
+                q_span = (int(raw_span[0]), int(raw_span[1]))
+        step_clouds = _split_step_clouds(
+            _obj_get(raw_clouds, i, None) if raw_clouds is not None else None,
+            _obj_get(raw_cloud_sizes, i, None) if raw_cloud_sizes is not None else None,
+            raw_cloud_layers,
+            layer,
+        )
+        if step_clouds is not None and len(step_clouds) != T:
+            step_clouds = None
         traces.append(
             Trace(
                 idx=i,
                 chain_id=str(_obj_get(ids, i, i)),
                 problem_id=int(groups[i]),
                 dataset=dataset or str(_obj_get(source, i, "")),
-                correct=bool(int(ges[i]) < 0),
-                gold_error_step=int(ges[i]),
+                correct=bool(correct_flags[i]),
+                gold_error_step=int(mapped_error),
                 step_token_ranges=rng,
                 steps_text=st,
                 response_text=_str_array_get(responses, i, ""),
@@ -247,6 +366,14 @@ def load_traces(
                 sv_layers=sv_layers,
                 hidden_path=_hidden_path(hidden_dir, hidden_files, ids, i),
                 layer=int(layer),
+                prompt_offsets=p_offsets,
+                question_char_span=q_span,
+                prompt_hidden=p_hidden,
+                prompt_hidden_layers=prompt_hidden_layers,
+                kept_steps=kept,
+                step_clouds=step_clouds,
+                schema_version=schema_version,
+                time_axis_kind=time_axis_kind,
             )
         )
 
@@ -260,6 +387,11 @@ def load_traces(
         "has_stepvec": bool(stepvec is not None),
         "has_qvec": bool(qvec is not None),
         "has_prompt_text": bool(prompts is not None),
+        "has_exact_trace": bool(schema_version),
+        "has_prompt_hidden": bool(prompt_hidden_arr is not None),
+        "has_step_clouds": bool(raw_clouds is not None),
+        "trace_schema_version": schema_version,
+        "time_axis_kind": time_axis_kind,
         "missing": missing,
     }
     return traces, meta
@@ -277,4 +409,9 @@ def make_labels(trace: Trace, *, mask_post_error: bool = True) -> Tuple[np.ndarr
         y[trace.gold_error_step] = 1
         if mask_post_error:
             mask[np.arange(trace.n_steps) > trace.gold_error_step] = False
+    elif not trace.correct:
+        # A chain-level error label without a localized first-error annotation
+        # is not a right-censored clean chain.  Mask it rather than fabricating
+        # negative hazard targets.
+        mask[:] = False
     return y, mask
