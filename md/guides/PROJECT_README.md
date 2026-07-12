@@ -1,66 +1,92 @@
-# ECGH：证据耦合的推理错误定位与干预研究工程
+# Layer–Time Representation Geometry
 
-本仓库当前主线是 **Evidence-Coupled Geometry Hazard（ECGH）**：在实际生成上下文中，追踪 response 与题设证据锚点的连接、锚点不能解释的二阶几何变化、首次错误 hazard，以及等计算量的局部修复。
+当前项目主线只研究一个对象：推理表征在“网络深度 × 推理时间”二维网格上的局部几何演化。
 
-旧的 `(Step × Layer) spectral field`、scalar HMM、tube、qvec AnchorFlow 和 hypergraph 脚本仍保留为历史基线，但不再是 Quick Start，也不应单独支撑 paper-ready 主张。
+我们不再把 prompt anchor、uncertainty、hazard、intervention 或若干 detector 拼成主方法。旧的 `representation_geometry.py`、`spectral_chain_dynamics.py`、VAE、HMM、Gram 和 AnchorFlow 仍保留为历史基线，但不进入当前方法定义。
 
-## 方法对象
+## 唯一主对象
 
-```text
-exact generation trace
-  -> semantic prompt-span anchors
-  -> compact causal lookback
-  -> anchor-residual Gram geometry
-  -> boundary-free causal event
-  -> first-error survival hazard
-  -> micro-replay / repath / abstention
-```
-
-对窗口 hidden cloud \(H_t\) 和 prompt anchor bank \(A_t\)，先投影掉 anchor 子空间：
+对链 $i$、推理步 $t$、hidden-state 深度 $\ell$，保存而不是压平：
 
 \[
-R_t=H_t(I-P_{A_t}),
+z_{i,t,\ell}
+=
+\frac{1}{|S_{i,t}|}
+\sum_{p\in S_{i,t}}h_{i,p}^{(\ell)}
+\in\mathbb R^D,
 \qquad
-G_t=\frac{1}{n_t}R_tR_t^\top.
+Z_i\in\mathbb R^{T_i\times L\times D}.
 \]
 
-首次错误不再用独立 token BCE，而用离散 hazard：
+每个 held-out 状态只与训练 fold 中、相同归一化推理进度的完整参考链比较。局部 kNN 同时给出 LID、邻域谱系和局部切空间；沿 layer 与 time 两条轴拟合局部 connection，最后在最小 layer–time 方格上比较两条路径：
 
 \[
-q_t=P(T=t\mid T\ge t,\mathcal H_{\le t}),
+P_{\ell t}=R^t_{\ell+1,t}R^\ell_{\ell,t},
 \qquad
-S_t=\prod_{s\le t}(1-q_s).
+P_{t\ell}=R^\ell_{\ell,t+1}R^t_{\ell,t},
 \]
 
-正确链是右删失样本，错误发生后的位置不进入风险集。
+\[
+\kappa_{i,\ell,t}
+=
+\frac{\|P_{\ell t}-P_{t\ell}\|_F}{2\sqrt q}.
+\]
 
-详细设计与实验门槛：
+这里 LID 决定局部 fiber rank，邻域身份定义 paired local chart，holonomy $\kappa$ 是唯一核心交互量；它们不是彼此无关的特征栈。完整定义见 [METHOD_LAYER_TIME_GEOMETRY.md](../../prompt_control_flow/METHOD_LAYER_TIME_GEOMETRY.md)。
 
-- [方法重设计报告](../../research-reports/IDEA_DISCOVERY_LATEST.md)
-- [claim-driven 实验路线图](../../refine-logs/EXPERIMENT_PLAN_LATEST.md)
-- [《The Phenomenology of Hallucinations》机制拆解](../../research-reports/PHENOMENOLOGY_LATEST.md)
-- [artifact manifest](../../MANIFEST.md)
+## 两阶段主流程
 
-## 1. 本地安装与确定性检查
+### A. 从文本链重新抽取全层 mean state
 
-```bash
-python -m pip install -r requirements-dev.txt
-python ecgh_pipeline.py doctor
-python ecgh_pipeline.py selftest
-python -m pytest -q
-```
+`--geometry_only` 会关闭 prompt-flow 与 uncertainty，只保存 `[step, layer, hidden]`。`--layers all` 的含义是所有 transformer block 的 post-block hidden states；exact artifact 若已含 prompt IDs、response IDs、offsets 与 step ranges，会直接回放，绝不重新 tokenize。
 
-`doctor` 会区分 CPU、本地 GPU、HyperGNN、真实数据和干预原型状态。`selftest` 是 CPU-only 端到端合成门：semantic anchor、compact lookback、anchor-residual Gram、causal event、right-censored hazard 和 micro-replay 必须全部连通。
-
-NTS/Hydra 配置入口可单独检查：
+exact token IDs 默认还会核对 artifact 的 source model/tokenizer 名称；不匹配会停止。`--allow_model_mismatch` 只允许用于显式的不安全 ablation。
 
 ```bash
-python scripts/run_gate.py --help
+python -m prompt_control_flow.cli.extract_mechanisms \
+  --input data/gsm8k_exact_multisample.npz \
+  --model /path/to/Llama-3.1-8B-Instruct \
+  --output outputs/layer_time/gsm8k_whole_layer_states.npz \
+  --geometry_only \
+  --min_success_fraction 0.99 \
+  --max_seq_len 4096 \
+  --device cuda \
+  --dtype bfloat16
 ```
 
-## 2. GPU：生成与 exact trace 抽取
+该命令边抽取边写 `gsm8k_whole_layer_states.states.<run-id>.npy`（fp16 memmap）；轻量 NPZ 保存相对路径、chain/step 索引、层号和 provenance。两个文件必须一起移动。state 使用 run-unique 文件名，manifest 最后原子提交，避免中断时让旧 manifest 指向半个新 tensor；确认新 run 后可清理不再被 manifest 引用的旧 state 文件。
 
-推荐先跑小样本 schema gate，再扩数据：
+### B. 构造 problem-grouped OOF layer–time field
+
+```bash
+python -m prompt_control_flow.cli.audit_layer_time_geometry \
+  --input outputs/layer_time/gsm8k_whole_layer_states.npz \
+  --output outputs/layer_time/gsm8k_ltg.npz \
+  --output_dir outputs/layer_time/gsm8k_ltg_audit \
+  --folds 5 \
+  --knn_k 20 \
+  --tangent_k 24 \
+  --tangent_rank 6 \
+  --projection_dim 64 \
+  --max_reference 256 \
+  --phase_grid_size 11
+```
+
+第二阶段只依赖 NumPy，可在 CPU 上运行。reference、归一化和局部 transport 只使用训练 problem；JL 由固定 seed data-independently 生成，并跨层、跨 outer fold 共享。错误标签仅在输出后的验证阶段使用。
+
+## 直接读取 exact `sv_vec_mean`
+
+`10_sample_and_extract.py` 与 `01_extract_spectral_field.py` 的全层 raw mean vectors 可直接进入第二阶段，但正式主线必须满足：
+
+```bash
+--layers all --no_reasoning_subspace --sv_modes mean --store_vectors
+```
+
+这两个 writer 的 depth 0 是 embedding output；adapter 会显式删除 depth 0，使其与 `geometry_only` 的 post-block depths 1..N 对齐，并记录 `layer_time_embedding_depth_dropped`。
+
+`sv_vec_mean` adapter 只构造 run-unique 的临时 layered fp16 memmap，不再经过旧 spectral canonicalizer 的 $LD$ flattened 副本；field artifact 写完后临时文件会被删除，输入目录不会被覆盖。
+
+示例：
 
 ```bash
 python 10_sample_and_extract.py \
@@ -68,130 +94,112 @@ python 10_sample_and_extract.py \
   --dataset_format processbench \
   --dataset /path/to/ProcessBench \
   --subset gsm8k \
-  --n_problems 32 \
-  --k_samples 4 \
-  --prompt_style lm_eval_5shot \
-  --layers 8,16,24,32 \
-  --store_prompt_hidden \
-  --prompt_hidden_layers 16 \
-  --store_clouds \
-  --cloud_layers 16 \
-  --store_token_uncertainty \
-  --output data/gsm8k_ecgh_smoke.npz
+  --n_problems 64 \
+  --k_samples 8 \
+  --layers all \
+  --no_reasoning_subspace \
+  --sv_modes mean \
+  --store_vectors \
+  --output data/gsm8k_ltg_smoke.npz
+
+python -m prompt_control_flow.cli.audit_layer_time_geometry \
+  --input data/gsm8k_ltg_smoke.npz \
+  --output outputs/layer_time/gsm8k_ltg_smoke.npz
 ```
 
-抽取契约是 `exact_generation_trace_v1`：
-
-- generation 和 teacher-forcing 复用同一 rendered prompt、prompt IDs 和 generated response IDs；
-- 不重新 tokenize `prompt + response`；
-- 保存 prompt/response IDs、mask、offsets、question span、完整与 kept step ranges、time-axis metadata；
-- 可保存选定层 prompt hidden 与 raw step clouds；
-- 任一 token、offset、prefix 或 step-range 错位都会抛出 `TokenAlignmentError`，不会静默写出 artifact。
-
-抽取后先做结构审计：
-
-```bash
-python ecgh_pipeline.py trace-audit \
-  --input data/gsm8k_ecgh_smoke.npz \
-  --layer 16 \
-  --output outputs/trace_audit/gsm8k_smoke.json
-```
-
-只有 `semantic_anchor_ready` 与 `conditional_geometry_ready` 达到预期，才扩到 128×8 或全量。
-
-若需要直接验证 first-error hazard，可先在带 ProcessBench 首错标签的 teacher-forced 轨迹上开发：
-
-```bash
-python 01_extract_spectral_field.py \
-  --model /path/to/Llama-3.1-8B-Instruct \
-  --dataset /path/to/ProcessBench \
-  --subset gsm8k \
-  --n_correct 50 \
-  --n_error 50 \
-  --layers 8,16,24,32 \
-  --store_prompt_hidden \
-  --prompt_hidden_layers 16 \
-  --store_clouds \
-  --cloud_layers 16 \
-  --step_vectors \
-  --output data/processbench_gsm8k_ecgh.npz
-
-python ecgh_pipeline.py trace-audit \
-  --input data/processbench_gsm8k_ecgh.npz \
-  --layer 16 \
-  --output outputs/trace_audit/processbench_gsm8k.json
-```
-
-该路径的 metadata 会明确标记 `teacher_forced_processbench`；它适合开发定位器，但不能冒充真实在线生成。`10_sample_and_extract.py` 的新生成样本只有 chain correctness，若要训练 first-error hazard，还需独立 step verifier / 人工首错标注。
-
-## 3. 二阶矩非参数 gate
-
-在考虑 Matrix-HMM/Wishart state model 前，先运行透明 gate：
-
-```bash
-python second_moment_dynamics_audit.py \
-  --input data/gsm8k_ecgh_smoke.npz \
-  --layer 16 \
-  --policy answer_format_ok \
-  --output_dir outputs/second_moment_dynamics
-```
-
-该审计使用 direct raw/centered token-matrix Gram、problem-grouped OOF、fold 内预处理与 problem-cluster bootstrap，主判据是 `baseline + Gram` 相对 spread/entropy/length baseline 的同题增量。项目现有真实数据结果为负：Gram/spectral-tail 低于强 baseline；在新 exact trace 上复验前，它是已失败的旧主线而不是默认创新点。只有增量置信区间稳定大于零，才考虑 matrix-state 模型。
-
-## 4. temporal audit
-
-```bash
-python multisample_temporal_rupture_audit.py \
-  --input data/gsm8k_ecgh_smoke.npz \
-  --policies answer_format_ok \
-  --output_dir outputs/multisample_temporal_rupture
-```
-
-token entropy/committal 只有通过 `cloud_sizes` 或显式 token-to-step ranges 池化后，才可与 step channel 融合。所有多通道序列必须具有完全相同的 step 数；不再按 `minT` 截断硬拼。
-
-## 5. 旧/上界流程
-
-| 流程 | 定位 | 当前使用方式 |
-|---|---|---|
-| `scripts/run_gate.py` | NTS 数学证据门 | CPU 可运行；真实数据另需对应 features/hidden |
-| `anchorflow_anchor_audit.py` | qvec fallback 历史基线 | 只作 baseline，不称 semantic anchor |
-| `second_moment_dynamics_audit.py` | grouped-OOF direct Gram gate | 当前真实结果为负；只作复验/条件专家门槛 |
-| `hypergraph_token_hgn.py` | 结构化神经上界 | 需 Torch/PyG/GPU；不是默认 reader |
-| `online_intervene.py` | 旧离线 repair 原型 | 非真实 streaming，不用于净收益主结论 |
-| 旧 spectral/tube/HMM 脚本 | 负结果与历史基线 | 保留复现，不再作为根入口 |
-
-HyperGNN synthetic upper bound（GPU/PyG 环境）：
-
-```bash
-python hypergraph_token_hgn.py --selftest --device cuda
-```
-
-## 6. 评价协议
-
-- 按 `problem_id` GroupKFold；同一道题的所有 sample 不跨 fold。
-- 插补、标准化、残差化、阈值与超参只在训练 fold 拟合。
-- 主指标：same-problem pair-micro AUROC、problem-macro AUROC、固定正确链 FPR 下 recall/delay、Brier/ECE。
-- 置信区间按 problem cluster bootstrap。
-- 真实 anchor 必须比较 qvec、random vector、span shuffle、kind shuffle。
-- 干预必须在所有触发链上报告 wrong→right、correct→wrong、额外 tokens、coverage 与净收益。
-
-## 7. Go / no-go
-
-1. token/offset/range 对齐不是 100%：停止下游。
-2. semantic anchor 不优于 qvec 与 span-shuffle：删除语义主张。
-3. conditional Gram 对强基线无同题 OOF 增量：不做 Matrix-HMM。
-4. boundary-free event 只在链尾触发：删除 local rupture 主张。
-5. 等预算 intervention 净收益不为正：只保留检测/机制，不声称闭环。
-
-## 8. 配套 research skills
-
-ARIS Codex 套件安装在项目根目录：
+已有 canonical `full_*.npz` 只有稀疏层且通常是 `step_exp` pooling，默认会被连续层与 mean-pooling 两道 guard 拒绝。只有做历史 ablation 时才同时显式添加：
 
 ```text
-D:\projects\research\.agents\skills       # 80 个 SKILL.md
+--allow_sparse_layers --allow_legacy_pooling
+```
+
+该结果不得称为 whole-layer 主结果。
+
+## 输出 schema
+
+主输出保留 `float32` 完整场：
+
+```text
+layer_time_geometry_field
+  shape = [chain, max_step, layer, observable]
+
+layer_time_geometry_field_names =
+  lid
+  depth_neighbor_rewire
+  time_neighbor_rewire
+  depth_tangent_drift
+  time_tangent_drift
+  plaquette_holonomy
+  rank_singularity
+```
+
+同时记录：
+
+```text
+layer_time_geometry_layers
+layer_time_geometry_fold
+layer_time_geometry_reference_sizes
+layer_time_geometry_lid_coverage
+layer_time_geometry_connection_coverage
+layer_time_geometry_holonomy_coverage
+layer_time_geometry_reference_policy
+layer_time_geometry_pooling_kind
+layer_time_geometry_representation_kind
+```
+
+`ltg_*` step/chain reductions只用于预注册验证和兼容现有 evaluator，不是方法对象，也不做任意加权总分。
+
+第二阶段默认不把数 GB 的 raw state tensor 再复制进 field artifact；输出保存 source path/size 与采样 provenance。只有显式 `--keep_state_vectors` 才会嵌入原 tensor。
+
+## 必须通过的门
+
+1. exact token replay、offset 与 step-range 必须处在同一 token 轴；一处错位即停止。
+2. `state_representation_kind == hidden_state`，不能偷偷使用 reasoning-subspace projection。
+3. `state_pooling_kind == arithmetic_mean_over_step_tokens`。
+4. 正式主结果要求层号连续；稀疏层只作 pilot。
+5. 同一 `problem_id` 的全部 sample 必须在同一 fold。
+6. OOF LID/connection/holonomy coverage 默认至少为 0.99/0.95/0.90；任何 fold 参考链少于 k 会硬失败。
+7. identical-layer 不变量要求 depth rewiring (=0)，tangent/holonomy 只允许数值误差。
+8. 结论必须通过 $k$、JL 维度、tangent-rank、reference cap 与 phase-grid sensitivity；不能在同一测试集挑最佳层或最佳超参。
+
+## 资源估算
+
+全层 hidden tensor 的未压缩 fp16 大小约为：
+
+\[
+2\times N_{\text{step}}\times L\times D\ \text{bytes}.
+\]
+
+例如 $24{,}000$ 个 step、$L=32$、$D=4096$ 时约 $6.3$ GB。`geometry_only` 直接写 fp16 memmap，不保留全量 float32 list，也不保存 flattened 副本。审计阶段以零拷贝方式打开 memmap，仅对 fold/query 分块转 float32 并共享 JL 到 64 维；reference cap 按训练链而不是训练 step 计数。
+
+## 本地验证
+
+```bash
+python -m pip install -r requirements-dev.txt
+pytest -q tests/test_trace_alignment.py \
+          tests/test_teacher_forcing_trace.py \
+          tests/test_layer_time_geometry.py
+python -m prompt_control_flow.cli.extract_mechanisms --help
+python -m prompt_control_flow.cli.audit_layer_time_geometry --help
+```
+
+当前 CPU 合成链、schema、group split、label invariance、identical-layer 与 gauge-invariance 测试已连通；真实 7B/8B 全层 GPU smoke 仍必须在远端完成后，才能声称真实数据流程通过。
+
+## 研究产物
+
+- [方法重设计报告](../../research-reports/IDEA_DISCOVERY_LATEST.md)
+- [claim-driven 实验计划](../../refine-logs/EXPERIMENT_PLAN_LATEST.md)
+- [紧凑实验跟踪器](../../refine-logs/EXPERIMENT_TRACKER.md)
+- [《The Phenomenology of Hallucinations》详解](../../research-reports/PHENOMENOLOGY_LATEST.md)
+- [artifact manifest](../../MANIFEST.md)
+
+## 配套 skills
+
+已安装到项目根目录：
+
+```text
+D:\projects\research\.agents\skills              # 80 个 SKILL.md
 D:\projects\research\.agents\skills\shared-references
 D:\projects\research\.aris\tools
 D:\projects\research\.aris\installed-skills-codex.txt
 ```
-
-Codex 通常在新一轮会话中重新发现项目本地 skills。

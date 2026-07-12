@@ -18,6 +18,7 @@ class ExtractionConfig:
     include_entropy: bool = True
     store_step_vectors: bool = False
     store_step_state_vectors: bool = False
+    store_flat_step_state_vectors: bool = True
     dtype: str = "auto"
     device: str = "auto"
     full_attention_token_threshold: int = 1200

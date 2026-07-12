@@ -155,6 +155,7 @@ def _ablation_best(names: Sequence[str], chain_scores: np.ndarray, y: np.ndarray
         "icr": ("icr",),
         "representation_geometry": ("geom_",),
         "spectral_chain_dynamics": ("sd_",),
+        "layer_time_geometry": ("ltg_",),
         "controls": ("step_len", "rel_pos"),
         "combined": tuple(str(x) for x in names),
     }

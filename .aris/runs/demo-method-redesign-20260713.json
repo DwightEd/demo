@@ -6,51 +6,51 @@
     "provisional_advances": true
   },
   "created": "2026-07-12T16:41:04Z",
-  "updated": "2026-07-12T17:05:44Z",
+  "updated": "2026-07-12T18:13:36Z",
   "phases": [
     {
       "phase": "idea-discovery",
       "status": "provisional",
-      "artifact": "research-reports/idea-discovery-20260713-010210.md",
-      "verdict_id": "audit-demo-20260713",
-      "reviewer": "codex-audit-agent",
+      "artifact": "research-reports/idea-discovery-20260713-021336.md",
+      "verdict_id": "layer-time-multi-agent-audit-20260713",
+      "reviewer": "codex-multi-agent-review",
       "reviewer_family": "openai",
       "review_independence": "same-family",
       "acceptance_status": "provisional",
       "executor_model": "codex-gpt-5.6-sol",
       "executor_family": "openai",
-      "updated": "2026-07-12T17:05:44Z"
+      "updated": "2026-07-12T18:13:36Z"
     },
     {
       "phase": "experiment-bridge",
-      "status": "running",
-      "artifact": "refine-logs/experiment-plan-20260713-010210.md",
-      "verdict_id": null,
-      "reviewer": null,
-      "reviewer_family": null,
-      "review_independence": null,
-      "acceptance_status": null,
+      "status": "completed",
+      "artifact": "refine-logs/experiment-plan-20260713-021336.md",
+      "verdict_id": "layer-time-plan-audit-20260713",
+      "reviewer": "codex-multi-agent-review",
+      "reviewer_family": "openai",
+      "review_independence": "same-family",
+      "acceptance_status": "provisional",
       "executor_model": "codex-gpt-5.6-sol",
       "executor_family": "openai",
-      "updated": "2026-07-12T17:05:44Z"
+      "updated": "2026-07-12T18:13:36Z"
     },
     {
       "phase": "auto-review-loop",
-      "status": "pending",
-      "artifact": null,
-      "verdict_id": null,
-      "reviewer": null,
-      "reviewer_family": null,
-      "review_independence": null,
-      "acceptance_status": null,
+      "status": "completed",
+      "artifact": "research-reports/idea-discovery-20260713-021336.md",
+      "verdict_id": "layer-time-code-method-review-20260713",
+      "reviewer": "codex-multi-agent-review",
+      "reviewer_family": "openai",
+      "review_independence": "same-family",
+      "acceptance_status": "provisional",
       "executor_model": "codex-gpt-5.6-sol",
       "executor_family": "openai",
-      "updated": "2026-07-12T16:41:04Z"
+      "updated": "2026-07-12T18:13:36Z"
     },
     {
       "phase": "summary",
-      "status": "pending",
-      "artifact": null,
+      "status": "completed",
+      "artifact": "refine-logs/EXPERIMENT_TRACKER.md",
       "verdict_id": null,
       "reviewer": null,
       "reviewer_family": null,
@@ -58,12 +58,13 @@
       "acceptance_status": null,
       "executor_model": "codex-gpt-5.6-sol",
       "executor_family": "openai",
-      "updated": "2026-07-12T16:41:04Z"
+      "updated": "2026-07-12T18:13:36Z"
     },
     {
       "phase": "paper-writing",
-      "status": "pending",
+      "status": "skipped",
       "artifact": null,
+      "reason": "real whole-layer GPU evidence is not yet available; paper claims would be premature",
       "verdict_id": null,
       "reviewer": null,
       "reviewer_family": null,
@@ -71,7 +72,7 @@
       "acceptance_status": null,
       "executor_model": "codex-gpt-5.6-sol",
       "executor_family": "openai",
-      "updated": "2026-07-12T16:41:04Z"
+      "updated": "2026-07-12T18:13:36Z"
     }
   ]
 }

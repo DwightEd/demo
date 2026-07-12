@@ -222,6 +222,7 @@ def canonicalize_spectral_input(metrics: Mapping[str, Any], vector_key: str = "s
 
     layers = np.asarray(metrics.get("sv_layers", metrics.get("layers_used", np.arange(_infer_num_layers(stepvec)))), dtype=np.int64)
     flat = []
+    layered = []
     flat_chain = []
     flat_step = []
     step_len = np.full((n, max_steps), np.nan, dtype=np.float32)
@@ -239,6 +240,7 @@ def canonicalize_spectral_input(metrics: Mapping[str, Any], vector_key: str = "s
         arr = _chain_stepvec_array(stepvec[i])
         for j in range(min(arr.shape[0], int(n_steps[i]))):
             flat.append(arr[j].reshape(-1).astype(np.float32, copy=False))
+            layered.append(arr[j].astype(np.float32, copy=False))
             flat_chain.append(i)
             flat_step.append(j)
             if not np.isfinite(step_len[i, j]):
@@ -252,8 +254,8 @@ def canonicalize_spectral_input(metrics: Mapping[str, Any], vector_key: str = "s
         "gold_error_step": gold,
         "is_correct": correct,
         "sample_idx": sample_idx,
-        "generator": np.asarray(metrics.get("generator", metrics.get("generators", [""] * n)), dtype=object),
-        "dataset": np.asarray(metrics.get("dataset", metrics.get("datasets", [""] * n)), dtype=object),
+        "generator": _metadata_vector(metrics, ("generator", "generators", "model_name"), n),
+        "dataset": _metadata_vector(metrics, ("dataset", "datasets", "subset"), n),
         "n_steps": n_steps,
         "step_token_ranges": step_ranges,
         "step_scores": np.stack([step_len, rel_pos], axis=2).astype(np.float32),
@@ -262,9 +264,20 @@ def canonicalize_spectral_input(metrics: Mapping[str, Any], vector_key: str = "s
         "chain_score_names": np.asarray(["mean_step_len", "mean_rel_pos"], dtype="<U96"),
         "layers": layers,
         vector_key: vectors.astype(np.float16),
+        "step_layer_state_vectors": np.asarray(layered, dtype=np.float16),
         f"{_vector_prefix(vector_key)}_chain_idx": np.asarray(flat_chain, dtype=np.int64),
         f"{_vector_prefix(vector_key)}_step_idx": np.asarray(flat_step, dtype=np.int64),
         f"{_vector_prefix(vector_key)}_layers": layers,
+        "step_layer_state_vector_chain_idx": np.asarray(flat_chain, dtype=np.int64),
+        "step_layer_state_vector_step_idx": np.asarray(flat_step, dtype=np.int64),
+        "step_layer_state_vector_layers": layers,
+        "state_representation_kind": np.asarray(
+            metrics.get("state_representation_kind", "hidden_state"), dtype=object
+        ),
+        "state_pooling_kind": np.asarray(
+            metrics.get("state_pooling_kind", metrics.get("stepvec_mode", "legacy_step_exp")),
+            dtype=object,
+        ),
         "spectral_source_format": np.asarray("processbench_full_stepvec", dtype=object),
     }
     return packed
@@ -272,6 +285,22 @@ def canonicalize_spectral_input(metrics: Mapping[str, Any], vector_key: str = "s
 
 def _vector_prefix(vector_key: str) -> str:
     return "step_state_vector" if str(vector_key) == "step_state_vectors" else "step_vector"
+
+
+def _metadata_vector(metrics: Mapping[str, Any], keys: tuple[str, ...], n: int) -> np.ndarray:
+    value: Any = None
+    for key in keys:
+        if key in metrics:
+            value = metrics[key]
+            break
+    if value is None:
+        return np.asarray([""] * int(n), dtype=object)
+    arr = np.asarray(value, dtype=object)
+    if arr.ndim == 0:
+        return np.asarray([arr.item()] * int(n), dtype=object)
+    if arr.shape[0] != int(n):
+        raise ValueError(f"metadata {keys} has length {arr.shape[0]}, expected {n}")
+    return arr
 
 
 def _chain_stepvec_array(x: Any) -> np.ndarray:

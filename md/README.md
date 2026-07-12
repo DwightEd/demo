@@ -30,7 +30,7 @@ Research findings, literature notes, falsification records, and hypothesis/insig
 
 Operational guides, data/cache format references, and package-specific usage notes.
 
-- `PROJECT_README.md` - current ECGH project entry, runnable gates, and GPU handoff.
+- `PROJECT_README.md` - current whole-layer layer-time geometry entry, runnable gates, and GPU handoff.
 - `DATA.md` - dataset/cache label conventions and current data warnings.
 - `FEATURES.md` - feature reference.
 - `EXPLAIN_DATA_STRUCTURE.md` - data structure explanation.

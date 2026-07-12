@@ -193,17 +193,39 @@ def compute_step_state_vectors(
     step_ranges: Sequence[Tuple[int, int]],
     layers: Sequence[int],
 ) -> np.ndarray:
-    """Return one hidden-state geometry vector per reasoning step.
+    """Return the backward-compatible flattened state vector for each step.
 
-    This is the point-cloud object used by representation-geometry audits.  For
-    every selected layer, it mean-pools the post-residual hidden states over
-    the generated tokens in the reasoning step, then concatenates layer
-    vectors.  Unlike ``compute_step_residual_vectors``, this stores the state
-    occupied by the chain, not the layer-to-layer write.
+    New geometry code should prefer :func:`compute_step_layer_state_vectors`,
+    which preserves the layer axis.  This wrapper intentionally keeps the old
+    ``[step, layer * hidden]`` schema for existing audits.
+    """
+
+    tensor = compute_step_layer_state_vectors(
+        hidden_states,
+        step_ranges=step_ranges,
+        layers=layers,
+    )
+    if tensor.size == 0:
+        return np.zeros((tensor.shape[0], 0), dtype=np.float32)
+    return tensor.reshape(tensor.shape[0], -1)
+
+
+def compute_step_layer_state_vectors(
+    hidden_states: Sequence[np.ndarray],
+    *,
+    step_ranges: Sequence[Tuple[int, int]],
+    layers: Sequence[int],
+) -> np.ndarray:
+    """Mean-pool step states while preserving network depth.
+
+    The returned tensor has shape ``[n_steps, n_layers, hidden_dim]``.  Its
+    entry ``out[t, l]`` is the mean hidden state over tokens in reasoning step
+    ``t`` at the explicitly requested hidden-state depth ``layers[l]``.  No
+    layer concatenation, supervision, or learned readout is applied here.
     """
 
     if len(step_ranges) == 0:
-        return np.zeros((0, 0), dtype=np.float32)
+        return np.zeros((0, len(layers), 0), dtype=np.float32)
 
     hidden_dim = None
     for h in hidden_states:
@@ -214,22 +236,18 @@ def compute_step_state_vectors(
     if hidden_dim is None:
         raise ValueError("hidden_states must contain rank-2 arrays")
 
-    out = np.zeros((len(step_ranges), len(layers) * hidden_dim), dtype=np.float32)
+    out = np.zeros((len(step_ranges), len(layers), hidden_dim), dtype=np.float32)
     for j, (a, b) in enumerate(step_ranges):
         target_positions = np.arange(int(a), int(b) + 1, dtype=np.int64)
-        chunks: List[np.ndarray] = []
-        for layer in layers:
+        for layer_pos, layer in enumerate(layers):
             l = int(layer)
             if l < 0 or l >= len(hidden_states):
-                chunks.append(np.zeros(hidden_dim, dtype=np.float32))
                 continue
             h_l = np.asarray(hidden_states[l], dtype=np.float32)
             valid = target_positions[(target_positions >= 0) & (target_positions < h_l.shape[0])]
             if valid.size == 0:
-                chunks.append(np.zeros(hidden_dim, dtype=np.float32))
                 continue
-            chunks.append(np.mean(h_l[valid], axis=0).astype(np.float32, copy=False))
-        out[j] = np.concatenate(chunks, axis=0)
+            out[j, layer_pos] = np.mean(h_l[valid], axis=0).astype(np.float32, copy=False)
     return out
 
 
