@@ -241,6 +241,7 @@ def load_step_geometry_dataset(
             else []
         ),
     }
+    z.close()
     return StepGeometryDataset(
         source_path=str(path.resolve()),
         vector_key=key,

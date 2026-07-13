@@ -1,5 +1,34 @@
 # SMCD / NTS data map (box: `/gz-data/research/demo/data/`)
 
+## 2026-07-13 conditional feasible-tangent escape audit
+
+Use the canonical cross-problem artifacts:
+
+```text
+/gz-data/research/demo/data/features/full_gsm8k.npz
+/gz-data/research/demo/data/features/full_math.npz
+/gz-data/research/demo/data/features/full_omnimath.npz
+```
+
+The audit reads `stepvec`, `sv_layers`, `qvec`, `gold_error_step`,
+`problem_ids`, and `step_token_ranges`. Stored `stepcloud/resultant` and
+`respcloud` are optional legacy length-audit inputs. These fields are already
+present, so the conditional tangent, matched first-error, persistence, and old
+direction/spectrum length audits do not require re-extraction.
+
+The strong output-sensitivity gate is different: current canonical artifacts
+do not store an exact downstream cotangent. That gate needs a record-aligned
+`step_output_cotangent` object array with one `[step,layer,hidden]` tensor per
+chain plus `step_output_cotangent_layers` and an exact kind label. Missing this
+array must be reported as untested, not replaced with entropy or NLL.
+
+Direct entry point and method note:
+
+```text
+audit_conditional_tangent_escape.py
+prompt_control_flow/METHOD_CONDITIONAL_TANGENT_ESCAPE.md
+```
+
 ## 2026-07-13 first-error geometry event audit
 
 Use the existing canonical artifact and hidden shards; do not re-extract:

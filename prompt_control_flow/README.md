@@ -484,6 +484,32 @@ curvature, and scale-free curvature. The primary result is an event-aligned,
 matched-control, cross-fitted nuisance-residual curve, not a raw first-error
 AUROC. See `METHOD_FIRST_ERROR_GEOMETRY.md` for definitions and claim gates.
 
+## Question-Conditioned Feasible-Tangent Escape
+
+The direct audit below tests a stronger alternative to generic curvature or
+dispersion: whether a normalized reasoning update persistently leaves a
+group-held-out, question-and-phase-conditioned low-rank transition space.
+
+```bash
+python audit_conditional_tangent_escape.py \
+  --input data/features/full_gsm8k.npz \
+  --output_dir outputs/conditional_tangent/full_gsm8k \
+  --layers 8,10,12,14,16,18,20,22 \
+  --device cuda \
+  --bootstrap 2000
+```
+
+The canonical `full_*.npz` files already contain `stepvec`, `qvec`,
+`step_token_ranges`, labels, and the legacy token-cloud summaries needed for
+the conditional-space, first-error, persistence, and length-confound gates. No
+re-extraction is needed for those tests. They do not contain an exact
+downstream logit cotangent, so output-sensitive transverse coupling remains an
+explicitly untested gate unless a `[step,layer,hidden]` cotangent array is
+merged. When present, the audit separates transverse magnitude from normalized
+normal/cotangent alignment and tests the latter beyond instantaneous escape.
+See `METHOD_CONDITIONAL_TANGENT_ESCAPE.md` for equations, structural nulls,
+schema, novelty boundary, and kill criteria.
+
 ## Relation to Prior Work
 
 This project should not be sold as "prompt SVD is new".  Nearby work already
