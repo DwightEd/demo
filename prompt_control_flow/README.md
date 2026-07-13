@@ -51,6 +51,14 @@ described as validated reasoning curvature.  The older
 [METHOD_SPECTRAL_CHAIN_DYNAMICS.md](METHOD_SPECTRAL_CHAIN_DYNAMICS.md) remains
 as another trajectory baseline.
 
+[METHOD_DIRECTIONAL_CONSENSUS.md](METHOD_DIRECTIONAL_CONSENSUS.md) is the
+targeted follow-up to the observed length confound in raw token spread. It uses
+the exact off-diagonal mean cosine (a linear-time spherical U-statistic), then
+tests same-problem response separability under cross-fitted length controls,
+fixed token windows, token-length matching, problem bootstrap, and within-
+problem label permutation. It consumes the existing `sv_clouds`; no new model
+forward pass is required.
+
 Use `--store_step_vectors` during extraction to save the shared per-step
 residual-flow vector store for PCA/VAE/spectral chart comparisons.  This is
 important: prompt SVD, VAE, and other charts should be compared on the same
@@ -104,6 +112,7 @@ prompt_control_flow/
   flow_signatures.py
   flow_signature_data.py
   flow_signature_audit.py
+  directional_consensus.py
   metrics.py
   extraction.py
   evaluate.py
@@ -155,6 +164,25 @@ exploratory, and length-residualized scores are reported alongside every
 headline geometry score.
 
 Method and claim gates: `METHOD_MULTISAMPLE_GEOMETRY.md`.
+
+The debiased directional-consensus follow-up uses the token clouds in the same
+files and has a direct Linux entry point:
+
+```bash
+python audit_directional_consensus.py \
+  --input data/gsm8k_v2_custom.npz \
+  --output outputs/directional_consensus/gsm8k_custom_scores.npz \
+  --output_dir outputs/directional_consensus/gsm8k_custom_audit \
+  --vector_key sv_vec_step_exp \
+  --cloud_layers all \
+  --label_policy answer_format_ok \
+  --compute_device cuda \
+  --bootstrap 2000 \
+  --permutations 2000
+```
+
+This audit is response-level. Its estimator, controls, stopping rule, and
+replication command are frozen in `METHOD_DIRECTIONAL_CONSENSUS.md`.
 
 ## File Responsibilities and Main Interfaces
 

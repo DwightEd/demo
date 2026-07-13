@@ -83,6 +83,29 @@ python audit_multisample_geometry.py \
   --preflight
 ```
 
+The same artifacts also contain the full-dimensional token clouds needed by
+the debiased directional-consensus audit:
+
+```text
+sv_clouds       object array; each response is (N, L, D)
+cloud_sizes     semantic-step token counts; sum equals N
+cloud_layers    actual model layer ids for the L slices
+```
+
+No re-extraction is needed for this test. Verify alignment before the audit:
+
+```bash
+python audit_directional_consensus.py \
+  --input data/gsm8k_v2_custom.npz \
+  --vector_key sv_vec_step_exp \
+  --cloud_layers all \
+  --label_policy answer_format_ok \
+  --preflight
+```
+
+Method and frozen evaluation protocol:
+`prompt_control_flow/METHOD_DIRECTIONAL_CONSENSUS.md`.
+
 The canonical files below use `stepvec` and support the cross-problem global
 baseline, but each problem normally has one response, so they cannot provide
 the same-problem support diagnostic:
