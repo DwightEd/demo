@@ -373,6 +373,21 @@ def test_response_ablation_excludes_low_coverage_metric() -> None:
     assert out["ablation_best"]["layer_time_geometry"]["best_metric"] == "mean_ltg_dense"
 
 
+def test_first_error_rank_uses_expected_tie_breaking() -> None:
+    metrics = {
+        "step_scores": np.asarray([[[1.0], [1.0], [0.0]]], dtype=np.float64),
+        "step_score_names": np.asarray(["discrete"], dtype=object),
+        "gold_error_step": np.asarray([0], dtype=np.int64),
+        "n_steps": np.asarray([3], dtype=np.int64),
+    }
+    from prompt_control_flow.evaluate import rank_first_errors
+
+    out = rank_first_errors(metrics, "discrete")
+    assert out["top1"] == 0.5
+    assert out["mean_rank"] == 1.5
+    assert out["mean_candidates"] == 3.0
+
+
 def test_evaluate_all_first_error_and_response() -> None:
     metrics = {
         "chain_idx": np.asarray([0, 1], dtype=np.int64),

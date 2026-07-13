@@ -61,13 +61,25 @@ def render_markdown(
                 if np.isfinite(auc) and np.isfinite(pr) and np.isfinite(cov)
                 else f"| {group} | {d.get('best_metric') or 'NA'} | 0 | NA | NA | NA |"
             )
-    lines.extend(["", "## First-Error Ranks", "", "| score | n | top1 | mean rank |", "|---|---:|---:|---:|"])
+    lines.extend([
+        "",
+        "## First-Error Ranks",
+        "",
+        "Ranks use expected uniform random tie-breaking.",
+        "",
+        "| score | n | eligible fraction | mean candidates | top1 | mean rank |",
+        "|---|---:|---:|---:|---:|---:|",
+    ])
     for k, d in sorted(summary.get("rank", {}).items()):
         top1 = d.get("top1", float("nan"))
         mr = d.get("mean_rank", float("nan"))
+        eligible = d.get("eligible_fraction", float("nan"))
+        candidates = d.get("mean_candidates", float("nan"))
         lines.append(
-            f"| {k} | {d.get('n', 0)} | "
-            f"{top1:.4f} | {mr:.2f} |" if np.isfinite(top1) and np.isfinite(mr) else f"| {k} | {d.get('n', 0)} | NA | NA |"
+            f"| {k} | {d.get('n', 0)} | {eligible:.3f} | {candidates:.2f} | "
+            f"{top1:.4f} | {mr:.2f} |"
+            if all(np.isfinite(v) for v in (top1, mr, eligible, candidates))
+            else f"| {k} | {d.get('n', 0)} | NA | NA | NA | NA |"
         )
     lines.append("")
     lines.append("## Interpretation Guardrails")

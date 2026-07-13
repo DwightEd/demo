@@ -133,21 +133,35 @@ def rank_first_errors(metrics: Mapping[str, Any], score_name: str) -> Dict[str, 
     n_steps = np.asarray(metrics["n_steps"], dtype=np.int64)
     ranks = []
     top1 = []
+    candidate_counts = []
+    total_eligible = 0
     for i in range(step_scores.shape[0]):
         g = int(gold[i])
         if g < 0 or g >= int(n_steps[i]):
             continue
+        total_eligible += 1
         s = step_scores[i, : int(n_steps[i]), k]
         if not np.isfinite(s[g]):
             continue
-        order = np.argsort(-np.nan_to_num(s, nan=-np.inf))
-        rank = int(np.where(order == g)[0][0]) + 1
-        ranks.append(rank)
-        top1.append(1 if rank == 1 else 0)
+        finite = np.isfinite(s)
+        candidates = s[finite]
+        gold_score = float(s[g])
+        greater = int(np.sum(candidates > gold_score))
+        equal = int(np.sum(candidates == gold_score))
+        # Expected rank and top-1 credit under uniform random tie breaking.
+        # This is invariant to step order, unlike argsort's arbitrary handling
+        # of discrete scores such as rank_singularity.
+        ranks.append(1.0 + greater + 0.5 * max(equal - 1, 0))
+        top1.append(1.0 / equal if greater == 0 and equal > 0 else 0.0)
+        candidate_counts.append(int(candidates.size))
     return {
         "n": int(len(ranks)),
+        "eligible_chains": int(total_eligible),
+        "eligible_fraction": float(len(ranks) / total_eligible) if total_eligible else float("nan"),
         "top1": float(np.mean(top1)) if top1 else float("nan"),
         "mean_rank": float(np.mean(ranks)) if ranks else float("nan"),
+        "mean_candidates": float(np.mean(candidate_counts)) if candidate_counts else float("nan"),
+        "tie_policy": "expected_uniform_random_tie_break",
     }
 
 
