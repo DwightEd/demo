@@ -42,13 +42,39 @@ def inspect_npz_schema(path: str | Path) -> Dict[str, Any]:
     has_mean_step_vectors = "sv_vec_mean" in files
     has_legacy_stepvec = "stepvec" in files
     layer_values = None
-    for key in ("step_layer_state_vector_layers", "layers_used", "sv_layers", "layers"):
+    if has_layer_tensor or has_layer_memmap:
+        layer_keys = ("step_layer_state_vector_layers", "layers", "layers_used", "sv_layers")
+    elif has_mean_step_vectors:
+        layer_keys = ("layers_used", "sv_layers", "layers")
+    elif has_legacy_stepvec:
+        # ``layers_used`` describes every layer involved in the original
+        # extraction, while ``sv_layers`` describes the actual layer axis of
+        # the stored ``stepvec`` tensor.  Confusing them made sparse stepvec
+        # artifacts look like whole-layer data in preflight reports.
+        layer_keys = ("sv_layers", "layers", "layers_used")
+    else:
+        layer_keys = ("step_layer_state_vector_layers", "layers", "layers_used", "sv_layers")
+    layer_key = ""
+    for key in layer_keys:
         if key in files:
             layer_values = np.asarray(z[key], dtype=np.int64).reshape(-1)
+            layer_key = key
             break
-    if layer_values is not None and layer_values.size >= 2 and layer_values[0] == 0:
+    if (
+        has_mean_step_vectors
+        and not (has_layer_tensor or has_layer_memmap)
+        and layer_values is not None
+        and layer_values.size >= 2
+        and layer_values[0] == 0
+    ):
         # Exact sv writers include the embedding output; the LTG adapter drops it.
         layer_values = layer_values[1:]
+    stored_stepvec_depth = _legacy_stepvec_depth(z) if has_legacy_stepvec else 0
+    layer_metadata_matches_state = bool(
+        not has_legacy_stepvec
+        or stored_stepvec_depth <= 0
+        or (layer_values is not None and layer_values.size == stored_stepvec_depth)
+    )
     contiguous_layers = bool(
         layer_values is not None
         and layer_values.size >= 2
@@ -83,10 +109,16 @@ def inspect_npz_schema(path: str | Path) -> Dict[str, Any]:
     if layer_time_mainline_ready:
         layer_time_recommendation = "use directly for the primary layer-time audit"
     elif has_legacy_stepvec:
-        layer_time_recommendation = (
-            "full sample artifact, but not full-layer mean states; re-extract with "
-            "--geometry_only for the primary result, or use both legacy opt-ins for an ablation"
-        )
+        if not layer_metadata_matches_state:
+            layer_time_recommendation = (
+                "stored stepvec depth disagrees with its layer metadata; inspect sv_layers "
+                "and stepvec before running any geometry"
+            )
+        else:
+            layer_time_recommendation = (
+                "full sample artifact, but not full-layer mean states; re-extract with "
+                "--geometry_only for the primary result, or use both legacy opt-ins for an ablation"
+            )
     elif has_layer_time_states:
         layer_time_recommendation = (
             "layer-time states are present but fail the contiguous-layer, arithmetic-mean, "
@@ -135,8 +167,11 @@ def inspect_npz_schema(path: str | Path) -> Dict[str, Any]:
         "has_layer_state_memmap": bool(has_layer_memmap),
         "has_legacy_layer_stepvec": bool(has_legacy_stepvec),
         "layer_time_input_kind": layer_time_input_kind,
+        "layer_time_layer_key": layer_key,
         "layer_time_layers": [] if layer_values is None else layer_values.tolist(),
         "layer_time_num_layers": 0 if layer_values is None else int(layer_values.size),
+        "layer_time_stored_stepvec_depth": int(stored_stepvec_depth),
+        "layer_time_layer_metadata_matches_state": layer_metadata_matches_state,
         "layer_time_contiguous_layers": contiguous_layers,
         "layer_time_pooling_kind": pooling_kind,
         "layer_time_representation_kind": representation_kind,
@@ -154,6 +189,24 @@ def _contains_name(z: np.lib.npyio.NpzFile, key: str, target: str) -> bool:
         return target in [str(x) for x in z[key].tolist()]
     except Exception:
         return False
+
+
+def _legacy_stepvec_depth(z: np.lib.npyio.NpzFile) -> int:
+    if "stepvec" not in z.files:
+        return 0
+    try:
+        values = np.asarray(z["stepvec"], dtype=object)
+        for value in values:
+            arr = np.asarray(value)
+            if arr.dtype == object:
+                arr = np.asarray(arr.tolist())
+            if arr.ndim == 3 and arr.shape[0] > 0:
+                return int(arr.shape[1])
+            if arr.ndim in {1, 2} and arr.size:
+                return 1
+    except Exception:
+        return 0
+    return 0
 
 
 def _scalar_value(z: np.lib.npyio.NpzFile, key: str, default: str) -> str:

@@ -411,12 +411,16 @@ def test_schema_preflight_distinguishes_full_sample_legacy_stepvec(tmp_path) -> 
         path,
         stepvec=stepvec,
         sv_layers=np.asarray([8, 14, 22]),
+        layers_used=np.arange(33),
         stepvec_mode=np.asarray("step_exp", dtype=object),
     )
     status = inspect_npz_schema(path)
     assert status["has_legacy_layer_stepvec"]
     assert status["layer_time_input_kind"] == "legacy_sparse_stepvec"
+    assert status["layer_time_layer_key"] == "sv_layers"
     assert status["layer_time_layers"] == [8, 14, 22]
+    assert status["layer_time_stored_stepvec_depth"] == 3
+    assert status["layer_time_layer_metadata_matches_state"]
     assert not status["layer_time_contiguous_layers"]
     assert not status["layer_time_mainline_ready"]
     assert "not full-layer mean states" in status["layer_time_recommendation"]
