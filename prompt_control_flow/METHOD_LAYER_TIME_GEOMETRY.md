@@ -1,5 +1,12 @@
 # Reliability-Calibrated Layer-Time Connection Geometry
 
+> **Status (2026-07-13): compatibility/negative baseline, not the mainline
+> method.** The layer-depth and reasoning-time edges are not established as
+> commuting perturbations of one base manifold, and the reliable Wilson score
+> had insufficient coverage. See
+> [METHOD_REASONING_FLOW_SIGNATURES.md](METHOD_REASONING_FLOW_SIGNATURES.md)
+> for the replacement hypothesis and implementation.
+
 ## 1. Research question
 
 我们只问一个问题：正确与错误推理在完整网络深度和推理时间上的局部表征几何，是否具有不同的二维 interaction curvature？

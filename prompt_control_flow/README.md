@@ -37,12 +37,19 @@ Prompt SVD is not assumed to be correct.  It is one chart among several:
   scores held-out response trajectories by healthy-tube distance, spectral
   leakage, tangent off-manifold motion, and error-basin committor.
 
-The canonical method is now
-[METHOD_LAYER_TIME_GEOMETRY.md](METHOD_LAYER_TIME_GEOMETRY.md).  It preserves
-the full layer axis, separates LID/rank fronts from a fixed-rank connection,
-and validates reliability-gated Wilson-loop curvature.  The older
+The current claim-driven method is
+[METHOD_REASONING_FLOW_SIGNATURES.md](METHOD_REASONING_FLOW_SIGNATURES.md).
+It tests whether same-problem correct hidden-state trajectories form a
+concentrated class of ordered flows using first- and second-order path
+log-signatures.  The required controls are net displacement, shuffled
+increments, response length, step count, total variation, and same-problem
+paired evaluation.
+
+[METHOD_LAYER_TIME_GEOMETRY.md](METHOD_LAYER_TIME_GEOMETRY.md) is retained as
+a compatibility/negative baseline.  Its layer-time plaquette must not be
+described as validated reasoning curvature.  The older
 [METHOD_SPECTRAL_CHAIN_DYNAMICS.md](METHOD_SPECTRAL_CHAIN_DYNAMICS.md) remains
-as a one-dimensional trajectory baseline, not the current main method.
+as another trajectory baseline.
 
 Use `--store_step_vectors` during extraction to save the shared per-step
 residual-flow vector store for PCA/VAE/spectral chart comparisons.  This is
@@ -94,6 +101,9 @@ prompt_control_flow/
   spectral_chain_dynamics.py
   layer_time_geometry.py
   layer_time_evaluate.py
+  flow_signatures.py
+  flow_signature_data.py
+  flow_signature_audit.py
   metrics.py
   extraction.py
   evaluate.py
@@ -110,6 +120,19 @@ prompt_control_flow/
     audit_spectral_chain.py
     audit_layer_time_geometry.py
     evaluate_layer_time_geometry.py
+```
+
+The primary flow-signature entry point is intentionally a direct script so it
+works from the Linux repo root without package-mode invocation:
+
+```bash
+python audit_reasoning_flow_signatures.py \
+  --input data/gsm8k_v2_custom.npz \
+  --output outputs/reasoning_flow_signatures/gsm8k_custom_scores.npz \
+  --output_dir outputs/reasoning_flow_signatures/gsm8k_custom_audit \
+  --vector_key sv_vec_step_exp \
+  --label_policy answer_format_ok \
+  --compute_device cuda
 ```
 
 ## File Responsibilities and Main Interfaces
@@ -434,6 +457,32 @@ Do not claim a prompt-control mechanism unless all of the following hold:
    the same problem.
 5. Case cards show interpretable prompt-to-prefix control shifts, not only
    late-position spikes.
+
+## First-Error Geometry Event Audit
+
+Before combining geometry with logits, use the direct root script to test
+whether hidden-state motion itself changes around ProcessBench first errors:
+
+```bash
+python audit_first_error_geometry.py \
+  --input data/features/full_gsm8k.npz \
+  --hidden_dir data/hidden/gsm8k \
+  --output_dir outputs/first_error_geometry/full_gsm8k \
+  --modes step,token \
+  --step_layers all \
+  --token_layers 10,14,18,22 \
+  --step_offsets=-2,-1,0,1,2 \
+  --token_radius 32 \
+  --device cuda \
+  --bootstrap 2000 \
+  --permutations 5000
+```
+
+This uses existing `stepvec` and per-token hidden shards; no extraction is
+needed. It computes update norm, relative update norm, turning angle, Menger
+curvature, and scale-free curvature. The primary result is an event-aligned,
+matched-control, cross-fitted nuisance-residual curve, not a raw first-error
+AUROC. See `METHOD_FIRST_ERROR_GEOMETRY.md` for definitions and claim gates.
 
 ## Relation to Prior Work
 

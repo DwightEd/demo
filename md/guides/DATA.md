@@ -1,5 +1,61 @@
 # SMCD / NTS data map (box: `/gz-data/research/demo/data/`)
 
+## 2026-07-13 first-error geometry event audit
+
+Use the existing canonical artifact and hidden shards; do not re-extract:
+
+```text
+/gz-data/research/demo/data/features/full_gsm8k.npz
+/gz-data/research/demo/data/hidden/gsm8k/*.npy
+```
+
+Repo-relative paths on the GPU box:
+
+```text
+data/features/full_gsm8k.npz
+data/hidden/gsm8k
+```
+
+The step audit reads `stepvec`, `sv_layers`, `gold_error_step`, and
+`step_token_ranges`. The token audit additionally reads `hidden_files`,
+`hidden_layers`, and response-token hidden shards. The ranges are legacy
+inclusive absolute token indices; hidden shards start at the first response
+token, and the loader performs this offset conversion explicitly.
+
+Direct script and method note:
+
+```text
+audit_first_error_geometry.py
+prompt_control_flow/METHOD_FIRST_ERROR_GEOMETRY.md
+```
+
+## 2026-07-13 ordered reasoning-flow signature inputs
+
+Primary same-problem files:
+
+```text
+/gz-data/research/demo/data/gsm8k_v2_5shot.npz
+/gz-data/research/demo/data/gsm8k_v2_custom.npz
+```
+
+The required raw trajectory key is `sv_vec_step_exp`, shaped per sample as
+`(T, L, D)`. It exists only in multisample artifacts extracted with
+`--store_vectors`. Run `audit_reasoning_flow_signatures.py --preflight` before
+the audit; the loader refuses to guess a mismatched layer mapping.
+
+The canonical files below use `stepvec` and support the cross-problem global
+baseline, but each problem normally has one response, so they cannot provide
+the same-problem support diagnostic:
+
+```text
+/gz-data/research/demo/data/features/full_gsm8k.npz
+/gz-data/research/demo/data/features/full_math.npz
+/gz-data/research/demo/data/features/full_omnimath.npz
+```
+
+Method and exact direct commands:
+`prompt_control_flow/METHOD_REASONING_FLOW_SIGNATURES.md`.
+
 ## 2026-07-09 current ProcessBench feature inputs
 
 Use these files for learned-latent / hidden-state reasoning experiments:

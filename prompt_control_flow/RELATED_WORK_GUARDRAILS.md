@@ -32,6 +32,26 @@ narrow diagnostic, not presented as a generic new subspace method.
    - Guardrail: first-error transport/localization is already a crowded target;
      response-level and control-source shift diagnostics need explicit evidence.
 
+6. **The Geometry of Reasoning: Flowing Logics in Representation Space**
+   - Models reasoning as hidden-state flows and studies position, velocity, and
+     curvature under controlled logical skeletons.
+   - Guardrail: do not claim that representing reasoning as a flow, or using
+     hidden-state increments, is itself new.
+
+7. **Path-signature and rough-path methods**
+   - First/second-order signatures, Levy area, Chen's identity, and
+     reparameterization invariance are established mathematical tools.
+   - Guardrail: novelty can only lie in the question-conditional correct-flow
+     support formulation and its LLM-specific falsification protocol, not in
+     the signature transform.
+
+8. **Gauge-invariant representation holonomy**
+   - Defines transport around genuine input-space loops with whitening,
+     shared identities, and rotation-only alignment.
+   - Guardrail: layer depth and generation time are not automatically valid
+     loop axes. The retired layer-time plaquette is a negative baseline, not a
+     direct application of representation holonomy.
+
 ## Narrow Claim Worth Testing
 
 The claim here is not "SVD works" or "geometry detects errors."  The claim is:
