@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Sequence
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from prompt_control_flow.evaluate import evaluate_all, load_metric_npz, save_json
 from prompt_control_flow.reports import render_markdown, write_step_csv

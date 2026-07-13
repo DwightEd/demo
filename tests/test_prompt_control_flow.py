@@ -4,7 +4,7 @@ import numpy as np
 
 from prompt_control_flow.config import ExtractionConfig, MetricNames
 from prompt_control_flow.data import ChainRecord, load_chain_records
-from prompt_control_flow.evaluate import evaluate_all, evaluate_response
+from prompt_control_flow.evaluate import auprc, evaluate_all, evaluate_response
 from prompt_control_flow.extraction import ChainExtraction, pack_extractions
 from prompt_control_flow.extractors import ICRResidualMismatchExtractor
 from prompt_control_flow.geometry import orthonormal_basis, projection_energy_fraction
@@ -341,6 +341,36 @@ def test_response_eval_prefers_is_correct_when_available() -> None:
     out = evaluate_response(metrics)
 
     assert out["single"]["risk"] == 1.0
+
+
+def test_auprc_is_tie_invariant_and_constant_score_equals_prevalence() -> None:
+    y = np.asarray([1, 0, 1, 0], dtype=np.int64)
+    score = np.zeros(4, dtype=np.float64)
+    assert auprc(y, score) == 0.5
+    assert auprc(y[[2, 1, 0, 3]], score) == 0.5
+
+
+def test_response_ablation_excludes_low_coverage_metric() -> None:
+    metrics = {
+        "chain_scores": np.asarray(
+            [
+                [0.9, 0.9],
+                [0.8, np.nan],
+                [0.4, np.nan],
+                [0.3, np.nan],
+                [0.2, 0.1],
+            ],
+            dtype=np.float64,
+        ),
+        "chain_score_names": np.asarray(
+            ["mean_ltg_dense", "mean_ltg_sparse"], dtype=object
+        ),
+        "gold_error_step": np.asarray([1, 1, -1, -1, -1], dtype=np.int64),
+        "is_correct": np.asarray([0, 0, 1, 1, 1], dtype=np.int64),
+    }
+    out = evaluate_response(metrics)
+    assert out["metric_stats"]["mean_ltg_sparse"]["coverage"] == 0.4
+    assert out["ablation_best"]["layer_time_geometry"]["best_metric"] == "mean_ltg_dense"
 
 
 def test_evaluate_all_first_error_and_response() -> None:

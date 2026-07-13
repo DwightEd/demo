@@ -54,15 +54,42 @@ def auprc(y: Iterable[int], score: Iterable[float]) -> float:
     s = s[m]
     if y.size == 0 or len(np.unique(y)) < 2 or np.sum(y == 1) == 0:
         return float("nan")
-    order = np.argsort(-s)
+    order = np.argsort(-s, kind="mergesort")
     y = y[order]
-    tp = np.cumsum(y == 1)
-    fp = np.cumsum(y == 0)
+    s = s[order]
+    tp_all = np.cumsum(y == 1)
+    fp_all = np.cumsum(y == 0)
+    # Evaluate only at score thresholds.  Treating tied observations one by
+    # one makes average precision depend on input row order and can give a
+    # constant score an AP different from class prevalence.
+    threshold_ends = np.r_[np.flatnonzero(np.diff(s) != 0), y.size - 1]
+    tp = tp_all[threshold_ends]
+    fp = fp_all[threshold_ends]
     recall = tp / max(tp[-1], 1)
     precision = tp / np.maximum(tp + fp, 1)
-    recall = np.concatenate([[0.0], recall])
-    precision = np.concatenate([[1.0], precision])
-    return float(np.sum((recall[1:] - recall[:-1]) * precision[1:]))
+    previous_recall = np.r_[0.0, recall[:-1]]
+    return float(np.sum((recall - previous_recall) * precision))
+
+
+def binary_metric_stats(y: Iterable[int], score: Iterable[float]) -> Dict[str, Any]:
+    y_arr = np.asarray(list(y), dtype=np.int32)
+    score_arr = np.asarray(list(score), dtype=np.float64)
+    if y_arr.shape != score_arr.shape:
+        raise ValueError("labels and scores must have the same shape")
+    finite = np.isfinite(score_arr)
+    y_valid = y_arr[finite]
+    n = int(y_valid.size)
+    pos = int(np.sum(y_valid == 1))
+    neg = int(np.sum(y_valid == 0))
+    return {
+        "n": n,
+        "pos": pos,
+        "neg": neg,
+        "coverage": float(n / y_arr.size) if y_arr.size else float("nan"),
+        "prevalence": float(pos / n) if n else float("nan"),
+        "auroc": auroc(y_arr, score_arr),
+        "auprc": auprc(y_arr, score_arr),
+    }
 
 
 def load_metric_npz(path: str | Path) -> Dict[str, Any]:
@@ -86,8 +113,14 @@ def evaluate_first_error(metrics: Mapping[str, Any]) -> Dict[str, Any]:
             for k, name in enumerate(names):
                 by_name[name].append(float(step_scores[i, j, k]))
             rows.append((i, j))
-    single = {name: auroc(y, vals) for name, vals in by_name.items()}
-    return {"rows": len(y), "pos": int(np.sum(y)), "single": single}
+    metric_stats = {name: binary_metric_stats(y, vals) for name, vals in by_name.items()}
+    single = {name: stats["auroc"] for name, stats in metric_stats.items()}
+    return {
+        "rows": len(y),
+        "pos": int(np.sum(y)),
+        "single": single,
+        "metric_stats": metric_stats,
+    }
 
 
 def rank_first_errors(metrics: Mapping[str, Any], score_name: str) -> Dict[str, Any]:
@@ -131,9 +164,20 @@ def evaluate_response(metrics: Mapping[str, Any]) -> Dict[str, Any]:
     else:
         gold = np.asarray(metrics["gold_error_step"], dtype=np.int64)
         y = (gold >= 0).astype(np.int32)
-    single = {name: auroc(y, chain_scores[:, k]) for k, name in enumerate(names)}
-    pr = {name: auprc(y, chain_scores[:, k]) for k, name in enumerate(names)}
-    return {"single": single, "auprc": pr, "ablation_best": _ablation_best(names, chain_scores, y)}
+    metric_stats = {
+        name: binary_metric_stats(y, chain_scores[:, k])
+        for k, name in enumerate(names)
+    }
+    single = {name: stats["auroc"] for name, stats in metric_stats.items()}
+    pr = {name: stats["auprc"] for name, stats in metric_stats.items()}
+    return {
+        "n": int(y.size),
+        "pos": int(np.sum(y == 1)),
+        "single": single,
+        "auprc": pr,
+        "metric_stats": metric_stats,
+        "ablation_best": _ablation_best(names, chain_scores, y),
+    }
 
 
 def evaluate_all(metrics: Mapping[str, Any]) -> Dict[str, Any]:
@@ -148,7 +192,12 @@ def evaluate_all(metrics: Mapping[str, Any]) -> Dict[str, Any]:
     return summary
 
 
-def _ablation_best(names: Sequence[str], chain_scores: np.ndarray, y: np.ndarray) -> Dict[str, Dict[str, Any]]:
+def _ablation_best(
+    names: Sequence[str],
+    chain_scores: np.ndarray,
+    y: np.ndarray,
+    min_coverage: float = 0.80,
+) -> Dict[str, Dict[str, Any]]:
     groups = {
         "prompt_flow": ("prompt", "prefix", "random", "off_prompt"),
         "uncertainty": ("entropy", "nll"),
@@ -164,18 +213,28 @@ def _ablation_best(names: Sequence[str], chain_scores: np.ndarray, y: np.ndarray
         best_name = None
         best_auc = float("nan")
         best_pr = float("nan")
+        best_coverage = float("nan")
+        best_n = 0
         for k, name in enumerate(names):
             if group != "combined" and not any(key in name for key in keys):
                 continue
-            auc = auroc(y, chain_scores[:, k])
+            stats = binary_metric_stats(y, chain_scores[:, k])
+            if not np.isfinite(stats["coverage"]) or stats["coverage"] < float(min_coverage):
+                continue
+            auc = stats["auroc"]
             if np.isfinite(auc) and (best_name is None or auc > best_auc):
                 best_name = name
                 best_auc = auc
-                best_pr = auprc(y, chain_scores[:, k])
+                best_pr = stats["auprc"]
+                best_coverage = stats["coverage"]
+                best_n = stats["n"]
         out[group] = {
             "best_metric": best_name,
             "auroc": best_auc,
             "auprc": best_pr,
+            "coverage": best_coverage,
+            "n": int(best_n),
+            "min_coverage": float(min_coverage),
         }
     return out
 

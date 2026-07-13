@@ -20,27 +20,46 @@ def render_markdown(
     lines.append(f"- Rows: `{fe.get('rows')}`")
     lines.append(f"- Positives: `{fe.get('pos')}`")
     lines.append("")
-    lines.extend(["| score | AUROC |", "|---|---:|"])
+    lines.extend(["| score | n | positives | coverage | AUROC |", "|---|---:|---:|---:|---:|"])
+    fe_stats = fe.get("metric_stats", {})
     for k, v in sorted(fe.get("single", {}).items(), key=lambda kv: (-(kv[1] if np.isfinite(kv[1]) else -1), kv[0])):
-        lines.append(f"| {k} | {v:.4f} |" if np.isfinite(v) else f"| {k} | NA |")
-    lines.extend(["", "## Response Diagnosis", "", "| score | AUROC | AUPRC |", "|---|---:|---:|"])
+        stats = fe_stats.get(k, {})
+        cov = stats.get("coverage", float("nan"))
+        auc = f"{v:.4f}" if np.isfinite(v) else "NA"
+        coverage = f"{cov:.3f}" if np.isfinite(cov) else "NA"
+        lines.append(f"| {k} | {stats.get('n', 0)} | {stats.get('pos', 0)} | {coverage} | {auc} |")
+    response = summary.get("response", {})
+    lines.extend(["", "## Response Diagnosis", ""])
+    lines.append(f"- Responses: `{response.get('n')}`")
+    lines.append(f"- Error responses: `{response.get('pos')}`")
+    lines.extend(["", "| score | n | errors | coverage | AUROC | AUPRC |", "|---|---:|---:|---:|---:|---:|"])
     auprc = summary.get("response", {}).get("auprc", {})
+    response_stats = response.get("metric_stats", {})
     for k, v in sorted(summary.get("response", {}).get("single", {}).items(), key=lambda kv: (-(kv[1] if np.isfinite(kv[1]) else -1), kv[0])):
         p = auprc.get(k, float("nan"))
+        stats = response_stats.get(k, {})
+        cov = stats.get("coverage", float("nan"))
         av = f"{v:.4f}" if np.isfinite(v) else "NA"
         pv = f"{p:.4f}" if np.isfinite(p) else "NA"
-        lines.append(f"| {k} | {av} | {pv} |")
+        coverage = f"{cov:.3f}" if np.isfinite(cov) else "NA"
+        lines.append(
+            f"| {k} | {stats.get('n', 0)} | {stats.get('pos', 0)} | "
+            f"{coverage} | {av} | {pv} |"
+        )
     ab = summary.get("response", {}).get("ablation_best", {})
     if ab:
-        lines.extend(["", "## Response Ablation Best", "", "| group | best score | AUROC | AUPRC |", "|---|---|---:|---:|"])
+        lines.extend(["", "## Response Ablation Best", ""])
+        lines.append("Only metrics with at least 80% finite response coverage are eligible.")
+        lines.extend(["", "| group | best score | n | coverage | AUROC | AUPRC |", "|---|---|---:|---:|---:|---:|"])
         for group, d in sorted(ab.items()):
             auc = d.get("auroc", float("nan"))
             pr = d.get("auprc", float("nan"))
+            cov = d.get("coverage", float("nan"))
             lines.append(
-                f"| {group} | {d.get('best_metric') or 'NA'} | "
-                f"{auc:.4f} | {pr:.4f} |"
-                if np.isfinite(auc) and np.isfinite(pr)
-                else f"| {group} | {d.get('best_metric') or 'NA'} | NA | NA |"
+                f"| {group} | {d.get('best_metric') or 'NA'} | {d.get('n', 0)} | "
+                f"{cov:.3f} | {auc:.4f} | {pr:.4f} |"
+                if np.isfinite(auc) and np.isfinite(pr) and np.isfinite(cov)
+                else f"| {group} | {d.get('best_metric') or 'NA'} | 0 | NA | NA | NA |"
             )
     lines.extend(["", "## First-Error Ranks", "", "| score | n | top1 | mean rank |", "|---|---:|---:|---:|"])
     for k, d in sorted(summary.get("rank", {}).items()):
