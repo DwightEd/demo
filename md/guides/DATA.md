@@ -72,6 +72,17 @@ The required raw trajectory key is `sv_vec_step_exp`, shaped per sample as
 `--store_vectors`. Run `audit_reasoning_flow_signatures.py --preflight` before
 the audit; the loader refuses to guess a mismatched layer mapping.
 
+For response-level local displacement/turning/curvature diagnostics, use
+`audit_multisample_geometry.py`. This is deliberately separate from
+`audit_first_error_geometry.py`: the multisample files provide final-answer
+labels but normally do not provide `gold_error_step`.
+
+```bash
+python audit_multisample_geometry.py \
+  --input data/gsm8k_v2_custom.npz \
+  --preflight
+```
+
 The canonical files below use `stepvec` and support the cross-problem global
 baseline, but each problem normally has one response, so they cannot provide
 the same-problem support diagnostic:

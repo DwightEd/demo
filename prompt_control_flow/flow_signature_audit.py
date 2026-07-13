@@ -170,6 +170,17 @@ def _crossfit_residualize(
     return out
 
 
+def crossfit_residualize_score(
+    score: np.ndarray,
+    controls: np.ndarray,
+    problem_ids: np.ndarray,
+    cfg: FlowAuditConfig,
+) -> np.ndarray:
+    """Public, problem-grouped wrapper for nuisance residualization."""
+
+    return _crossfit_residualize(score, controls, problem_ids, cfg)
+
+
 def _problem_pair_components(
     score: np.ndarray,
     y_error: np.ndarray,
@@ -231,14 +242,24 @@ def _within_problem_permutation_p(
         return float("nan")
     rng = np.random.default_rng(int(seed))
     values = []
-    permuted = np.array(y_error, copy=True)
+    groups = [np.where(problem_ids == problem)[0] for problem in np.unique(problem_ids)]
+    grouped_scores = [np.asarray(score[index], dtype=np.float64) for index in groups]
+    grouped_labels = [np.asarray(y_error[index], dtype=np.int64) for index in groups]
     for _ in range(int(permutations)):
-        for problem in np.unique(problem_ids):
-            idx = np.where(problem_ids == problem)[0]
-            permuted[idx] = rng.permutation(y_error[idx])
-        value, _ = _micro_pair_auc(_problem_pair_components(score, permuted, problem_ids))
-        if np.isfinite(value):
-            values.append(value)
+        concordance = 0.0
+        pairs = 0
+        for group_score, group_label in zip(grouped_scores, grouped_labels):
+            permuted = rng.permutation(group_label)
+            finite = np.isfinite(group_score)
+            errors = group_score[finite & (permuted == 1)]
+            correct = group_score[finite & (permuted == 0)]
+            if not errors.size or not correct.size:
+                continue
+            difference = errors[:, None] - correct[None, :]
+            concordance += float(np.sum(difference > 0) + 0.5 * np.sum(difference == 0))
+            pairs += int(difference.size)
+        if pairs:
+            values.append(concordance / pairs)
     if not values:
         return float("nan")
     return float((1 + np.sum(np.asarray(values) >= observed)) / (len(values) + 1))
@@ -310,6 +331,17 @@ def _bootstrap_auc_delta(
             values.append(first_conc / first_pairs - second_conc / second_pairs)
     ci = np.percentile(values, [2.5, 97.5]) if values else [np.nan, np.nan]
     return {"point": point, "ci95": [float(ci[0]), float(ci[1])], "problems": len(keys)}
+
+
+def bootstrap_same_problem_auc_delta(
+    first: np.ndarray,
+    second: np.ndarray,
+    dataset: FlowTrajectoryDataset,
+    cfg: FlowAuditConfig,
+) -> dict[str, Any]:
+    """Bootstrap a same-problem paired-AUROC difference over problems."""
+
+    return _bootstrap_auc_delta(first, second, dataset, cfg)
 
 
 def _effective_rank(

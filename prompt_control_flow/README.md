@@ -135,6 +135,27 @@ python audit_reasoning_flow_signatures.py \
   --compute_device cuda
 ```
 
+Same-problem local geometry is audited separately because these files usually
+have response labels but no first-error step annotation:
+
+```bash
+python audit_multisample_geometry.py \
+  --input data/gsm8k_v2_custom.npz \
+  --output outputs/multisample_geometry/gsm8k_custom_scores.npz \
+  --output_dir outputs/multisample_geometry/gsm8k_custom_audit \
+  --vector_key sv_vec_step_exp \
+  --layers all \
+  --label_policy answer_format_ok \
+  --compute_device cuda
+```
+
+The fixed comparison is dynamic phase-profile support versus static geometry
+support under same-problem paired AUROC. Per-layer means/maxima are explicitly
+exploratory, and length-residualized scores are reported alongside every
+headline geometry score.
+
+Method and claim gates: `METHOD_MULTISAMPLE_GEOMETRY.md`.
+
 ## File Responsibilities and Main Interfaces
 
 ### `config.py`
