@@ -1,0 +1,39 @@
+{
+  "path": "/gz-data/research/demo/data/features/full_gsm8k.npz",
+  "vector_key": "stepvec",
+  "samples": 395,
+  "errors": 205,
+  "correct": 190,
+  "step_layers": [
+    8,
+    10,
+    12,
+    14,
+    16,
+    18,
+    20,
+    22
+  ],
+  "hidden_layers": [
+    10,
+    14,
+    18,
+    22
+  ],
+  "has_hidden_shards": true,
+  "matches": 205,
+  "same_problem_matches": 0,
+  "reused_controls": 15,
+  "skipped": {
+    "invalid_shape": 0,
+    "too_short": 0,
+    "nonfinite": 0,
+    "invalid_ranges": 0,
+    "invalid_gold": 0
+  },
+  "requested_modes": [
+    "step",
+    "token"
+  ],
+  "effective_device": "cuda"
+}
