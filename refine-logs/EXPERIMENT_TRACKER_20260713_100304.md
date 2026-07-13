@@ -5,7 +5,7 @@
 
 | ID | Claim | 状态 | 产物/证据 | 下一动作 |
 |---|---|---|---|---|
-| S0 | schema/invariance | passed | 全库 `131 passed, 1 skipped`；trace/teacher-forcing/layer-time tests | 远端 CUDA 验证 Torch bulk backend |
+| S0 | schema/invariance | passed | 全库 `127 passed`；trace/teacher-forcing/layer-time tests | 加真实 tokenizer property test |
 | S1 | separable synthetic | pending | 未运行正式生成器 | 增加可分离二维场 fixture |
 | S2 | interaction synthetic | partial | Wilson gauge invariance 与 ID-shuffle transport break 已测试 | 增加已知非零曲率生成器 |
 | E0 | claim-driven evaluator | passed-synthetic | first-error event、位置残差化、同题 paired、conditional Wilson tests | 在 G0 artifact 上运行 |
@@ -27,7 +27,6 @@
 - 新 field 对 correctness/first-error relabel 完全不变，说明几何构造本身 label-free。
 - V2 已将 LID/rank front 与固定秩 connection 分离，并新增 Wilson eigenangle curvature、transport residual 与 reliability-gated curvature。
 - 专用 evaluator 已替代仅看 pooled AUROC 的旧入口，能够直接检验局部事件和同题差异。
-- 批量 JL projection 与 kNN 已支持 Torch/CUDA；本地无 torch，GPU 数值一致性需在远端 smoke 中验证。
 - 目前只有合成与 schema 证据；没有任何真实数据结果支持错误附近 holonomy 更高。
 
 ## 后续研究方向

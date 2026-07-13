@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -12,8 +14,12 @@ from prompt_control_flow.layer_time_geometry import (
     append_layer_time_geometry,
     canonicalize_layer_time_input,
     connection_path_discrepancy,
+    interpolate_reference_trajectories,
     make_group_folds,
+    orthogonal_loop_curvature,
+    resolve_compute_backend,
     score_layer_time_fold,
+    topk_sqdist,
 )
 from prompt_control_flow.metrics import (
     compute_step_layer_state_vectors,
@@ -78,9 +84,16 @@ def test_shared_layer_geometry_has_zero_depth_rewiring() -> None:
     depth_rewire = field[..., LAYER_TIME_FIELD_NAMES.index("depth_neighbor_rewire")]
     depth_tangent = field[..., LAYER_TIME_FIELD_NAMES.index("depth_tangent_drift")]
     holonomy = field[..., LAYER_TIME_FIELD_NAMES.index("plaquette_holonomy")]
+    wilson = field[..., LAYER_TIME_FIELD_NAMES.index("plaquette_wilson_curvature")]
+    reliable_wilson = field[..., LAYER_TIME_FIELD_NAMES.index("plaquette_reliable_wilson")]
+    fiber_rank = field[..., LAYER_TIME_FIELD_NAMES.index("fiber_rank")]
     assert np.nanmax(np.abs(depth_rewire)) == 0.0
     assert np.nanmax(np.abs(depth_tangent)) < 1e-3
     assert np.nanmax(np.abs(holonomy)) < 1e-3
+    assert np.nanmax(np.abs(wilson)) < 1e-3
+    assert np.nanmax(np.abs(reliable_wilson)) < 1e-3
+    assert np.allclose(fiber_rank, fiber_rank[:, :1])
+    assert np.nanmax(fiber_rank) > 3.0
 
 
 def test_holonomy_path_discrepancy_is_gauge_invariant() -> None:
@@ -93,6 +106,104 @@ def test_holonomy_path_discrepancy_is_gauge_invariant() -> None:
     transformed = connection_path_discrepancy(left @ qa @ right, left @ qb @ right)
     assert np.isclose(original, transformed, atol=1e-7)
     assert connection_path_discrepancy(qa, qa) < 1e-12
+    wilson_original = orthogonal_loop_curvature(qa, qb)
+    wilson_transformed = orthogonal_loop_curvature(left @ qa @ right, left @ qb @ right)
+    assert np.isclose(wilson_original, wilson_transformed, atol=1e-7)
+    assert orthogonal_loop_curvature(qa, qa) < 1e-12
+    assert 0.0 <= wilson_original <= 1.0
+
+
+def test_reference_identity_shuffle_breaks_transport_structure() -> None:
+    rng = np.random.default_rng(12)
+    base_ref = rng.normal(size=(40, 8)).astype(np.float32)
+    base_query = rng.normal(size=(8, 8)).astype(np.float32)
+    reference = np.repeat(base_ref[:, None, :], 3, axis=1)
+    query = np.repeat(base_query[:, None, :], 3, axis=1)
+    chain = np.repeat(np.arange(2), 4)
+    step = np.tile(np.arange(4), 2)
+    field = score_layer_time_fold(
+        reference,
+        query,
+        chain,
+        step,
+        LayerTimeGeometryConfig(
+            knn_k=8,
+            tangent_k=10,
+            tangent_rank=3,
+            projection_dim=6,
+            null_mode="reference_id_shuffle",
+        ),
+        np.random.default_rng(21),
+    )
+    transport = field[
+        ..., LAYER_TIME_FIELD_NAMES.index("plaquette_transport_residual")
+    ]
+    wilson = field[..., LAYER_TIME_FIELD_NAMES.index("plaquette_wilson_curvature")]
+    assert np.nanmedian(transport) > 0.05
+    assert np.nanmedian(wilson) > 0.01
+
+
+def test_nearest_phase_uses_observed_state_instead_of_linear_interpolation() -> None:
+    trajectories = np.asarray([[[[0.0]], [[10.0]], [[30.0]]]], dtype=np.float32)
+    lengths = np.asarray([3], dtype=np.int64)
+    linear = interpolate_reference_trajectories(
+        trajectories,
+        lengths,
+        0.2,
+        mode="linear",
+    )
+    nearest = interpolate_reference_trajectories(
+        trajectories,
+        lengths,
+        0.2,
+        mode="nearest",
+    )
+    assert np.isclose(linear.item(), 4.0)
+    assert np.isclose(nearest.item(), 0.0)
+
+
+def test_numpy_bulk_backend_matches_exact_distance_order() -> None:
+    rng = np.random.default_rng(31)
+    query = rng.normal(size=(7, 5)).astype(np.float32)
+    reference = rng.normal(size=(13, 5)).astype(np.float32)
+    d2, indices = topk_sqdist(
+        query,
+        reference,
+        k=4,
+        chunk_size=3,
+        backend="numpy",
+        device="cpu",
+    )
+    exact = np.sum((query[:, None, :] - reference[None, :, :]) ** 2, axis=2)
+    expected = np.argsort(exact, axis=1)[:, :4]
+    assert np.array_equal(indices, expected)
+    assert np.allclose(d2, np.take_along_axis(exact, expected, axis=1), atol=1e-5)
+    assert resolve_compute_backend("numpy", "cpu") == "numpy"
+
+
+def test_torch_bulk_backend_matches_numpy_on_cpu() -> None:
+    pytest.importorskip("torch")
+    rng = np.random.default_rng(37)
+    query = rng.normal(size=(6, 4)).astype(np.float32)
+    reference = rng.normal(size=(11, 4)).astype(np.float32)
+    numpy_d2, numpy_idx = topk_sqdist(
+        query,
+        reference,
+        k=3,
+        chunk_size=2,
+        backend="numpy",
+        device="cpu",
+    )
+    torch_d2, torch_idx = topk_sqdist(
+        query,
+        reference,
+        k=3,
+        chunk_size=2,
+        backend="torch",
+        device="cpu",
+    )
+    assert np.array_equal(torch_idx, numpy_idx)
+    assert np.allclose(torch_d2, numpy_d2, atol=1e-5)
 
 
 def _toy_metrics() -> dict[str, np.ndarray]:
@@ -287,3 +398,48 @@ def test_schema_preflight_reports_layer_time_mainline_readiness(tmp_path) -> Non
     status = inspect_npz_schema(path)
     assert status["has_layer_state_memmap"]
     assert status["layer_time_mainline_ready"]
+    assert status["layer_time_input_kind"] == "whole_layer_memmap"
+    assert status["layer_time_layers"] == [1, 2, 3, 4]
+
+
+def test_schema_preflight_distinguishes_full_sample_legacy_stepvec(tmp_path) -> None:
+    path = tmp_path / "full_gsm8k.npz"
+    stepvec = np.empty(2, dtype=object)
+    stepvec[0] = np.ones((2, 3, 4), dtype=np.float16)
+    stepvec[1] = np.ones((3, 3, 4), dtype=np.float16)
+    np.savez(
+        path,
+        stepvec=stepvec,
+        sv_layers=np.asarray([8, 14, 22]),
+        stepvec_mode=np.asarray("step_exp", dtype=object),
+    )
+    status = inspect_npz_schema(path)
+    assert status["has_legacy_layer_stepvec"]
+    assert status["layer_time_input_kind"] == "legacy_sparse_stepvec"
+    assert status["layer_time_layers"] == [8, 14, 22]
+    assert not status["layer_time_contiguous_layers"]
+    assert not status["layer_time_mainline_ready"]
+    assert "not full-layer mean states" in status["layer_time_recommendation"]
+
+
+def test_audit_cli_supports_direct_linux_style_script_path(tmp_path) -> None:
+    manifest = tmp_path / "manifest.npz"
+    np.savez(
+        manifest,
+        step_layer_state_memmap_path=np.asarray("states.npy", dtype=object),
+        step_layer_state_vector_layers=np.asarray([1, 2, 3, 4]),
+        state_pooling_kind=np.asarray("arithmetic_mean_over_step_tokens", dtype=object),
+        state_representation_kind=np.asarray("hidden_state", dtype=object),
+    )
+    root = Path(__file__).resolve().parents[1]
+    script = root / "prompt_control_flow" / "cli" / "audit_layer_time_geometry.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--input", str(manifest), "--inspect_only"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "mainline ready: True" in result.stdout
+    assert '"layer_time_input_kind": "whole_layer_memmap"' in result.stdout

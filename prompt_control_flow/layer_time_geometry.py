@@ -15,22 +15,30 @@ EPS = 1e-8
 
 LAYER_TIME_FIELD_NAMES = (
     "lid",
+    "fiber_rank",
     "depth_neighbor_rewire",
     "time_neighbor_rewire",
     "depth_tangent_drift",
     "time_tangent_drift",
     "plaquette_holonomy",
+    "plaquette_wilson_curvature",
+    "plaquette_transport_residual",
+    "plaquette_reliable_wilson",
     "rank_singularity",
 )
 
 LAYER_TIME_STEP_METRICS = (
     "ltg_lid_median",
     "ltg_lid_depth_iqr",
+    "ltg_fiber_rank_median",
     "ltg_depth_rewire_peak",
     "ltg_time_rewire_median",
     "ltg_depth_tangent_peak",
     "ltg_time_tangent_median",
     "ltg_holonomy_peak",
+    "ltg_wilson_peak",
+    "ltg_transport_residual_median",
+    "ltg_reliable_wilson_peak",
     "ltg_rank_singularity_rate",
 )
 
@@ -48,6 +56,12 @@ class LayerTimeGeometryConfig:
     knn_k: int = 20
     tangent_k: int = 24
     tangent_rank: int = 6
+    fiber_rank_mode: str = "fixed"
+    max_transport_residual: float = 0.35
+    null_mode: str = "none"
+    phase_mode: str = "linear"
+    compute_backend: str = "auto"
+    compute_device: str = "cuda"
     projection_dim: int = 64
     max_reference: int = 256
     random_seed: int = 13
@@ -101,6 +115,17 @@ def _append_layer_time_geometry_from_packed(
     packed: dict[str, np.ndarray],
     cfg: LayerTimeGeometryConfig,
 ) -> dict[str, np.ndarray]:
+    if cfg.fiber_rank_mode not in {"fixed", "lid"}:
+        raise ValueError("fiber_rank_mode must be 'fixed' or 'lid'")
+    if not (0.0 <= float(cfg.max_transport_residual) <= 1.0):
+        raise ValueError("max_transport_residual must be in [0, 1]")
+    if cfg.null_mode not in {"none", "phase_shuffle", "reference_id_shuffle"}:
+        raise ValueError(
+            "null_mode must be 'none', 'phase_shuffle', or 'reference_id_shuffle'"
+        )
+    if cfg.phase_mode not in {"linear", "nearest"}:
+        raise ValueError("phase_mode must be 'linear' or 'nearest'")
+    resolved_backend = resolve_compute_backend(cfg.compute_backend, cfg.compute_device)
     bank = load_layer_state_bank(packed)
     _validate_layers(bank.layers, cfg.require_contiguous_layers)
     pooling = str(np.asarray(packed.get("state_pooling_kind", "unknown")).reshape(-1)[0])
@@ -226,6 +251,7 @@ def _append_layer_time_geometry_from_packed(
     depth_tangent = field[..., LAYER_TIME_FIELD_NAMES.index("depth_tangent_drift")]
     time_tangent = field[..., LAYER_TIME_FIELD_NAMES.index("time_tangent_drift")]
     holonomy = field[..., LAYER_TIME_FIELD_NAMES.index("plaquette_holonomy")]
+    reliable_wilson = field[..., LAYER_TIME_FIELD_NAMES.index("plaquette_reliable_wilson")]
     expected_depth = expected.copy()
     expected_depth[:, :, 0] = False
     expected_time = expected.copy()
@@ -241,6 +267,11 @@ def _append_layer_time_geometry_from_packed(
     time_coverage = float(np.mean(np.isfinite(time_tangent[expected_time]))) if np.any(expected_time) else 1.0
     connection_coverage = min(depth_coverage, time_coverage)
     holonomy_coverage = float(np.mean(np.isfinite(holonomy[expected_holonomy]))) if np.any(expected_holonomy) else 1.0
+    reliable_holonomy_coverage = (
+        float(np.mean(np.isfinite(reliable_wilson[expected_holonomy])))
+        if np.any(expected_holonomy)
+        else 1.0
+    )
     if connection_coverage < float(cfg.min_connection_coverage):
         raise RuntimeError(
             f"OOF connection coverage {connection_coverage:.3f} is below required "
@@ -267,9 +298,25 @@ def _append_layer_time_geometry_from_packed(
     packed["layer_time_geometry_lid_coverage"] = np.asarray(lid_coverage, dtype=np.float64)
     packed["layer_time_geometry_connection_coverage"] = np.asarray(connection_coverage, dtype=np.float64)
     packed["layer_time_geometry_holonomy_coverage"] = np.asarray(holonomy_coverage, dtype=np.float64)
+    packed["layer_time_geometry_reliable_holonomy_coverage"] = np.asarray(
+        reliable_holonomy_coverage,
+        dtype=np.float64,
+    )
+    packed["layer_time_geometry_fiber_rank_mode"] = np.asarray(cfg.fiber_rank_mode, dtype=object)
+    packed["layer_time_geometry_max_transport_residual"] = np.asarray(
+        cfg.max_transport_residual,
+        dtype=np.float64,
+    )
+    packed["layer_time_geometry_null_mode"] = np.asarray(cfg.null_mode, dtype=object)
+    packed["layer_time_geometry_phase_mode"] = np.asarray(cfg.phase_mode, dtype=object)
+    packed["layer_time_geometry_compute_backend"] = np.asarray(resolved_backend, dtype=object)
+    packed["layer_time_geometry_compute_device"] = np.asarray(cfg.compute_device, dtype=object)
     packed["layer_time_geometry_config"] = np.asarray(str(cfg), dtype=object)
     packed["layer_time_geometry_reference_policy"] = np.asarray(
-        "problem-grouped out-of-fold; problem-balanced train-chain universe; phase-matched interpolation; labels unused",
+        (
+            "problem-grouped out-of-fold; problem-balanced train-chain universe; "
+            f"phase-matched {cfg.phase_mode}; labels unused"
+        ),
         dtype=object,
     )
     packed["layer_time_geometry_pooling_kind"] = np.asarray(pooling, dtype=object)
@@ -715,11 +762,15 @@ def interpolate_reference_trajectories(
     trajectories: np.ndarray,
     lengths: np.ndarray,
     phase: float,
+    *,
+    mode: str = "linear",
 ) -> np.ndarray:
-    """Interpolate one state per reference chain at normalized phase."""
+    """Select or interpolate one state per reference chain at normalized phase."""
 
     trajectories = np.asarray(trajectories, dtype=np.float32)
     lengths = np.asarray(lengths, dtype=np.int64)
+    if mode not in {"linear", "nearest"}:
+        raise ValueError("mode must be 'linear' or 'nearest'")
     phase = float(np.clip(phase, 0.0, 1.0))
     out = np.empty((trajectories.shape[0], trajectories.shape[2], trajectories.shape[3]), dtype=np.float32)
     for i, count in enumerate(lengths):
@@ -727,6 +778,9 @@ def interpolate_reference_trajectories(
             out[i] = trajectories[i, 0]
             continue
         position = phase * (int(count) - 1)
+        if mode == "nearest":
+            out[i] = trajectories[i, int(np.rint(position))]
+            continue
         lo = int(np.floor(position))
         hi = min(lo + 1, int(count) - 1)
         weight = float(position - lo)
@@ -738,6 +792,8 @@ def fit_streaming_layer_normalizer(
     trajectories: np.ndarray,
     lengths: np.ndarray,
     phase_grid: np.ndarray,
+    *,
+    phase_mode: str = "linear",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Fit per-layer center and scalar RMS without materializing phase×chain."""
 
@@ -747,7 +803,12 @@ def fit_streaming_layer_normalizer(
     total_sq = np.zeros(n_layers, dtype=np.float64)
     count = 0
     for phase in np.asarray(phase_grid, dtype=np.float64):
-        raw = interpolate_reference_trajectories(trajectories, lengths, float(phase))
+        raw = interpolate_reference_trajectories(
+            trajectories,
+            lengths,
+            float(phase),
+            mode=phase_mode,
+        )
         total += np.sum(raw, axis=0, dtype=np.float64)
         total_sq += np.einsum("nld,nld->l", raw, raw, dtype=np.float64, optimize=True)
         count += int(raw.shape[0])
@@ -768,12 +829,37 @@ def project_layer_tensor(
     projection: np.ndarray,
     *,
     batch_size: int,
+    backend: str = "numpy",
+    device: str = "cuda",
 ) -> np.ndarray:
     """Center, scalar-normalize, and project a layer tensor in point batches."""
 
     tensor = np.asarray(tensor)
     out = np.empty((tensor.shape[0], tensor.shape[1], projection.shape[1]), dtype=np.float32)
     batch_size = max(1, int(batch_size))
+    if backend == "torch":
+        import torch
+
+        torch_device = torch.device(device)
+        projection_t = torch.as_tensor(projection, dtype=torch.float32, device=torch_device)
+        mu_t = torch.as_tensor(mu, dtype=torch.float32, device=torch_device)
+        scale_t = torch.as_tensor(scale, dtype=torch.float32, device=torch_device)
+        with torch.inference_mode():
+            for start in range(0, tensor.shape[0], batch_size):
+                raw_t = torch.as_tensor(
+                    np.asarray(tensor[start : start + batch_size], dtype=np.float32),
+                    dtype=torch.float32,
+                    device=torch_device,
+                )
+                projected = torch.einsum(
+                    "nld,dp->nlp",
+                    (raw_t - mu_t) / scale_t,
+                    projection_t,
+                )
+                out[start : start + raw_t.shape[0]] = projected.cpu().numpy()
+        return out
+    if backend != "numpy":
+        raise ValueError(f"unsupported compute backend: {backend}")
     for start in range(0, tensor.shape[0], batch_size):
         raw = np.asarray(tensor[start : start + batch_size], dtype=np.float32)
         out[start : start + raw.shape[0]] = np.einsum(
@@ -829,6 +915,12 @@ def score_layer_time_fold(
     query_phase = np.asarray(query_phase, dtype=np.float64)
     if query_phase.shape != (query.shape[0],) or not np.isfinite(query_phase).all():
         raise ValueError("query_phase must be finite with one value per query point")
+    compute_backend = resolve_compute_backend(cfg.compute_backend, cfg.compute_device)
+    if cfg.null_mode == "phase_shuffle":
+        query_phase = query_phase.copy()
+        for chain in np.unique(query_chain_idx):
+            chain_rows = np.where(query_chain_idx == chain)[0]
+            query_phase[chain_rows] = rng.permutation(query_phase[chain_rows])
 
     n_ref, n_layers, hidden_dim = trajectories.shape[0], trajectories.shape[2], trajectories.shape[3]
     if n_ref < 3 or n_layers < 2:
@@ -846,25 +938,39 @@ def score_layer_time_fold(
         raise ValueError(
             f"projection matrix must have shape [{hidden_dim}, p], got {projection.shape}"
         )
-    mu, scale = fit_streaming_layer_normalizer(trajectories, lengths, phase_grid)
+    mu, scale = fit_streaming_layer_normalizer(
+        trajectories,
+        lengths,
+        phase_grid,
+        phase_mode=cfg.phase_mode,
+    )
     qry = project_layer_tensor(
         query,
         mu,
         scale,
         projection,
         batch_size=max(1, int(cfg.chunk_size)),
+        backend=compute_backend,
+        device=cfg.compute_device,
     )
 
     phase_keys = np.asarray([round(float(np.clip(x, 0.0, 1.0)), 12) for x in query_phase])
     phase_references: dict[float, np.ndarray] = {}
     for phase in np.unique(phase_keys):
-        raw = interpolate_reference_trajectories(trajectories, lengths, float(phase))
+        raw = interpolate_reference_trajectories(
+            trajectories,
+            lengths,
+            float(phase),
+            mode=cfg.phase_mode,
+        )
         phase_references[float(phase)] = project_layer_tensor(
             raw,
             mu,
             scale,
             projection,
             batch_size=max(1, int(cfg.chunk_size)),
+            backend=compute_backend,
+            device=cfg.compute_device,
         )
 
     k_topology = max(2, min(int(cfg.knn_k), n_ref))
@@ -881,6 +987,8 @@ def score_layer_time_fold(
                 phase_ref[:, layer_pos],
                 k=k_all,
                 chunk_size=cfg.chunk_size,
+                backend=compute_backend,
+                device=cfg.compute_device,
             )
             neighbor_d2[query_ids, layer_pos] = d2
             neighbor_ids[query_ids, layer_pos] = nn
@@ -927,15 +1035,21 @@ def score_layer_time_fold(
             bases[i, layer_pos] = basis
             effective_ranks[i, layer_pos] = int(effective_rank)
 
-    # LID determines the fiber rank, capped only for numerical tractability.
-    # A plaquette with unequal corner ranks is still evaluated on their common
-    # subspace, while the rank singularity is reported explicitly.
+    # LID/rank fronts are measured independently from the primary connection
+    # rank.  The default fixed-rank bundle prevents dimension changes from being
+    # silently converted into curvature.  ``fiber_rank_mode='lid'`` preserves
+    # the original adaptive estimator as an explicit ablation.
     lid_values = field[..., lid_pos]
-    local_ranks = np.ones((query.shape[0], n_layers), dtype=np.int32)
+    dimension_ranks = np.ones((query.shape[0], n_layers), dtype=np.int32)
     finite_lid = np.isfinite(lid_values)
-    local_ranks[finite_lid] = np.rint(lid_values[finite_lid]).astype(np.int32)
-    local_ranks = np.clip(local_ranks, 1, tangent_rank)
-    local_ranks = np.minimum(local_ranks, effective_ranks)
+    dimension_ranks[finite_lid] = np.rint(lid_values[finite_lid]).astype(np.int32)
+    dimension_ranks = np.clip(dimension_ranks, 1, projected_dim)
+    dimension_ranks = np.minimum(dimension_ranks, effective_ranks)
+    field[..., LAYER_TIME_FIELD_NAMES.index("fiber_rank")] = dimension_ranks.astype(np.float32)
+    if cfg.fiber_rank_mode == "fixed":
+        local_ranks = np.where(effective_ranks >= tangent_rank, tangent_rank, 0).astype(np.int32)
+    else:
+        local_ranks = np.minimum(dimension_ranks, tangent_rank).astype(np.int32)
 
     depth_tangent_pos = LAYER_TIME_FIELD_NAMES.index("depth_tangent_drift")
     for layer_pos in range(1, n_layers):
@@ -954,6 +1068,8 @@ def score_layer_time_fold(
                 bases[i, layer_pos - 1],
                 bases[i, layer_pos],
                 rank,
+                permute_target=cfg.null_mode == "reference_id_shuffle",
+                rng=rng,
             )
             field[i, layer_pos, depth_tangent_pos] = residual
 
@@ -978,6 +1094,8 @@ def score_layer_time_fold(
                 bases[prev, layer_pos],
                 bases[i, layer_pos],
                 rank,
+                permute_target=cfg.null_mode == "reference_id_shuffle",
+                rng=rng,
             )
             field[i, layer_pos, time_tangent_pos] = residual
 
@@ -986,6 +1104,9 @@ def score_layer_time_fold(
     # once depth-then-time and once time-then-depth.  Their discrepancy is
     # invariant to arbitrary orthogonal changes of local tangent frame.
     holonomy_pos = LAYER_TIME_FIELD_NAMES.index("plaquette_holonomy")
+    wilson_pos = LAYER_TIME_FIELD_NAMES.index("plaquette_wilson_curvature")
+    transport_pos = LAYER_TIME_FIELD_NAMES.index("plaquette_transport_residual")
+    reliable_wilson_pos = LAYER_TIME_FIELD_NAMES.index("plaquette_reliable_wilson")
     singularity_pos = LAYER_TIME_FIELD_NAMES.index("rank_singularity")
     for i, (chain, step) in enumerate(zip(query_chain_idx, query_step_idx)):
         prev = point_lookup.get((int(chain), int(step) - 1))
@@ -994,7 +1115,16 @@ def score_layer_time_fold(
         prev_ref = phase_references[float(phase_keys[prev])]
         curr_ref = phase_references[float(phase_keys[i])]
         for layer_pos in range(1, n_layers):
-            corner_ranks = np.asarray(
+            dimension_corner_ranks = np.asarray(
+                [
+                    dimension_ranks[prev, layer_pos - 1],
+                    dimension_ranks[prev, layer_pos],
+                    dimension_ranks[i, layer_pos - 1],
+                    dimension_ranks[i, layer_pos],
+                ],
+                dtype=np.int32,
+            )
+            connection_corner_ranks = np.asarray(
                 [
                     local_ranks[prev, layer_pos - 1],
                     local_ranks[prev, layer_pos],
@@ -1003,8 +1133,10 @@ def score_layer_time_fold(
                 ],
                 dtype=np.int32,
             )
-            rank = int(np.min(corner_ranks))
-            field[i, layer_pos, singularity_pos] = float(np.unique(corner_ranks).size > 1)
+            rank = int(np.min(connection_corner_ranks))
+            field[i, layer_pos, singularity_pos] = float(
+                np.unique(dimension_corner_ranks).size > 1
+            )
             if rank < 1:
                 field[i, layer_pos, singularity_pos] = 1.0
                 continue
@@ -1019,6 +1151,8 @@ def score_layer_time_fold(
                 bases[prev, layer_pos - 1],
                 bases[prev, layer_pos],
                 rank,
+                permute_target=cfg.null_mode == "reference_id_shuffle",
+                rng=rng,
             )
             ids_time_right = np.union1d(
                 neighbor_ids[prev, layer_pos, :k_tangent],
@@ -1030,6 +1164,8 @@ def score_layer_time_fold(
                 bases[prev, layer_pos],
                 bases[i, layer_pos],
                 rank,
+                permute_target=cfg.null_mode == "reference_id_shuffle",
+                rng=rng,
             )
             ids_time_left = np.union1d(
                 neighbor_ids[prev, layer_pos - 1, :k_tangent],
@@ -1041,6 +1177,8 @@ def score_layer_time_fold(
                 bases[prev, layer_pos - 1],
                 bases[i, layer_pos - 1],
                 rank,
+                permute_target=cfg.null_mode == "reference_id_shuffle",
+                rng=rng,
             )
             ids_depth_curr = np.union1d(
                 neighbor_ids[i, layer_pos - 1, :k_tangent],
@@ -1052,6 +1190,8 @@ def score_layer_time_fold(
                 bases[i, layer_pos - 1],
                 bases[i, layer_pos],
                 rank,
+                permute_target=cfg.null_mode == "reference_id_shuffle",
+                rng=rng,
             )
             if not np.isfinite(
                 [
@@ -1062,12 +1202,30 @@ def score_layer_time_fold(
                 ]
             ).all():
                 continue
+            plaquette_residual = float(
+                np.max(
+                    [
+                        depth_prev_residual,
+                        time_right_residual,
+                        time_left_residual,
+                        depth_curr_residual,
+                    ]
+                )
+            )
+            field[i, layer_pos, transport_pos] = plaquette_residual
             path_depth_then_time = time_right @ depth_prev
             path_time_then_depth = depth_curr @ time_left
             field[i, layer_pos, holonomy_pos] = connection_path_discrepancy(
                 path_depth_then_time,
                 path_time_then_depth,
             )
+            wilson = orthogonal_loop_curvature(
+                path_depth_then_time,
+                path_time_then_depth,
+            )
+            field[i, layer_pos, wilson_pos] = wilson
+            if plaquette_residual <= float(cfg.max_transport_residual):
+                field[i, layer_pos, reliable_wilson_pos] = wilson
     return field
 
 
@@ -1079,13 +1237,42 @@ def shared_jl_projection(hidden_dim: int, projection_dim: int, rng: np.random.Ge
     return mat.astype(np.float32)
 
 
-def topk_sqdist(query: np.ndarray, ref: np.ndarray, *, k: int, chunk_size: int) -> tuple[np.ndarray, np.ndarray]:
+def topk_sqdist(
+    query: np.ndarray,
+    ref: np.ndarray,
+    *,
+    k: int,
+    chunk_size: int,
+    backend: str = "numpy",
+    device: str = "cuda",
+) -> tuple[np.ndarray, np.ndarray]:
     query = np.asarray(query, dtype=np.float32)
     ref = np.asarray(ref, dtype=np.float32)
     k = max(1, min(int(k), ref.shape[0]))
     chunk_size = max(1, int(chunk_size))
     out_d = np.empty((query.shape[0], k), dtype=np.float32)
     out_i = np.empty((query.shape[0], k), dtype=np.int64)
+    if backend == "torch":
+        import torch
+
+        torch_device = torch.device(device)
+        ref_t = torch.as_tensor(ref, dtype=torch.float32, device=torch_device)
+        ref_norm_t = torch.sum(ref_t * ref_t, dim=1).unsqueeze(0)
+        with torch.inference_mode():
+            for start in range(0, query.shape[0], chunk_size):
+                q_t = torch.as_tensor(
+                    query[start : start + chunk_size],
+                    dtype=torch.float32,
+                    device=torch_device,
+                )
+                d2_t = torch.sum(q_t * q_t, dim=1, keepdim=True) + ref_norm_t - 2.0 * (q_t @ ref_t.T)
+                d2_t = torch.clamp_min(d2_t, 0.0)
+                values_t, indices_t = torch.topk(d2_t, k=k, dim=1, largest=False, sorted=True)
+                out_d[start : start + q_t.shape[0]] = values_t.cpu().numpy()
+                out_i[start : start + q_t.shape[0]] = indices_t.cpu().numpy()
+        return out_d, out_i
+    if backend != "numpy":
+        raise ValueError(f"unsupported compute backend: {backend}")
     ref_norm = np.sum(ref * ref, axis=1)[None, :]
     for start in range(0, query.shape[0], chunk_size):
         q = query[start : start + chunk_size]
@@ -1097,6 +1284,30 @@ def topk_sqdist(query: np.ndarray, ref: np.ndarray, *, k: int, chunk_size: int) 
         out_i[start : start + q.shape[0]] = np.take_along_axis(idx, order, axis=1)
         out_d[start : start + q.shape[0]] = np.take_along_axis(part, order, axis=1)
     return out_d, out_i
+
+
+def resolve_compute_backend(backend: str, device: str) -> str:
+    """Resolve the bulk linear-algebra backend without importing torch eagerly."""
+
+    backend = str(backend).lower()
+    if backend not in {"auto", "numpy", "torch"}:
+        raise ValueError("compute_backend must be 'auto', 'numpy', or 'torch'")
+    if backend == "numpy":
+        return "numpy"
+    try:
+        import torch
+    except ImportError:
+        if backend == "torch":
+            raise RuntimeError("compute_backend='torch' requires PyTorch") from None
+        return "numpy"
+    try:
+        target = torch.device(device)
+    except (TypeError, RuntimeError, ValueError) as exc:
+        raise ValueError(f"invalid compute_device {device!r}") from exc
+    available = target.type != "cuda" or torch.cuda.is_available()
+    if backend == "torch" and not available:
+        raise RuntimeError(f"requested torch device {device!r} is unavailable")
+    return "torch" if available else "numpy"
 
 
 def lid_mle(d2: np.ndarray) -> np.ndarray:
@@ -1174,6 +1385,9 @@ def fit_local_tangent_connection(
     source_basis: np.ndarray,
     target_basis: np.ndarray,
     rank: int,
+    *,
+    permute_target: bool = False,
+    rng: np.random.Generator | None = None,
 ) -> tuple[np.ndarray, float]:
     """Fit a paired, local orthogonal transport in tangent coordinates.
 
@@ -1185,6 +1399,12 @@ def fit_local_tangent_connection(
 
     source_points = np.asarray(source_points, dtype=np.float64)
     target_points = np.asarray(target_points, dtype=np.float64)
+    if source_points.shape[0] != target_points.shape[0]:
+        raise ValueError("paired connection requires equal source/target row counts")
+    if permute_target:
+        if rng is None:
+            raise ValueError("rng is required when permute_target=True")
+        target_points = target_points[rng.permutation(target_points.shape[0])]
     rank = max(1, min(int(rank), source_basis.shape[1], target_basis.shape[1]))
     source = source_points - np.mean(source_points, axis=0, keepdims=True)
     target = target_points - np.mean(target_points, axis=0, keepdims=True)
@@ -1228,23 +1448,53 @@ def connection_path_discrepancy(path_a: np.ndarray, path_b: np.ndarray) -> float
     return float(np.linalg.norm(path_a - path_b, ord="fro") / (2.0 * np.sqrt(rank)))
 
 
+def orthogonal_loop_curvature(path_a: np.ndarray, path_b: np.ndarray) -> float:
+    """Gauge-invariant geodesic curvature from the relative Wilson loop.
+
+    Both paths map the same source fiber to the same target fiber.  Their
+    relative loop ``path_a.T @ path_b`` changes only by orthogonal conjugation
+    under local gauge rotations, so its eigenangles are invariant.  The root
+    mean square eigenangle is normalized by pi to lie in ``[0, 1]``.
+    """
+
+    path_a = np.asarray(path_a, dtype=np.float64)
+    path_b = np.asarray(path_b, dtype=np.float64)
+    if path_a.shape != path_b.shape or path_a.ndim != 2 or path_a.shape[0] != path_a.shape[1]:
+        raise ValueError("path transports must be same-shaped square matrices")
+    if path_a.shape[0] == 0 or not np.isfinite(path_a).all() or not np.isfinite(path_b).all():
+        return float("nan")
+    loop = path_a.T @ path_b
+    eigenvalues = np.linalg.eigvals(loop)
+    angles = np.angle(eigenvalues)
+    curvature = float(np.sqrt(np.mean(angles * angles)) / np.pi)
+    return float(np.clip(curvature, 0.0, 1.0))
+
+
 def reduce_layer_time_field(field: np.ndarray) -> dict[str, np.ndarray]:
     names = {name: i for i, name in enumerate(LAYER_TIME_FIELD_NAMES)}
     lid = field[..., names["lid"]]
+    fiber_rank = field[..., names["fiber_rank"]]
     depth_rewire = field[..., names["depth_neighbor_rewire"]]
     time_rewire = field[..., names["time_neighbor_rewire"]]
     depth_tangent = field[..., names["depth_tangent_drift"]]
     time_tangent = field[..., names["time_tangent_drift"]]
     holonomy = field[..., names["plaquette_holonomy"]]
+    wilson = field[..., names["plaquette_wilson_curvature"]]
+    transport_residual = field[..., names["plaquette_transport_residual"]]
+    reliable_wilson = field[..., names["plaquette_reliable_wilson"]]
     rank_singularity = field[..., names["rank_singularity"]]
     return {
         "ltg_lid_median": _nanquantile(lid, 0.50),
         "ltg_lid_depth_iqr": _nanquantile(lid, 0.75) - _nanquantile(lid, 0.25),
+        "ltg_fiber_rank_median": _nanquantile(fiber_rank, 0.50),
         "ltg_depth_rewire_peak": _nanmax(depth_rewire),
         "ltg_time_rewire_median": _nanquantile(time_rewire, 0.50),
         "ltg_depth_tangent_peak": _nanmax(depth_tangent),
         "ltg_time_tangent_median": _nanquantile(time_tangent, 0.50),
         "ltg_holonomy_peak": _nanmax(holonomy),
+        "ltg_wilson_peak": _nanmax(wilson),
+        "ltg_transport_residual_median": _nanquantile(transport_residual, 0.50),
+        "ltg_reliable_wilson_peak": _nanmax(reliable_wilson),
         "ltg_rank_singularity_rate": _nanmean(rank_singularity),
     }
 

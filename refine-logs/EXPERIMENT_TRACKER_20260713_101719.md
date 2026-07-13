@@ -5,7 +5,7 @@
 
 | ID | Claim | 状态 | 产物/证据 | 下一动作 |
 |---|---|---|---|---|
-| S0 | schema/invariance | passed | 全库 `131 passed, 1 skipped`；trace/teacher-forcing/layer-time tests | 远端 CUDA 验证 Torch bulk backend |
+| S0 | schema/invariance | passed | 全库 `129 passed, 1 skipped`；trace/teacher-forcing/layer-time tests | 远端 CUDA 验证 Torch bulk backend |
 | S1 | separable synthetic | pending | 未运行正式生成器 | 增加可分离二维场 fixture |
 | S2 | interaction synthetic | partial | Wilson gauge invariance 与 ID-shuffle transport break 已测试 | 增加已知非零曲率生成器 |
 | E0 | claim-driven evaluator | passed-synthetic | first-error event、位置残差化、同题 paired、conditional Wilson tests | 在 G0 artifact 上运行 |

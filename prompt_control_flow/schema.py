@@ -40,6 +40,7 @@ def inspect_npz_schema(path: str | Path) -> Dict[str, Any]:
     has_layer_tensor = "step_layer_state_vectors" in files
     has_layer_memmap = "step_layer_state_memmap_path" in files
     has_mean_step_vectors = "sv_vec_mean" in files
+    has_legacy_stepvec = "stepvec" in files
     layer_values = None
     for key in ("step_layer_state_vector_layers", "layers_used", "sv_layers", "layers"):
         if key in files:
@@ -56,6 +57,8 @@ def inspect_npz_schema(path: str | Path) -> Dict[str, Any]:
     pooling_kind = _scalar_value(z, "state_pooling_kind", "")
     if not pooling_kind and has_mean_step_vectors:
         pooling_kind = "arithmetic_mean_over_step_tokens"
+    if not pooling_kind and has_legacy_stepvec:
+        pooling_kind = _scalar_value(z, "stepvec_mode", "legacy_step_exp")
     representation_kind = _scalar_value(z, "state_representation_kind", "")
     if not representation_kind:
         projected = bool(np.asarray(z["reasoning_subspace_used"]).item()) if "reasoning_subspace_used" in files else False
@@ -67,6 +70,30 @@ def inspect_npz_schema(path: str | Path) -> Dict[str, Any]:
         and pooling_kind == "arithmetic_mean_over_step_tokens"
         and representation_kind == "hidden_state"
     )
+    if has_layer_memmap:
+        layer_time_input_kind = "whole_layer_memmap"
+    elif has_layer_tensor:
+        layer_time_input_kind = "embedded_whole_layer_tensor"
+    elif has_mean_step_vectors:
+        layer_time_input_kind = "exact_sv_vec_mean"
+    elif has_legacy_stepvec:
+        layer_time_input_kind = "legacy_sparse_stepvec"
+    else:
+        layer_time_input_kind = "unsupported"
+    if layer_time_mainline_ready:
+        layer_time_recommendation = "use directly for the primary layer-time audit"
+    elif has_legacy_stepvec:
+        layer_time_recommendation = (
+            "full sample artifact, but not full-layer mean states; re-extract with "
+            "--geometry_only for the primary result, or use both legacy opt-ins for an ablation"
+        )
+    elif has_layer_time_states:
+        layer_time_recommendation = (
+            "layer-time states are present but fail the contiguous-layer, arithmetic-mean, "
+            "or hidden-state guard; inspect extraction provenance"
+        )
+    else:
+        layer_time_recommendation = "extract contiguous post-block mean hidden states first"
     exact_required = {
         "trace_schema_version",
         "trace_token_add_special_tokens",
@@ -106,10 +133,15 @@ def inspect_npz_schema(path: str | Path) -> Dict[str, Any]:
         "needs_teacher_forcing_reextract": bool(needs_teacher_forcing_reextract),
         "has_layer_time_states": has_layer_time_states,
         "has_layer_state_memmap": bool(has_layer_memmap),
+        "has_legacy_layer_stepvec": bool(has_legacy_stepvec),
+        "layer_time_input_kind": layer_time_input_kind,
+        "layer_time_layers": [] if layer_values is None else layer_values.tolist(),
+        "layer_time_num_layers": 0 if layer_values is None else int(layer_values.size),
         "layer_time_contiguous_layers": contiguous_layers,
         "layer_time_pooling_kind": pooling_kind,
         "layer_time_representation_kind": representation_kind,
         "layer_time_mainline_ready": layer_time_mainline_ready,
+        "layer_time_recommendation": layer_time_recommendation,
         "exact_trace_declared": exact_trace_declared,
         "exact_trace_complete": exact_trace_complete,
     }

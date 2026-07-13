@@ -7,8 +7,12 @@ from typing import Any, Mapping
 import numpy as np
 
 
-def render_markdown(summary: Mapping[str, Any]) -> str:
-    lines = ["# Prompt-Controlled Residual Flow Audit", ""]
+def render_markdown(
+    summary: Mapping[str, Any],
+    *,
+    title: str = "Prompt-Controlled Residual Flow Audit",
+) -> str:
+    lines = [f"# {title}", ""]
     lines.append(f"- Chains: `{summary.get('n_chains')}`")
     lines.append("")
     fe = summary.get("first_error", {})
@@ -54,6 +58,7 @@ def render_markdown(summary: Mapping[str, Any]) -> str:
     lines.append("- `icr_*` scores require explicit attention extraction and are reported separately from hidden-only prompt-flow scores.")
     lines.append("- `geom_*` scores are cross-fitted point-cloud geometry diagnostics; they should beat length/position controls before supporting a mechanism claim.")
     lines.append("- `sd_*` scores summarize whole-chain spectral-manifold dynamics; use `full_*.npz` for ProcessBench first-error/cross-problem response claims, not same-problem paired AUROC.")
+    lines.append("- `ltg_*` scores are compatibility reductions of the full layer-time field; the claim-driven event and paired tests live in `layer_time_validation.*`.")
     lines.append("- Geometry scores indicate separability, local dimensional expansion, and neighborhood rearrangement; causal claims still require interventions or patching.")
     lines.append("- A useful prompt-control signal should beat both controls and random subspaces.")
     return "\n".join(lines)

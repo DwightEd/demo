@@ -37,11 +37,12 @@ Prompt SVD is not assumed to be correct.  It is one chart among several:
   scores held-out response trajectories by healthy-tube distance, spectral
   leakage, tangent off-manifold motion, and error-basin committor.
 
-The implementation-aligned method draft for the current spectral-chain branch
-is [METHOD_SPECTRAL_CHAIN_DYNAMICS.md](METHOD_SPECTRAL_CHAIN_DYNAMICS.md).
-That document is the canonical description of the current method.  Older
-HoloReason / broad Reasoning Spectral Field drafts were removed from the
-literature folder because they no longer match the code.
+The canonical method is now
+[METHOD_LAYER_TIME_GEOMETRY.md](METHOD_LAYER_TIME_GEOMETRY.md).  It preserves
+the full layer axis, separates LID/rank fronts from a fixed-rank connection,
+and validates reliability-gated Wilson-loop curvature.  The older
+[METHOD_SPECTRAL_CHAIN_DYNAMICS.md](METHOD_SPECTRAL_CHAIN_DYNAMICS.md) remains
+as a one-dimensional trajectory baseline, not the current main method.
 
 Use `--store_step_vectors` during extraction to save the shared per-step
 residual-flow vector store for PCA/VAE/spectral chart comparisons.  This is
@@ -91,6 +92,8 @@ prompt_control_flow/
   geometry.py
   representation_geometry.py
   spectral_chain_dynamics.py
+  layer_time_geometry.py
+  layer_time_evaluate.py
   metrics.py
   extraction.py
   evaluate.py
@@ -105,6 +108,8 @@ prompt_control_flow/
     visualize_prompt_flow.py
     audit_geometry.py
     audit_spectral_chain.py
+    audit_layer_time_geometry.py
+    evaluate_layer_time_geometry.py
 ```
 
 ## File Responsibilities and Main Interfaces
@@ -232,7 +237,7 @@ prompt-flow, logit uncertainty, and optional ICR-style attention/residual
 mismatch without saving full attention tensors to disk:
 
 ```bash
-python -m prompt_control_flow.cli.extract_mechanisms \
+python prompt_control_flow/cli/extract_mechanisms.py \
   --input data/processbench/gsm8k.jsonl \
   --input_format processbench_jsonl \
   --model /path/to/Llama-3.1-8B-Instruct \
@@ -328,6 +333,54 @@ Important evaluation guardrail: `full_*.npz` supports ProcessBench
 first-error localization, within-chain rank, and cross-problem response
 diagnosis.  It does **not** support same-problem paired AUROC.  For that,
 use `*_multisample_sv.npz` and a separate multisample response audit.
+
+### `cli/audit_layer_time_geometry.py`
+
+Build the current whole-layer field and immediately run its claim-driven
+validation:
+
+```bash
+python prompt_control_flow/cli/audit_layer_time_geometry.py \
+  --input data/gsm8k_ltg_smoke.npz \
+  --output outputs/layer_time/gsm8k_ltg_v2.npz \
+  --output_dir outputs/layer_time/gsm8k_ltg_v2_audit \
+  --fiber_rank_mode fixed \
+  --tangent_rank 6 \
+  --max_transport_residual 0.35 \
+  --phase_mode linear \
+  --compute_backend auto \
+  --compute_device cuda \
+  --validation_bootstrap 2000
+```
+
+Primary V2 observables are `fiber_rank`,
+`plaquette_wilson_curvature`, `plaquette_transport_residual`, and
+`plaquette_reliable_wilson`.  The legacy Frobenius
+`plaquette_holonomy` remains for comparison.
+
+Run structural nulls into separate artifacts:
+
+```bash
+python prompt_control_flow/cli/audit_layer_time_geometry.py \
+  --input data/gsm8k_ltg_smoke.npz \
+  --output outputs/layer_time/gsm8k_ltg_phase_null.npz \
+  --null_mode phase_shuffle
+
+python prompt_control_flow/cli/audit_layer_time_geometry.py \
+  --input data/gsm8k_ltg_smoke.npz \
+  --output outputs/layer_time/gsm8k_ltg_id_null.npz \
+  --null_mode reference_id_shuffle
+```
+
+For an existing field, rerun statistics without recomputing hidden-state
+geometry:
+
+```bash
+python prompt_control_flow/cli/evaluate_layer_time_geometry.py \
+  --input outputs/layer_time/gsm8k_ltg_v2.npz \
+  --output_dir outputs/layer_time/gsm8k_ltg_v2_validation \
+  --bootstrap 2000
+```
 
 ### `cli/audit_mechanisms.py` and `cli/visualize_mechanisms.py`
 

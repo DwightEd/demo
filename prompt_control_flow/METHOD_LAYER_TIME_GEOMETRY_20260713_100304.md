@@ -232,7 +232,6 @@ W_{i,t,\ell}=P_{\ell t}^{\top}P_{t\ell}.
 - `extraction.py`: geometry-only、全 post-block 深度、非 flattened 主存储。
 - `layer_time_geometry.py`: OOF reference、rank front、fixed-rank connection、transport reliability 与 Wilson curvature。
 - `layer_time_evaluate.py`: event study、nuisance residualization、same-problem pairing 与 claim gate。
-- bulk JL projection 与 kNN 支持 Torch/CUDA；变长小型 connection SVD 保留 CPU 路径。
 - `cli/audit_layer_time_geometry.py`: 构建 field 并自动运行专用验证。
 - `cli/evaluate_layer_time_geometry.py`: 对已有 field 重跑统计，不重新抽 hidden state。
 - `tests/test_layer_time_geometry.py`: group、label-free、identical-layer、gauge 与 reference-ID null。

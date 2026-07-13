@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import uuid
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 from tqdm import tqdm
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from prompt_control_flow.config import ExtractionConfig
 from prompt_control_flow.data import load_chain_records

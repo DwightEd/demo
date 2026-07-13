@@ -27,12 +27,14 @@ P_{t\ell}=R^\ell_{\ell,t+1}R^t_{\ell,t},
 \]
 
 \[
-\kappa_{i,\ell,t}
+W_{i,\ell,t}=P_{\ell t}^{\top}P_{t\ell},
+\qquad
+\kappa^W_{i,\ell,t}
 =
-\frac{\|P_{\ell t}-P_{t\ell}\|_F}{2\sqrt q}.
+\frac{1}{\pi}\sqrt{\frac{1}{q}\sum_r\theta_r^2}.
 \]
 
-这里 LID 决定局部 fiber rank，邻域身份定义 paired local chart，holonomy $\kappa$ 是唯一核心交互量；它们不是彼此无关的特征栈。完整定义见 [METHOD_LAYER_TIME_GEOMETRY.md](../../prompt_control_flow/METHOD_LAYER_TIME_GEOMETRY.md)。
+V2 将 rank front 与 curvature 分离：LID 只描述局部维度变化，主 connection 使用固定秩 (q)；邻域身份定义 paired local chart，Wilson eigenangle curvature 是核心交互量，Procrustes residual 用于 reliability gate。完整定义见 [METHOD_LAYER_TIME_GEOMETRY.md](../../prompt_control_flow/METHOD_LAYER_TIME_GEOMETRY.md)。
 
 ## 两阶段主流程
 
@@ -43,7 +45,7 @@ P_{t\ell}=R^\ell_{\ell,t+1}R^t_{\ell,t},
 exact token IDs 默认还会核对 artifact 的 source model/tokenizer 名称；不匹配会停止。`--allow_model_mismatch` 只允许用于显式的不安全 ablation。
 
 ```bash
-python -m prompt_control_flow.cli.extract_mechanisms \
+python prompt_control_flow/cli/extract_mechanisms.py \
   --input data/gsm8k_exact_multisample.npz \
   --model /path/to/Llama-3.1-8B-Instruct \
   --output outputs/layer_time/gsm8k_whole_layer_states.npz \
@@ -59,7 +61,7 @@ python -m prompt_control_flow.cli.extract_mechanisms \
 ### B. 构造 problem-grouped OOF layer–time field
 
 ```bash
-python -m prompt_control_flow.cli.audit_layer_time_geometry \
+python prompt_control_flow/cli/audit_layer_time_geometry.py \
   --input outputs/layer_time/gsm8k_whole_layer_states.npz \
   --output outputs/layer_time/gsm8k_ltg.npz \
   --output_dir outputs/layer_time/gsm8k_ltg_audit \
@@ -67,12 +69,18 @@ python -m prompt_control_flow.cli.audit_layer_time_geometry \
   --knn_k 20 \
   --tangent_k 24 \
   --tangent_rank 6 \
+  --fiber_rank_mode fixed \
+  --max_transport_residual 0.35 \
+  --phase_mode linear \
+  --compute_backend auto \
+  --compute_device cuda \
   --projection_dim 64 \
   --max_reference 256 \
-  --phase_grid_size 11
+  --phase_grid_size 11 \
+  --validation_bootstrap 2000
 ```
 
-第二阶段只依赖 NumPy，可在 CPU 上运行。reference、归一化和局部 transport 只使用训练 problem；JL 由固定 seed data-independently 生成，并跨层、跨 outer fold 共享。错误标签仅在输出后的验证阶段使用。
+第二阶段可在纯 NumPy/CPU 上运行；`auto` 会在 CUDA 可用时把批量 projection 与 kNN distance/top-k 放到 Torch GPU。变长局部 Procrustes/SVD 仍在 CPU 上执行，避免大量小 kernel 与同步开销。reference、归一化和局部 transport 只使用训练 problem；JL 由固定 seed data-independently 生成，并跨层、跨 outer fold 共享。错误标签仅在输出后的验证阶段使用。
 
 ## 直接读取 exact `sv_vec_mean`
 
@@ -102,7 +110,7 @@ python 10_sample_and_extract.py \
   --store_vectors \
   --output data/gsm8k_ltg_smoke.npz
 
-python -m prompt_control_flow.cli.audit_layer_time_geometry \
+python prompt_control_flow/cli/audit_layer_time_geometry.py \
   --input data/gsm8k_ltg_smoke.npz \
   --output outputs/layer_time/gsm8k_ltg_smoke.npz
 ```
@@ -125,11 +133,15 @@ layer_time_geometry_field
 
 layer_time_geometry_field_names =
   lid
+  fiber_rank
   depth_neighbor_rewire
   time_neighbor_rewire
   depth_tangent_drift
   time_tangent_drift
   plaquette_holonomy
+  plaquette_wilson_curvature
+  plaquette_transport_residual
+  plaquette_reliable_wilson
   rank_singularity
 ```
 
@@ -142,6 +154,13 @@ layer_time_geometry_reference_sizes
 layer_time_geometry_lid_coverage
 layer_time_geometry_connection_coverage
 layer_time_geometry_holonomy_coverage
+layer_time_geometry_reliable_holonomy_coverage
+layer_time_geometry_fiber_rank_mode
+layer_time_geometry_max_transport_residual
+layer_time_geometry_null_mode
+layer_time_geometry_phase_mode
+layer_time_geometry_compute_backend
+layer_time_geometry_compute_device
 layer_time_geometry_reference_policy
 layer_time_geometry_pooling_kind
 layer_time_geometry_representation_kind
@@ -160,7 +179,9 @@ layer_time_geometry_representation_kind
 5. 同一 `problem_id` 的全部 sample 必须在同一 fold。
 6. OOF LID/connection/holonomy coverage 默认至少为 0.99/0.95/0.90；任何 fold 参考链少于 k 会硬失败。
 7. identical-layer 不变量要求 depth rewiring (=0)，tangent/holonomy 只允许数值误差。
-8. 结论必须通过 $k$、JL 维度、tangent-rank、reference cap 与 phase-grid sensitivity；不能在同一测试集挑最佳层或最佳超参。
+8. 结论必须通过 $k$、JL 维度、固定 $q$、reference cap、phase alignment 与 reliability-threshold sensitivity；不能在同一测试集挑最佳层或最佳超参。
+9. 主 Wilson event 必须在条件化 LID/rank、rewiring、transport residual、位置与长度后仍存在。
+10. `phase_shuffle` 与 `reference_id_shuffle` 必须写入独立 null artifact，并破坏主 first-error 局部带。
 
 ## 资源估算
 
@@ -179,8 +200,8 @@ python -m pip install -r requirements-dev.txt
 pytest -q tests/test_trace_alignment.py \
           tests/test_teacher_forcing_trace.py \
           tests/test_layer_time_geometry.py
-python -m prompt_control_flow.cli.extract_mechanisms --help
-python -m prompt_control_flow.cli.audit_layer_time_geometry --help
+python prompt_control_flow/cli/extract_mechanisms.py --help
+python prompt_control_flow/cli/audit_layer_time_geometry.py --help
 ```
 
 当前 CPU 合成链、schema、group split、label invariance、identical-layer 与 gauge-invariance 测试已连通；真实 7B/8B 全层 GPU smoke 仍必须在远端完成后，才能声称真实数据流程通过。
