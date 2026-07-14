@@ -1,5 +1,10 @@
 # Markdown Index
 
+The canonical repository-wide evidence ledger is
+[`../EXPERIMENT_LEDGER.md`](../EXPERIMENT_LEDGER.md). It supersedes optimistic
+historical interpretations when later same-problem or frozen cross-dataset
+controls disagree.
+
 This folder keeps project documentation grouped by role.
 
 ## `progress/`

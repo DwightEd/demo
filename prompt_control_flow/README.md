@@ -1,5 +1,9 @@
 # Prompt-Controlled Residual Flow
 
+The repository-wide experiment history, including negative results, superseded
+claims, evidence grades, and the current frozen conclusion, is maintained in
+[`../EXPERIMENT_LEDGER.md`](../EXPERIMENT_LEDGER.md).
+
 This subproject tests whether reasoning failures are visible as a shift in
 residual-stream writes away from the problem prompt and toward the generated
 prefix.  It deliberately avoids using step position or step length to define
