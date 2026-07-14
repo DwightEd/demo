@@ -60,6 +60,22 @@ _LAZY_EXPORTS = {
         ".first_error_geometry",
         "run_first_error_geometry_audit",
     ),
+    "FeasibleTangentConfig": (
+        ".feasible_tangent",
+        "FeasibleTangentConfig",
+    ),
+    "FeasibleTangentValidationConfig": (
+        ".feasible_tangent",
+        "FeasibleTangentValidationConfig",
+    ),
+    "run_feasible_tangent_gate": (
+        ".feasible_tangent",
+        "run_feasible_tangent_gate",
+    ),
+    "write_feasible_tangent_report": (
+        ".feasible_tangent",
+        "write_feasible_tangent_report",
+    ),
 }
 
 __all__ = list(_LAZY_EXPORTS)

@@ -110,6 +110,21 @@ Primary same-problem files:
 /gz-data/research/demo/data/gsm8k_v2_custom.npz
 ```
 
+These are also the required inputs for the 2026-07-14 same-problem
+feasible-tangent gate:
+
+```text
+audit_feasible_tangent_gate.py
+prompt_control_flow/METHOD_FEASIBLE_TANGENT_GATE.md
+```
+
+It reads `sv_vec_step_exp`, `problem_ids`, `sample_idx`, `is_correct`,
+`format_ok`, `responses`, and `layers_used`. It does not need `input_ids`,
+token clouds, logits, or a new teacher-forcing extraction. Because no prompt
+anchor is stored, it excludes the prompt-to-first-step transition explicitly.
+Use `--label_policy answer` instead of `answer_format_ok` only if the artifact
+does not contain `format_ok`.
+
 The required raw trajectory key is `sv_vec_step_exp`, shaped per sample as
 `(T, L, D)`. It exists only in multisample artifacts extracted with
 `--store_vectors`. Run `audit_reasoning_flow_signatures.py --preflight` before
