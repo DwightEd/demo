@@ -48,7 +48,7 @@ python extract_ocgpi_traces.py \
   --input_format processbench_source \
   --subset gsm8k \
   --geometry_reference data/features/full_gsm8k.npz \
-  --model /path/to/Llama-3.1-8B-Instruct \
+  --model /gz-data/models/Meta-Llama-3.1-8B-Instruct \
   --output outputs/ocgpi/gsm8k_output_trace.npz \
   --max_seq_len 4096 \
   --top_k 64 \

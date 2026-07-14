@@ -365,7 +365,7 @@ mismatch without saving full attention tensors to disk:
 python prompt_control_flow/cli/extract_mechanisms.py \
   --input data/processbench/gsm8k.jsonl \
   --input_format processbench_jsonl \
-  --model /path/to/Llama-3.1-8B-Instruct \
+  --model /gz-data/models/Meta-Llama-3.1-8B-Instruct \
   --output outputs/mechanisms/gsm8k_llama31.npz \
   --layers 8,10,12,14,16,18,20,22 \
   --enable_prompt_flow \
@@ -396,7 +396,7 @@ python extract_ocgpi_traces.py \
   --input_format processbench_source \
   --subset gsm8k \
   --geometry_reference data/features/full_gsm8k.npz \
-  --model /path/to/Llama-3.1-8B-Instruct \
+  --model /gz-data/models/Meta-Llama-3.1-8B-Instruct \
   --output outputs/ocgpi/gsm8k_output_trace.npz \
   --top_k 64 \
   --sketch_dim 64 \
