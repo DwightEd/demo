@@ -70,6 +70,13 @@ not exact token IDs: they run an explicitly exploratory state-only tier without
 re-extraction. Exact-trace artifacts enable token-ID residualization and the
 full confirmatory gate.
 
+[METHOD_CROSS_DATASET_REPLICATION.md](METHOD_CROSS_DATASET_REPLICATION.md)
+freezes the existing spread, jump, transition-surprise, and CUSUM signals and
+tests them without per-dataset sign selection on ProcessBench GSM8K, MATH, and
+OmniMath. It reports raw and length/position-residualized AUROC, cluster
+bootstrap intervals, and fixed-direction within-chain localization. The three
+canonical `full_*.npz` files are sufficient; no re-extraction is needed.
+
 Use `--store_step_vectors` during extraction to save the shared per-step
 residual-flow vector store for PCA/VAE/spectral chart comparisons.  This is
 important: prompt SVD, VAE, and other charts should be compared on the same

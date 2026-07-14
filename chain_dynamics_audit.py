@@ -78,6 +78,20 @@ CORE_TRANSITION_OBS = [
 ]
 
 
+# Frozen before the cross-dataset replication run.  These are the original
+# scalar/dynamic hypotheses, reported in their expected direction instead of
+# selecting the better direction independently on every benchmark.
+PREDECLARED_REPLICATION_FEATURES = (
+    "spread",
+    "d_spread",
+    "step_direction_jump",
+    "transition_surprise__spread",
+    "transition_cusum__spread",
+    "transition_surprise__spread_anchor_unc",
+    "transition_cusum__spread_anchor_unc",
+)
+
+
 def arr(c: Chain, name: str) -> np.ndarray:
     return np.asarray(c.features.get(name, np.full(c.n_steps, np.nan)), float)
 
@@ -596,6 +610,78 @@ def feature_table(chains: Sequence[Chain], names: Sequence[str], *, high_spread_
     return rows[:top]
 
 
+def cluster_boot_auc_ci(
+    score: np.ndarray,
+    labels: np.ndarray,
+    groups: np.ndarray,
+    *,
+    n_boot: int,
+    seed: int,
+) -> Tuple[float, List[float]]:
+    """Cluster-bootstrap a fixed-direction AUROC over complete chains/problems."""
+
+    score = np.asarray(score, float)
+    labels = np.asarray(labels, int)
+    groups = np.asarray(groups)
+    finite = np.isfinite(score)
+    point = auroc(score[finite], labels[finite])
+    unique = np.unique(groups[finite])
+    if n_boot <= 0 or unique.size < 2 or not np.isfinite(point):
+        return float(point), [float("nan"), float("nan")]
+
+    by_group = {group: np.where(finite & (groups == group))[0] for group in unique}
+    rng = np.random.default_rng(int(seed))
+    values: List[float] = []
+    for _ in range(int(n_boot)):
+        chosen = rng.choice(unique, size=unique.size, replace=True)
+        index = np.concatenate([by_group[group] for group in chosen])
+        if np.unique(labels[index]).size < 2:
+            continue
+        value = auroc(score[index], labels[index])
+        if np.isfinite(value):
+            values.append(float(value))
+    if not values:
+        return float(point), [float("nan"), float("nan")]
+    low, high = np.percentile(np.asarray(values, float), [2.5, 97.5])
+    return float(point), [float(low), float(high)]
+
+
+def fixed_direction_feature_row(
+    chains: Sequence[Chain],
+    feature: str,
+    *,
+    n_boot: int,
+    seed: int,
+) -> Optional[Dict[str, object]]:
+    """Evaluate one predeclared score with higher values fixed as higher risk."""
+
+    X, labels, groups, _, _ = flatten_labeled(chains, [feature])
+    if X.size == 0:
+        return None
+    score = np.asarray(X[:, 0], float)
+    finite = np.isfinite(score)
+    if finite.sum() < 30 or np.unique(labels[finite]).size < 2:
+        return None
+    auc, ci95 = cluster_boot_auc_ci(
+        score,
+        labels,
+        groups,
+        n_boot=n_boot,
+        seed=seed,
+    )
+    return {
+        "feature": feature,
+        "expected_direction": "higher_is_error",
+        "auroc_high_is_error": auc,
+        "ci95": ci95,
+        "coverage": float(finite.mean()),
+        "n": int(finite.sum()),
+        "errors": int(labels[finite].sum()),
+        "mean_non_error": safe_mean(score[(labels == 0) & finite]),
+        "mean_gold_error": safe_mean(score[(labels == 1) & finite]),
+    }
+
+
 def oof_logit(X: np.ndarray, y: np.ndarray, groups: np.ndarray, folds: int) -> np.ndarray:
     X = np.asarray(X, float)
     y = np.asarray(y, int)
@@ -807,6 +893,51 @@ def localization_table(chains: Sequence[Chain], names: Sequence[str], *, top: in
     return rows[:top]
 
 
+def build_predeclared_replication(
+    chains: Sequence[Chain],
+    features: Sequence[str],
+    *,
+    n_boot: int,
+    seed: int = 13,
+) -> List[Dict[str, object]]:
+    """Build selection-free replication rows for raw and nuisance-residual scores."""
+
+    rows: List[Dict[str, object]] = []
+    for index, feature in enumerate(features):
+        raw = fixed_direction_feature_row(
+            chains,
+            feature,
+            n_boot=n_boot,
+            seed=seed + 101 * index,
+        )
+        if raw is None:
+            continue
+        residual_name = f"{feature}_resid_ctrl"
+        residual = fixed_direction_feature_row(
+            chains,
+            residual_name,
+            n_boot=n_boot,
+            seed=seed + 10_000 + 101 * index,
+        )
+        raw_localization = within_chain_rank(chains, feature, sign=1.0)
+        residual_localization = (
+            within_chain_rank(chains, residual_name, sign=1.0)
+            if residual is not None
+            else {}
+        )
+        rows.append(
+            {
+                "feature": feature,
+                "expected_direction": "higher_is_error",
+                "raw": raw,
+                "nuisance_residual": residual or {},
+                "within_chain": raw_localization,
+                "within_chain_residual": residual_localization,
+            }
+        )
+    return rows
+
+
 def event_study(chains: Sequence[Chain], names: Sequence[str], *, window: int):
     out = {}
     err = [c for c in chains if not c.correct and c.gold >= 0]
@@ -920,6 +1051,7 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
 
     residual_source = [
         "spread",
+        "step_direction_jump",
         "unanchored_divergence",
         "confident_divergence",
         "d_spread",
@@ -1005,6 +1137,12 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
         )
         if finite_count(chains, nm) >= 30
     ]
+    predeclared_replication = build_predeclared_replication(
+        chains,
+        PREDECLARED_REPLICATION_FEATURES,
+        n_boot=args.n_boot,
+        seed=13,
+    )
     group_scores = group_table(chains, groups, folds=args.folds)
     res = {
         "meta": {**meta, "chain_dynamic_layer": args.layer},
@@ -1020,6 +1158,7 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
         "primary_transition_model": next(iter(transition_models.values()), {}),
         "control_residualization": residual_info,
         "trajectory_pattern_features": pattern_names,
+        "predeclared_replication": predeclared_replication,
         "overall_features": feature_table(chains, all_names, top=args.top),
         "high_spread_features": feature_table(chains, all_names, high_spread_q=args.high_spread_q, top=args.top),
         "control_residual_features": feature_table(chains, residual_names, top=args.top),
@@ -1090,6 +1229,19 @@ def print_result(res: Dict[str, object]) -> None:
     print_rows(res["high_spread_features"], label="High-divergence subset scores")
     print_rows(res.get("transition_ablation_features", []), label="Transition ablation scores")
     print_rows(res.get("control_residual_features", []), label="Control-residualized scores")
+
+    print("\nPredeclared replication signals (higher fixed as error):")
+    for row in res.get("predeclared_replication", []):
+        raw = row.get("raw", {})
+        residual = row.get("nuisance_residual", {})
+        raw_loc = row.get("within_chain", {})
+        residual_loc = row.get("within_chain_residual", {})
+        print(
+            f"  {row['feature']:42s} raw {float(raw.get('auroc_high_is_error', np.nan)):.3f} "
+            f"resid {float(residual.get('auroc_high_is_error', np.nan)):.3f} "
+            f"top1 {float(raw_loc.get('top1', np.nan)):.3f}/"
+            f"{float(residual_loc.get('top1', np.nan)):.3f}"
+        )
 
     print("\nWithin-chain localization:")
     for r in res["localization"][:12]:

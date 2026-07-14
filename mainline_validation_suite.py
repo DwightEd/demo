@@ -16,6 +16,7 @@ triage across datasets and layers.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -137,6 +138,7 @@ def summarize_result(dataset: str, layer: int, res: Dict, *, max_fpr: float) -> 
             else float("nan")
         ),
         "online_alarm": alarm or {},
+        "predeclared_replication": list(res.get("predeclared_replication", [])),
         "recommendation": recommendation(anchor, sequence, seq_inc, alarm),
     }
 
@@ -186,7 +188,127 @@ def resolve_npz(data_dir: str, dataset: str) -> str:
     return os.path.join(data_dir, "features", f"full_{dataset}.npz")
 
 
-def write_markdown(path: str, summaries: Sequence[Dict]) -> None:
+def _number(value, default=float("nan")) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def flatten_replication_rows(summaries: Sequence[Dict]) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+    for summary in summaries:
+        for signal in summary.get("predeclared_replication", []):
+            raw = signal.get("raw", {}) or {}
+            residual = signal.get("nuisance_residual", {}) or {}
+            raw_loc = signal.get("within_chain", {}) or {}
+            residual_loc = signal.get("within_chain_residual", {}) or {}
+            raw_ci = raw.get("ci95", [float("nan"), float("nan")])
+            residual_ci = residual.get("ci95", [float("nan"), float("nan")])
+            rows.append(
+                {
+                    "dataset": summary["dataset"],
+                    "layer": int(summary["layer"]),
+                    "feature": signal["feature"],
+                    "expected_direction": signal.get("expected_direction", "higher_is_error"),
+                    "raw_auc": _number(raw.get("auroc_high_is_error")),
+                    "raw_ci_low": _number(raw_ci[0] if len(raw_ci) > 0 else np.nan),
+                    "raw_ci_high": _number(raw_ci[1] if len(raw_ci) > 1 else np.nan),
+                    "residual_auc": _number(residual.get("auroc_high_is_error")),
+                    "residual_ci_low": _number(
+                        residual_ci[0] if len(residual_ci) > 0 else np.nan
+                    ),
+                    "residual_ci_high": _number(
+                        residual_ci[1] if len(residual_ci) > 1 else np.nan
+                    ),
+                    "raw_top1": _number(raw_loc.get("top1")),
+                    "raw_expected_top1": _number(raw_loc.get("expected_top1")),
+                    "residual_top1": _number(residual_loc.get("top1")),
+                    "residual_expected_top1": _number(
+                        residual_loc.get("expected_top1")
+                    ),
+                    "n": int(raw.get("n", 0) or 0),
+                    "errors": int(raw.get("errors", 0) or 0),
+                }
+            )
+    return rows
+
+
+def aggregate_replication(
+    summaries: Sequence[Dict],
+    expected_datasets: Sequence[str],
+) -> List[Dict[str, object]]:
+    rows = flatten_replication_rows(summaries)
+    expected = list(dict.fromkeys(str(name) for name in expected_datasets))
+    grouped: Dict[tuple[int, str], List[Dict[str, object]]] = {}
+    for row in rows:
+        grouped.setdefault((int(row["layer"]), str(row["feature"])), []).append(row)
+
+    output: List[Dict[str, object]] = []
+    for (layer, feature), values in sorted(grouped.items()):
+        by_dataset = {str(row["dataset"]): row for row in values}
+        observed = [name for name in expected if name in by_dataset]
+        selected = [by_dataset[name] for name in observed]
+        raw_auc = np.asarray([row["raw_auc"] for row in selected], float)
+        residual_auc = np.asarray([row["residual_auc"] for row in selected], float)
+        raw_low = np.asarray([row["raw_ci_low"] for row in selected], float)
+        residual_low = np.asarray([row["residual_ci_low"] for row in selected], float)
+        complete = bool(len(observed) == len(expected) and len(expected) > 0)
+        finite_raw = bool(raw_auc.size and np.all(np.isfinite(raw_auc)))
+        finite_residual = bool(residual_auc.size and np.all(np.isfinite(residual_auc)))
+        output.append(
+            {
+                "layer": int(layer),
+                "feature": feature,
+                "expected_datasets": expected,
+                "observed_datasets": observed,
+                "complete": complete,
+                "raw_macro_auc": float(np.mean(raw_auc)) if finite_raw else float("nan"),
+                "raw_min_auc": float(np.min(raw_auc)) if finite_raw else float("nan"),
+                "residual_macro_auc": (
+                    float(np.mean(residual_auc)) if finite_residual else float("nan")
+                ),
+                "residual_min_auc": (
+                    float(np.min(residual_auc)) if finite_residual else float("nan")
+                ),
+                "raw_direction_consistent": bool(
+                    complete and finite_raw and np.all(raw_auc > 0.5)
+                ),
+                "residual_direction_consistent": bool(
+                    complete and finite_residual and np.all(residual_auc > 0.5)
+                ),
+                "raw_ci_replication": bool(
+                    complete and raw_low.size and np.all(np.isfinite(raw_low)) and np.all(raw_low > 0.5)
+                ),
+                "residual_ci_replication": bool(
+                    complete
+                    and residual_low.size
+                    and np.all(np.isfinite(residual_low))
+                    and np.all(residual_low > 0.5)
+                ),
+            }
+        )
+    return output
+
+
+def write_replication_csv(path: str, summaries: Sequence[Dict]) -> None:
+    rows = flatten_replication_rows(summaries)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    if not rows:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("")
+        return
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_markdown(
+    path: str,
+    summaries: Sequence[Dict],
+    replication: Sequence[Dict[str, object]] = (),
+) -> None:
     lines = [
         "# Mainline Validation Summary",
         "",
@@ -232,6 +354,68 @@ def write_markdown(path: str, summaries: Sequence[Dict]) -> None:
             "- online alarm rows are for real-time guard feasibility, not final paper evidence by themselves.",
         ]
     )
+    replication_rows = flatten_replication_rows(summaries)
+    if replication_rows:
+        lines.extend(
+            [
+                "",
+                "## Frozen Cross-Dataset Replication",
+                "",
+                "Every signal is evaluated in its predeclared direction (`higher = error`). "
+                "No benchmark-specific sign flip or best-feature selection is used.",
+                "",
+                "| dataset | L | signal | raw AUROC [CI95] | nuisance-residual AUROC [CI95] | residual top1 / random |",
+                "|---|---:|---|---:|---:|---:|",
+            ]
+        )
+        for row in replication_rows:
+            lines.append(
+                "| {dataset} | {layer} | {feature} | {raw:.3f} [{rlo:.3f}, {rhi:.3f}] | "
+                "{resid:.3f} [{slo:.3f}, {shi:.3f}] | {top1:.3f} / {expected:.3f} |".format(
+                    dataset=row["dataset"],
+                    layer=row["layer"],
+                    feature=row["feature"],
+                    raw=row["raw_auc"],
+                    rlo=row["raw_ci_low"],
+                    rhi=row["raw_ci_high"],
+                    resid=row["residual_auc"],
+                    slo=row["residual_ci_low"],
+                    shi=row["residual_ci_high"],
+                    top1=row["residual_top1"],
+                    expected=row["residual_expected_top1"],
+                )
+            )
+    if replication:
+        lines.extend(
+            [
+                "",
+                "## Cross-Dataset Gate",
+                "",
+                "`direction` requires AUROC above 0.5 on every requested dataset. "
+                "`CI replication` is the stronger gate: every dataset-level 95% CI must lie above 0.5.",
+                "",
+                "| L | signal | observed | raw macro/min | residual macro/min | raw direction / CI | residual direction / CI |",
+                "|---:|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for row in replication:
+            lines.append(
+                "| {layer} | {feature} | {observed}/{expected} | {raw_macro:.3f}/{raw_min:.3f} | "
+                "{res_macro:.3f}/{res_min:.3f} | {raw_dir}/{raw_ci} | {res_dir}/{res_ci} |".format(
+                    layer=row["layer"],
+                    feature=row["feature"],
+                    observed=len(row["observed_datasets"]),
+                    expected=len(row["expected_datasets"]),
+                    raw_macro=row["raw_macro_auc"],
+                    raw_min=row["raw_min_auc"],
+                    res_macro=row["residual_macro_auc"],
+                    res_min=row["residual_min_auc"],
+                    raw_dir=int(row["raw_direction_consistent"]),
+                    raw_ci=int(row["raw_ci_replication"]),
+                    res_dir=int(row["residual_direction_consistent"]),
+                    res_ci=int(row["residual_ci_replication"]),
+                )
+            )
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
 
@@ -259,6 +443,40 @@ def print_summary(summaries: Sequence[Dict]) -> None:
         )
 
 
+def print_replication(replication: Sequence[Dict[str, object]]) -> None:
+    if not replication:
+        return
+    print("\n===== frozen cross-dataset replication =====", flush=True)
+    print(
+        f"{'L':>3s} {'signal':42s} {'seen':>5s} {'raw':>11s} {'residual':>11s} "
+        f"{'raw gate':>9s} {'resid gate':>10s}",
+        flush=True,
+    )
+    for row in replication:
+        raw_gate = (
+            "CI"
+            if row["raw_ci_replication"]
+            else "dir"
+            if row["raw_direction_consistent"]
+            else "fail"
+        )
+        residual_gate = (
+            "CI"
+            if row["residual_ci_replication"]
+            else "dir"
+            if row["residual_direction_consistent"]
+            else "fail"
+        )
+        print(
+            f"{int(row['layer']):3d} {str(row['feature'])[:42]:42s} "
+            f"{len(row['observed_datasets']):2d}/{len(row['expected_datasets']):2d} "
+            f"{float(row['raw_macro_auc']):.3f}/{float(row['raw_min_auc']):.3f} "
+            f"{float(row['residual_macro_auc']):.3f}/{float(row['residual_min_auc']):.3f} "
+            f"{raw_gate:>9s} {residual_gate:>10s}",
+            flush=True,
+        )
+
+
 def run_suite(args: argparse.Namespace) -> Dict[str, object]:
     datasets = parse_csv(args.datasets, cast=str)
     layers = parse_csv(args.layers, cast=int)
@@ -279,6 +497,7 @@ def run_suite(args: argparse.Namespace) -> Dict[str, object]:
             full_results[key] = res
             summary = summarize_result(dataset, layer, res, max_fpr=args.max_alarm_fpr)
             summaries.append(summary)
+            replication = aggregate_replication(summaries, datasets)
             print(f"[mainline] finished {dataset} L{layer} in {time.time() - t0:.1f}s", flush=True)
             print_summary([summary])
             partial = {
@@ -292,13 +511,19 @@ def run_suite(args: argparse.Namespace) -> Dict[str, object]:
                     "partial": True,
                 },
                 "summaries": summaries,
+                "cross_dataset_replication": replication,
                 "results": full_results if args.keep_full_results else {},
             }
             with open(partial_json_path, "w", encoding="utf-8") as fh:
                 json.dump(finite_json(partial), fh, indent=2, ensure_ascii=False)
-            write_markdown(partial_md_path, summaries)
+            write_markdown(partial_md_path, summaries, replication)
+            write_replication_csv(
+                os.path.join(args.output_dir, "cross_dataset_replication_partial.csv"),
+                summaries,
+            )
             print(f"[mainline] partial saved: {partial_json_path}", flush=True)
 
+    replication = aggregate_replication(summaries, datasets)
     out = {
         "meta": {
             "datasets": datasets,
@@ -310,15 +535,19 @@ def run_suite(args: argparse.Namespace) -> Dict[str, object]:
             "claim": "reasoning failures are online breaks in anchored constraint flow, not merely high spread",
         },
         "summaries": summaries,
+        "cross_dataset_replication": replication,
         "results": full_results if args.keep_full_results else {},
     }
     json_path = os.path.join(args.output_dir, "mainline_validation_summary.json")
     md_path = os.path.join(args.output_dir, "mainline_validation_summary.md")
     with open(json_path, "w", encoding="utf-8") as fh:
         json.dump(finite_json(out), fh, indent=2, ensure_ascii=False)
-    write_markdown(md_path, summaries)
+    write_markdown(md_path, summaries, replication)
+    csv_path = os.path.join(args.output_dir, "cross_dataset_replication.csv")
+    write_replication_csv(csv_path, summaries)
     out["saved_json"] = json_path
     out["saved_markdown"] = md_path
+    out["saved_replication_csv"] = csv_path
     return out
 
 
@@ -333,13 +562,25 @@ def run_selftest(args: argparse.Namespace) -> Dict[str, object]:
         res = run_chain_dynamics(npz, chain_args)
         assert_selftest(res)
         summary = summarize_result("selftest", 14, res, max_fpr=args.max_alarm_fpr)
+        replication = aggregate_replication([summary], ["selftest"])
         os.makedirs(args.output_dir, exist_ok=True)
-        out = {"summaries": [summary], "results": {"selftest_L14": res}}
+        out = {
+            "summaries": [summary],
+            "cross_dataset_replication": replication,
+            "results": {"selftest_L14": res},
+        }
         path = os.path.join(args.output_dir, "mainline_validation_selftest.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(finite_json(out), fh, indent=2, ensure_ascii=False)
-        write_markdown(os.path.join(args.output_dir, "mainline_validation_selftest.md"), [summary])
+        write_markdown(
+            os.path.join(args.output_dir, "mainline_validation_selftest.md"),
+            [summary],
+            replication,
+        )
+        csv_path = os.path.join(args.output_dir, "cross_dataset_replication_selftest.csv")
+        write_replication_csv(csv_path, [summary])
         out["saved_json"] = path
+        out["saved_replication_csv"] = csv_path
         return out
 
 
@@ -372,9 +613,12 @@ def main() -> None:
 
     out = run_selftest(args) if args.selftest else run_suite(args)
     print_summary(out["summaries"])
+    print_replication(out.get("cross_dataset_replication", []))
     print(f"\nsaved json: {out['saved_json']}")
     if "saved_markdown" in out:
         print(f"saved markdown: {out['saved_markdown']}")
+    if "saved_replication_csv" in out:
+        print(f"saved replication csv: {out['saved_replication_csv']}")
 
 
 if __name__ == "__main__":
