@@ -379,6 +379,49 @@ The ICR branch is opt-in via `--enable_icr` because it requires
 `step_token_ranges`, `generator`, `dataset`, compact step scores, chain scores,
 and a `profile_summary.json` next to the `.npz`.
 
+### OC-GPI: output-conditioned geometry
+
+The current geometry/logits mainline is documented in
+[`METHOD_OUTPUT_CONDITIONED_GEOMETRY.md`](METHOD_OUTPUT_CONDITIONED_GEOMETRY.md)
+and its frozen run order in
+[`PLAN_OUTPUT_CONDITIONED_GEOMETRY.md`](PLAN_OUTPUT_CONDITIONED_GEOMETRY.md).
+It asks whether internal geometry predicts future output drift and response
+failure after conditioning on a rich causal logits history.
+
+Extract a compact output trace without saving full logits:
+
+```bash
+python extract_ocgpi_traces.py \
+  --input data/hf_datasets/ProcessBench \
+  --input_format processbench_source \
+  --subset gsm8k \
+  --geometry_reference data/features/full_gsm8k.npz \
+  --model /path/to/Llama-3.1-8B-Instruct \
+  --output outputs/ocgpi/gsm8k_output_trace.npz \
+  --top_k 64 \
+  --sketch_dim 64 \
+  --dtype bfloat16 \
+  --device cuda
+```
+
+Audit against the existing geometry artifact:
+
+```bash
+python audit_ocgpi.py \
+  --trace outputs/ocgpi/gsm8k_output_trace.npz \
+  --geometry data/features/full_gsm8k.npz \
+  --output_dir outputs/ocgpi/gsm8k_sparse_audit \
+  --compute_device cuda \
+  --geometry_batch_size 32 \
+  --bootstrap 2000
+```
+
+The sparse `full_*.npz` run is exploratory. A confirmatory mechanism result
+requires contiguous whole-layer states, a positive future-output partial
+\(R^2\), and improvement over the length-matched null.
+Layer-time state tensors with identical shapes are bucketed and evaluated in
+GPU batches; this changes throughput only, not the feature definitions.
+
 ### `cli/audit_geometry.py`
 
 Append cross-fitted point-cloud geometry scores to an extracted mechanism npz:

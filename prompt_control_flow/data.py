@@ -52,7 +52,9 @@ def _as_list_of_str(x: Any) -> List[str]:
     return [str(x)]
 
 
-def _get_array(npz: np.lib.npyio.NpzFile, names: Iterable[str], default: Any = None) -> Any:
+def _get_array(
+    npz: np.lib.npyio.NpzFile, names: Iterable[str], default: Any = None
+) -> Any:
     for name in names:
         if name in npz.files:
             return npz[name]
@@ -86,12 +88,16 @@ def _scalar_or_row(array: Any, i: int, default: Any = None) -> Any:
     return value[i]
 
 
-def is_processbench_full(path: str | Path, npz: np.lib.npyio.NpzFile | None = None) -> bool:
+def is_processbench_full(
+    path: str | Path, npz: np.lib.npyio.NpzFile | None = None
+) -> bool:
     name = Path(path).name.lower()
     if name.startswith("full_"):
         return True
     z = npz if npz is not None else np.load(path, allow_pickle=True)
-    return ("gold_error_step" in z.files or "labels" in z.files) and "steps_text" in z.files
+    return (
+        "gold_error_step" in z.files or "labels" in z.files
+    ) and "steps_text" in z.files
 
 
 def is_multisample(path: str | Path, npz: np.lib.npyio.NpzFile | None = None) -> bool:
@@ -99,7 +105,9 @@ def is_multisample(path: str | Path, npz: np.lib.npyio.NpzFile | None = None) ->
     if "multisample" in name:
         return True
     z = npz if npz is not None else np.load(path, allow_pickle=True)
-    return "sample_idx" in z.files and ("is_correct" in z.files or "is_correct_strict" in z.files)
+    return "sample_idx" in z.files and (
+        "is_correct" in z.files or "is_correct_strict" in z.files
+    )
 
 
 def _problem_id_from_record(raw_id: Any, fallback: int) -> int:
@@ -150,10 +158,153 @@ def _load_processbench_jsonl(path: Path, max_chains: int = 0) -> List[ChainRecor
     return rows
 
 
+def _iter_processbench_source(path: Path, subset: str):
+    """Yield raw ProcessBench rows from canonical JSON or HF dataset sources."""
+
+    candidate: Path | None = path if path.is_file() else None
+    if candidate is None:
+        for suffix in (".json", ".jsonl"):
+            value = path / f"{subset}{suffix}"
+            if value.is_file():
+                candidate = value
+                break
+    if candidate is not None:
+        text = candidate.read_text(encoding="utf-8")
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            yield from parsed
+            return
+        if isinstance(parsed, dict):
+            rows = parsed.get("data") or parsed.get("rows")
+            if rows is None:
+                raise ValueError(f"{candidate}: JSON object has no `data` or `rows`")
+            yield from rows
+            return
+        for line in text.splitlines():
+            if line.strip():
+                yield json.loads(line)
+        return
+
+    try:
+        from datasets import load_dataset
+    except ImportError as exc:  # pragma: no cover - remote extraction dependency
+        raise ImportError(
+            "loading a ProcessBench dataset directory requires `datasets`"
+        ) from exc
+    yield from load_dataset(str(path), split=str(subset))
+
+
+def _load_canonical_processbench(
+    path: Path,
+    *,
+    subset: str,
+    max_chains: int = 0,
+) -> List[ChainRecord]:
+    """Reproduce the filtering and indexing used by canonical ``full_*.npz``."""
+
+    rows: List[ChainRecord] = []
+    for raw in _iter_processbench_source(path, subset):
+        steps = [str(value).strip() for value in (raw.get("steps") or [])]
+        steps = [value for value in steps if value]
+        if len(steps) < 3:
+            continue
+        if max_chains and len(rows) >= int(max_chains):
+            break
+        index = len(rows)
+        gold = int(raw.get("label", raw.get("gold_error_step", -1)))
+        final_correct = raw.get("final_answer_correct")
+        is_correct = None if final_correct is None else int(bool(final_correct))
+        response = str(raw.get("response") or "\n".join(steps))
+        rows.append(
+            ChainRecord(
+                chain_idx=int(raw.get("chain_idx", index)),
+                problem_id=int(raw.get("problem_id", index)),
+                problem=str(raw.get("problem", raw.get("question", ""))),
+                steps=steps,
+                response=response,
+                gold_error_step=gold,
+                is_correct=is_correct,
+                sample_idx=None,
+                generator=raw.get("generator"),
+                dataset=str(subset),
+            )
+        )
+    return rows
+
+
+def validate_records_against_reference(
+    records: List[ChainRecord],
+    reference_path: str | Path,
+) -> dict[str, Any]:
+    """Fail before model loading when replay records disagree with a saved artifact."""
+
+    path = Path(reference_path)
+    z = np.load(path, allow_pickle=True)
+    if "steps_text" not in z.files:
+        raise ValueError(f"{path}: reference has no `steps_text`")
+    reference_count = int(len(z["steps_text"]))
+    if len(records) > reference_count:
+        raise ValueError(
+            f"{path}: {len(records)} replay records exceed {reference_count} reference rows"
+        )
+    chain_idx = (
+        np.asarray(z["chain_idx"], dtype=np.int64)
+        if "chain_idx" in z.files
+        else np.arange(reference_count, dtype=np.int64)
+    )
+    problem_ids = (
+        np.asarray(z["problem_ids"], dtype=np.int64)
+        if "problem_ids" in z.files
+        else chain_idx
+    )
+    gold = (
+        np.asarray(z["gold_error_step"], dtype=np.int64)
+        if "gold_error_step" in z.files
+        else None
+    )
+    responses = z["responses"] if "responses" in z.files else None
+    steps_text = z["steps_text"]
+    mismatches: list[str] = []
+    for row, record in enumerate(records):
+        expected_steps = _as_list_of_str(steps_text[row])
+        checks = {
+            "chain_idx": int(record.chain_idx) == int(chain_idx[row]),
+            "problem_id": int(record.problem_id) == int(problem_ids[row]),
+            "n_steps": len(record.steps) == len(expected_steps),
+            "steps_text": list(record.steps) == expected_steps,
+        }
+        if gold is not None:
+            checks["gold_error_step"] = int(record.gold_error_step) == int(gold[row])
+        if responses is not None:
+            checks["response"] = str(record.response) == str(responses[row])
+        failed = [name for name, passed in checks.items() if not passed]
+        if failed:
+            mismatches.append(
+                f"row={row} chain={record.chain_idx} fields={','.join(failed)}"
+            )
+            if len(mismatches) >= 8:
+                break
+    if mismatches:
+        raise ValueError(
+            f"replay source disagrees with {path}: " + "; ".join(mismatches)
+        )
+    return {
+        "reference_path": str(path),
+        "checked_records": int(len(records)),
+        "reference_records": reference_count,
+        "exact_text_match": True,
+        "gold_label_checked": bool(gold is not None),
+    }
+
+
 def load_chain_records(
     path: str | Path,
     max_chains: int = 0,
     input_format: str = "auto",
+    subset: str | None = None,
 ) -> List[ChainRecord]:
     """Load text chains from a ProcessBench full or multisample npz.
 
@@ -163,15 +314,33 @@ def load_chain_records(
 
     path = Path(path)
     fmt = input_format.lower()
-    if fmt not in {"auto", "npz", "processbench_jsonl", "jsonl"}:
+    if fmt not in {
+        "auto",
+        "npz",
+        "processbench_jsonl",
+        "processbench_source",
+        "jsonl",
+    }:
         raise ValueError(f"unknown input_format={input_format!r}")
-    if fmt in {"processbench_jsonl", "jsonl"} or (fmt == "auto" and path.suffix.lower() == ".jsonl"):
+    if fmt == "processbench_source":
+        if not subset:
+            raise ValueError("processbench_source requires an explicit subset")
+        return _load_canonical_processbench(
+            path,
+            subset=str(subset),
+            max_chains=max_chains,
+        )
+    if fmt in {"processbench_jsonl", "jsonl"} or (
+        fmt == "auto" and path.suffix.lower() == ".jsonl"
+    ):
         return _load_processbench_jsonl(path, max_chains=max_chains)
 
     z = np.load(path, allow_pickle=True)
     steps_arr = _get_array(z, ["steps_text", "steps"], None)
     if steps_arr is None:
-        raise ValueError(f"{path}: expected `steps_text` or `steps` for prompt-flow extraction")
+        raise ValueError(
+            f"{path}: expected `steps_text` or `steps` for prompt-flow extraction"
+        )
 
     n = int(len(steps_arr))
     if max_chains and max_chains > 0:
@@ -180,9 +349,13 @@ def load_chain_records(
     problems = _get_array(z, ["problems", "problem", "questions", "question"], None)
     responses = _get_array(z, ["responses", "response"], None)
     prompts = _get_array(z, ["prompts", "rendered_prompts", "rendered_prompt"], None)
-    problem_ids = _get_array(z, ["problem_ids"], np.arange(len(steps_arr), dtype=np.int64))
+    problem_ids = _get_array(
+        z, ["problem_ids"], np.arange(len(steps_arr), dtype=np.int64)
+    )
     sample_idx = _get_array(z, ["sample_idx"], None)
-    generators = _get_array(z, ["generator", "generators", "source_model", "model_name"], None)
+    generators = _get_array(
+        z, ["generator", "generators", "source_model", "model_name"], None
+    )
     datasets = _get_array(z, ["dataset", "datasets", "subset"], None)
 
     gold = _get_array(z, ["gold_error_step_kept", "gold_error_step", "labels"], None)
@@ -194,16 +367,24 @@ def load_chain_records(
     exact_input_ids = _get_array(z, ["input_ids"], None)
     exact_attention_mask = _get_array(z, ["attention_mask"], None)
     exact_token_offsets = _get_array(z, ["token_offsets", "input_token_offsets"], None)
-    exact_step_ranges = _get_array(z, ["step_token_ranges", "time_axis_token_ranges"], None)
+    exact_step_ranges = _get_array(
+        z, ["step_token_ranges", "time_axis_token_ranges"], None
+    )
     response_ranges = _get_array(z, ["response_token_ranges"], None)
     prompt_counts = _get_array(z, ["prompt_token_counts"], None)
     sampling_metadata: dict[str, Any] = {}
     if "model_sampling_metadata_json" in z.files:
         try:
-            sampling_metadata = json.loads(str(np.asarray(z["model_sampling_metadata_json"]).item()))
+            sampling_metadata = json.loads(
+                str(np.asarray(z["model_sampling_metadata_json"]).item())
+            )
         except Exception as exc:
-            raise TokenAlignmentError(f"{path}: invalid model_sampling_metadata_json") from exc
-    declares_exact_trace = "trace_schema_version" in z.files or exact_input_ids is not None
+            raise TokenAlignmentError(
+                f"{path}: invalid model_sampling_metadata_json"
+            ) from exc
+    declares_exact_trace = (
+        "trace_schema_version" in z.files or exact_input_ids is not None
+    )
     exact_contract_parts = {
         "prompts": prompts,
         "responses": responses,
@@ -211,10 +392,14 @@ def load_chain_records(
         "attention_mask": exact_attention_mask,
         "token_offsets": exact_token_offsets,
         "step_token_ranges": exact_step_ranges,
-        "response_start": response_ranges if response_ranges is not None else prompt_counts,
+        "response_start": (
+            response_ranges if response_ranges is not None else prompt_counts
+        ),
     }
     if declares_exact_trace:
-        missing_exact = [name for name, value in exact_contract_parts.items() if value is None]
+        missing_exact = [
+            name for name, value in exact_contract_parts.items() if value is None
+        ]
         if missing_exact:
             raise TokenAlignmentError(
                 f"{path}: exact trace is incomplete; missing {missing_exact}. "
@@ -228,16 +413,22 @@ def load_chain_records(
         }
         for key, expected_value in conventions.items():
             if key not in z.files:
-                raise TokenAlignmentError(f"{path}: exact trace is missing convention field {key}")
+                raise TokenAlignmentError(
+                    f"{path}: exact trace is missing convention field {key}"
+                )
             actual = str(np.asarray(z[key]).item())
             if actual != expected_value:
                 raise TokenAlignmentError(
                     f"{path}: {key}={actual!r}, expected {expected_value!r}"
                 )
         if "trace_token_add_special_tokens" not in z.files:
-            raise TokenAlignmentError(f"{path}: exact trace is missing trace_token_add_special_tokens")
+            raise TokenAlignmentError(
+                f"{path}: exact trace is missing trace_token_add_special_tokens"
+            )
         if bool(np.asarray(z["trace_token_add_special_tokens"]).item()):
-            raise TokenAlignmentError(f"{path}: exact trace unexpectedly adds special tokens")
+            raise TokenAlignmentError(
+                f"{path}: exact trace unexpectedly adds special tokens"
+            )
 
     rows: List[ChainRecord] = []
     for i in range(n):
@@ -248,7 +439,9 @@ def load_chain_records(
             steps = all_steps
         else:
             if any(j < 0 or j >= len(all_steps) for j in kept):
-                raise ValueError(f"{path}: kept_steps[{i}] cannot index steps_text[{i}]")
+                raise ValueError(
+                    f"{path}: kept_steps[{i}] cannot index steps_text[{i}]"
+                )
             steps = [all_steps[j] for j in kept]
         response = str(responses[i]) if responses is not None else "\n\n".join(steps)
         problem = str(problems[i]) if problems is not None else ""
@@ -277,17 +470,40 @@ def load_chain_records(
                 gold_error_step=int(gold[i]) if gold is not None else -1,
                 is_correct=int(correct[i]) if correct is not None else None,
                 sample_idx=int(sample_idx[i]) if sample_idx is not None else None,
-                generator=str(_scalar_or_row(generators, i)) if generators is not None else None,
-                dataset=str(_scalar_or_row(datasets, i)) if datasets is not None else _dataset_from_path(path),
+                generator=(
+                    str(_scalar_or_row(generators, i))
+                    if generators is not None
+                    else None
+                ),
+                dataset=(
+                    str(_scalar_or_row(datasets, i))
+                    if datasets is not None
+                    else _dataset_from_path(path)
+                ),
                 rendered_prompt=str(prompts[i]) if prompts is not None else None,
-                exact_input_ids=_row_ints(exact_input_ids, i) if have_exact_bundle else None,
-                exact_attention_mask=_row_ints(exact_attention_mask, i) if have_exact_bundle else None,
-                exact_token_offsets=_row_pairs(exact_token_offsets, i) if have_exact_bundle else None,
-                exact_step_token_ranges=_row_pairs(exact_step_ranges, i) if have_exact_bundle else None,
-                exact_response_start_token=response_start if have_exact_bundle else None,
-                source_tokenizer=str(sampling_metadata.get("tokenizer_name", "")) or None,
-                source_model_revision=str(sampling_metadata.get("model_revision", "")) or None,
-                source_tokenizer_revision=str(sampling_metadata.get("tokenizer_revision", "")) or None,
+                exact_input_ids=(
+                    _row_ints(exact_input_ids, i) if have_exact_bundle else None
+                ),
+                exact_attention_mask=(
+                    _row_ints(exact_attention_mask, i) if have_exact_bundle else None
+                ),
+                exact_token_offsets=(
+                    _row_pairs(exact_token_offsets, i) if have_exact_bundle else None
+                ),
+                exact_step_token_ranges=(
+                    _row_pairs(exact_step_ranges, i) if have_exact_bundle else None
+                ),
+                exact_response_start_token=(
+                    response_start if have_exact_bundle else None
+                ),
+                source_tokenizer=str(sampling_metadata.get("tokenizer_name", ""))
+                or None,
+                source_model_revision=str(sampling_metadata.get("model_revision", ""))
+                or None,
+                source_tokenizer_revision=str(
+                    sampling_metadata.get("tokenizer_revision", "")
+                )
+                or None,
             )
         )
     return rows

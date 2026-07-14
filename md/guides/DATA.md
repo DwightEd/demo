@@ -1,5 +1,48 @@
 # SMCD / NTS data map (box: `/gz-data/research/demo/data/`)
 
+## 2026-07-14 OC-GPI logits-conditional geometry audit
+
+Geometry input reuses the canonical cross-problem artifacts:
+
+```text
+data/features/full_gsm8k.npz
+data/features/full_math.npz
+data/features/full_omnimath.npz
+```
+
+These files provide `stepvec`, `sv_layers`, labels, problem IDs, and step token
+ranges. They do **not** provide prompt text or exact replay `input_ids`, so they
+cannot by themselves produce a valid causal logits trace. Extract that trace
+from the canonical local ProcessBench source:
+
+```text
+data/hf_datasets/ProcessBench
+```
+
+Use `--input_format processbench_source --subset gsm8k|math|omnimath`. This
+loader deliberately reproduces the filtering, kept-row indexing, and response
+rendering used to create `full_*.npz`; the audit then verifies response hashes.
+
+Expected outputs:
+
+```text
+outputs/ocgpi/gsm8k_output_trace.npz
+outputs/ocgpi/math_output_trace.npz
+outputs/ocgpi/omnimath_output_trace.npz
+```
+
+Direct entry points and frozen protocol:
+
+```text
+extract_ocgpi_traces.py
+audit_ocgpi.py
+prompt_control_flow/METHOD_OUTPUT_CONDITIONED_GEOMETRY.md
+prompt_control_flow/PLAN_OUTPUT_CONDITIONED_GEOMETRY.md
+```
+
+The current `full_*.npz` geometry is sparse and exploratory. Whole-layer
+confirmatory geometry must come from `extract_mechanisms.py --geometry_only`.
+
 ## 2026-07-13 conditional feasible-tangent escape audit
 
 Use the canonical cross-problem artifacts:
