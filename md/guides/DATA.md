@@ -1,5 +1,40 @@
 # SMCD / NTS data map (box: `/gz-data/research/demo/data/`)
 
+## 2026-07-15 causal pullback flow replay
+
+Exploratory same-problem input:
+
+```text
+data/gsm8k_v2_custom.npz
+```
+
+It contains `sv_vec_step_exp`, `problem_ids`, `sample_idx`, final-answer
+labels, responses, steps, `prompt_style`, and `model_name`. It predates exact
+`input_ids`, so `extract_causal_pullback.py` reconstructs the custom zero-shot
+prompt and refuses each response unless replayed step vectors match stored
+layer-16 vectors above the configured cosine threshold. This is still a
+legacy replay-validated exploratory tier, not confirmatory evidence.
+
+The canonical model path is:
+
+```text
+/gz-data/models/Meta-Llama-3.1-8B-Instruct
+```
+
+Outputs and protocol:
+
+```text
+outputs/causal_pullback/gsm8k_custom_l16/pullback_trace.npz
+prompt_control_flow/METHOD_CAUSAL_PULLBACK_FLOW.md
+extract_causal_pullback.py
+audit_causal_pullback.py
+```
+
+The NPZ stores variable-size step-to-future-step Fisher operators and compact
+baseline output features. Full vocabulary logits are never persisted. Exact
+trace fields are needed only if the exploratory mechanism and increment gates
+pass and the result is promoted to confirmatory status.
+
 ## 2026-07-14 OC-GPI logits-conditional geometry audit
 
 Geometry input reuses the canonical cross-problem artifacts:

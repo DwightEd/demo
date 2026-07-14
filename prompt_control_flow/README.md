@@ -77,6 +77,17 @@ response-length or finite-reference artifact from becoming the claim. It does
 not use logits or train a classifier. The existing `sv_vec_step_exp`
 multisample artifact is sufficient; run `audit_conditional_flow_field.py`.
 
+The field-existence gate passed while error excursion failed, so geometry-only
+density is no longer the mainline detector. The preregistered follow-up is
+[METHOD_CAUSAL_PULLBACK_FLOW.md](METHOD_CAUSAL_PULLBACK_FLOW.md). It derives a
+field-normal witness from same-problem correct responses, intervenes only after
+the corresponding transition is causally observable, and estimates the full
+source-step to future-output categorical-Fisher pullback by central KL
+curvature. Time-shuffled and random tangent interventions are mandatory. The
+audit then asks whether this causal operator adds usable information beyond
+entropy, chosen-token NLL, margins, and length, instead of treating another
+static geometry scalar as the result.
+
 [METHOD_PREDICTIVE_STATE_GEOMETRY.md](METHOD_PREDICTIVE_STATE_GEOMETRY.md)
 implements the next claim-driven pilot after directional debiasing failed to
 improve AUROC over raw spread. It learns a correct-only reduced-rank chart from
