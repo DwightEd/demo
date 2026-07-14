@@ -64,13 +64,18 @@ problem label permutation. It consumes the existing `sv_clouds`; no new model
 forward pass is required.
 
 [METHOD_FEASIBLE_TANGENT_GATE.md](METHOD_FEASIBLE_TANGENT_GATE.md) is the
-current geometry-first test. It uses leave-one-response-out correct samples
-from the same problem to estimate an adaptive low-rank feasible transition
-tangent, then requires it to beat matched phase-only, time-shuffled,
-wrong-problem, and random-subspace controls before testing persistent normal
-escape. It does not use logits or train a classifier. The existing
-`sv_vec_step_exp` multisample artifacts are sufficient; run the direct
-`audit_feasible_tangent_gate.py` entry point.
+retained low-rank negative baseline. Its rank-four existence gate failed, so
+normal escape from a single linear tangent is not the current mainline claim.
+
+[METHOD_CONDITIONAL_FLOW_FIELD.md](METHOD_CONDITIONAL_FLOW_FIELD.md) is the
+current geometry-first validation. It replaces one fitted tangent with the
+same-problem, causal-phase-conditioned empirical distribution of normalized
+hidden-state updates on the unit sphere. A proper energy score measures target
+compatibility while matched donor counts, time-shuffled fields, wrong-problem
+fields, cross-fitted length controls, and two ordered decision gates prevent a
+response-length or finite-reference artifact from becoming the claim. It does
+not use logits or train a classifier. The existing `sv_vec_step_exp`
+multisample artifact is sufficient; run `audit_conditional_flow_field.py`.
 
 [METHOD_PREDICTIVE_STATE_GEOMETRY.md](METHOD_PREDICTIVE_STATE_GEOMETRY.md)
 implements the next claim-driven pilot after directional debiasing failed to
