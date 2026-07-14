@@ -106,8 +106,75 @@ The main outputs are:
 outputs/cross_dataset_replication_l14/mainline_validation_summary.md
 outputs/cross_dataset_replication_l14/mainline_validation_summary.json
 outputs/cross_dataset_replication_l14/cross_dataset_replication.csv
+outputs/cross_dataset_replication_l14/mechanism_component_ablation.csv
+outputs/cross_dataset_replication_l14/transition_additive_value.csv
 ```
 
 Layer 14 is primary because it was used in the earlier GSM8K audit. A later
 layer sweep is a robustness analysis, not a replacement for this frozen run.
 
+## Additive-Value Audit
+
+`anchor_uncertainty` is a shorthand for a supervised OOF logistic model, not a
+single anchor cosine. Its input is
+
+\[
+x_t=
+\left[
+\log(1+N_t),\operatorname{relpos}_t,
+\operatorname{spread}_t,
+1-\cos(h_t,q),
+\operatorname{uncertainty}_t
+\right].
+\]
+
+Here, `qvec` is the exponentially pooled representation of all prompt tokens
+and `stepvec` is the same pooling over one reasoning step. The component audit
+removes spread, anchor loss, or uncertainty one at a time while preserving the
+same candidate rows, GroupKFold splits, fold-local imputation, scaling, and
+classifier capacity.
+
+The additive audit then compares the full baseline with a model that adds
+exactly one frozen temporal signal:
+
+\[
+\Delta\operatorname{AUROC}
+=
+\operatorname{AUROC}(x_t,s_t)
+-
+\operatorname{AUROC}(x_t).
+\]
+
+For each signal, both models are refit on the identical finite-support rows.
+Undefined first-step transition values are excluded rather than imputed, and
+the resulting coverage is reported.
+
+Both AUROC and AUPRC deltas use paired cluster bootstrap intervals. The signal
+has cross-dataset incremental value only if every requested dataset has a
+lower confidence endpoint above zero. This distinguishes three claims that
+must not be conflated:
+
+1. a score is a useful standalone detector;
+2. a score contains information beyond the static baseline;
+3. a score measures Transformer residual-stream updates.
+
+`d_spread` and `step_direction_jump` test temporal changes between pooled
+reasoning-step states at one layer. They are not layerwise Transformer
+residual updates. For the third claim, the audit uses adjacent stored
+`stepvec` layers. At primary layer 14 this is the cumulative 12-to-14 update
+
+\[
+\Delta^{12\rightarrow14}_t=h^{14}_t-h^{12}_t.
+\]
+
+It also removes the prompt's own depth drift:
+
+\[
+\Delta^{\mathrm{pc}}_t=
+(h^{14}_t-q^{14})-(h^{12}_t-q^{12}).
+\]
+
+Their scale-normalized norms are added one at a time to the full baseline.
+This is a pooled two-block-band approximation available in the existing NPZ,
+not an exact tokenwise write from one Transformer block. Exact per-block
+attribution would require contiguous hidden states or component hooks.

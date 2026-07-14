@@ -322,6 +322,49 @@ def load_chains(npz_path: str, *, layer: int, max_chains: int = 0) -> Tuple[List
                 for t in range(1, T):
                     jump[t] = 1.0 - cosine(dirs[t], dirs[t - 1])
                 feats["step_direction_jump"] = jump
+                if svi > 0 and sv.shape[1] > svi and qv.ndim == 2 and qv.shape[0] > svi:
+                    current = np.asarray(sv[:T, svi], float)
+                    previous = np.asarray(sv[:T, svi - 1], float)
+                    raw_relative = np.full(T, np.nan)
+                    prompt_conditioned = np.full(T, np.nan)
+                    depth_rewire = np.full(T, np.nan)
+                    q_current = np.asarray(qv[svi], float)
+                    q_previous = np.asarray(qv[svi - 1], float)
+                    prompt_ready = bool(
+                        np.all(np.isfinite(q_current))
+                        and np.all(np.isfinite(q_previous))
+                    )
+                    for t in range(T):
+                        h_cur = current[t]
+                        h_prev = previous[t]
+                        if not (
+                            np.all(np.isfinite(h_cur))
+                            and np.all(np.isfinite(h_prev))
+                        ):
+                            continue
+                        raw_delta = h_cur - h_prev
+                        raw_scale = 0.5 * (
+                            np.linalg.norm(h_cur) + np.linalg.norm(h_prev)
+                        )
+                        raw_relative[t] = float(
+                            np.linalg.norm(raw_delta) / max(float(raw_scale), EPS)
+                        )
+                        depth_rewire[t] = 1.0 - cosine(h_cur, h_prev)
+                        if prompt_ready:
+                            centered_cur = h_cur - q_current
+                            centered_prev = h_prev - q_previous
+                            conditioned_delta = centered_cur - centered_prev
+                            conditioned_scale = 0.5 * (
+                                np.linalg.norm(centered_cur)
+                                + np.linalg.norm(centered_prev)
+                            )
+                            prompt_conditioned[t] = float(
+                                np.linalg.norm(conditioned_delta)
+                                / max(float(conditioned_scale), EPS)
+                            )
+                    feats["depth_band_update_relative_norm"] = raw_relative
+                    feats["depth_band_prompt_conditioned_norm"] = prompt_conditioned
+                    feats["depth_band_state_rewire"] = depth_rewire
         else:
             missing["stepvec"] += 1
 
@@ -372,6 +415,11 @@ def load_chains(npz_path: str, *, layer: int, max_chains: int = 0) -> Tuple[List
         "n_chains_seen": N,
         "cloud_layers": cloud_layers,
         "sv_layers": sv_layers,
+        "depth_band": (
+            [int(sv_layers[svi - 1]), int(sv_layers[svi])]
+            if svi is not None and svi > 0 and len(sv_layers) > svi
+            else None
+        ),
         "cloud_features": cn,
         "geom_features": gn,
         "attn_features": an,

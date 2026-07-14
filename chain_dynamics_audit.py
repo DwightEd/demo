@@ -34,6 +34,7 @@ import numpy as np
 
 try:
     from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import average_precision_score
     from sklearn.model_selection import GroupKFold
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
@@ -89,6 +90,53 @@ PREDECLARED_REPLICATION_FEATURES = (
     "transition_cusum__spread",
     "transition_surprise__spread_anchor_unc",
     "transition_cusum__spread_anchor_unc",
+)
+
+
+# These comparisons are fixed before the additive-value run.  The component
+# models answer what the existing ``anchor_uncertainty`` shorthand contains;
+# the augmentations ask whether one dynamic score adds information beyond that
+# full baseline on exactly the same held-out rows and GroupKFold splits.
+PREDECLARED_COMPONENT_MODELS = {
+    "controls": ("logN", "pos"),
+    "controls+spread": ("logN", "pos", "spread"),
+    "controls+anchor": ("logN", "pos", "anchor_loss"),
+    "controls+uncertainty": ("logN", "pos", "uncertainty"),
+    "anchor_uncertainty": ("logN", "pos", "spread", "anchor_loss", "uncertainty"),
+    "without_spread": ("logN", "pos", "anchor_loss", "uncertainty"),
+    "without_anchor": ("logN", "pos", "spread", "uncertainty"),
+    "without_uncertainty": ("logN", "pos", "spread", "anchor_loss"),
+}
+
+
+PREDECLARED_ADDITIVE_SIGNALS = (
+    ("depth.raw_update.relative_norm", "depth_band_update_relative_norm"),
+    (
+        "depth.raw_update.relative_norm.length_residual",
+        "depth_band_update_relative_norm_resid_ctrl",
+    ),
+    (
+        "depth.prompt_conditioned_update.relative_norm",
+        "depth_band_prompt_conditioned_norm",
+    ),
+    (
+        "depth.prompt_conditioned_update.relative_norm.length_residual",
+        "depth_band_prompt_conditioned_norm_resid_ctrl",
+    ),
+    ("temporal.d_spread.raw", "d_spread"),
+    ("temporal.d_spread.length_residual", "d_spread_resid_ctrl"),
+    ("temporal.direction_jump.raw", "step_direction_jump"),
+    ("temporal.direction_jump.length_residual", "step_direction_jump_resid_ctrl"),
+    ("transition.joint_surprise.raw", "transition_surprise__spread_anchor_unc"),
+    (
+        "transition.joint_surprise.length_residual",
+        "transition_surprise__spread_anchor_unc_resid_ctrl",
+    ),
+    ("transition.joint_cusum.raw", "transition_cusum__spread_anchor_unc"),
+    (
+        "transition.joint_cusum.length_residual",
+        "transition_cusum__spread_anchor_unc_resid_ctrl",
+    ),
 )
 
 
@@ -682,26 +730,56 @@ def fixed_direction_feature_row(
     }
 
 
-def oof_logit(X: np.ndarray, y: np.ndarray, groups: np.ndarray, folds: int) -> np.ndarray:
+def _fold_local_impute(
+    train: np.ndarray,
+    test: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Median-impute using training rows only.
+
+    The previous implementation filled missing values once before GroupKFold,
+    which leaked held-out feature marginals.  This helper keeps every fitted
+    quantity inside the training fold.
+    """
+
+    x_train = np.asarray(train, float).copy()
+    x_test = np.asarray(test, float).copy()
+    for j in range(x_train.shape[1]):
+        finite = np.isfinite(x_train[:, j])
+        fill = float(np.median(x_train[finite, j])) if finite.any() else 0.0
+        x_train[~np.isfinite(x_train[:, j]), j] = fill
+        x_test[~np.isfinite(x_test[:, j]), j] = fill
+    return x_train, x_test
+
+
+def oof_logit_details(
+    X: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    folds: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return leakage-safe OOF probabilities and standardized fold coefficients."""
+
     X = np.asarray(X, float)
     y = np.asarray(y, int)
     groups = np.asarray(groups)
-    for j in range(X.shape[1]):
-        col = X[:, j]
-        m = np.isfinite(col)
-        fill = float(col[m].mean()) if m.any() else 0.0
-        col[~m] = fill
-        X[:, j] = col
     pred = np.full(len(y), np.nan)
+    coefficients: List[np.ndarray] = []
     n_splits = min(int(folds), len(np.unique(groups)))
     if n_splits < 2 or len(np.unique(y)) < 2:
-        return pred
+        return pred, np.empty((0, X.shape[1]), float)
     for tr, te in GroupKFold(n_splits=n_splits).split(X, y, groups):
         if len(np.unique(y[tr])) < 2:
             continue
+        x_train, x_test = _fold_local_impute(X[tr], X[te])
         clf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=3000, class_weight="balanced"))
-        clf.fit(X[tr], y[tr])
-        pred[te] = clf.predict_proba(X[te])[:, 1]
+        clf.fit(x_train, y[tr])
+        pred[te] = clf.predict_proba(x_test)[:, 1]
+        coefficients.append(np.asarray(clf[-1].coef_[0], float))
+    return pred, np.asarray(coefficients, float)
+
+
+def oof_logit(X: np.ndarray, y: np.ndarray, groups: np.ndarray, folds: int) -> np.ndarray:
+    pred, _ = oof_logit_details(X, y, groups, folds)
     return pred
 
 
@@ -855,6 +933,297 @@ def group_increment_table(
         )
     rows.sort(key=lambda r: np.nan_to_num(r["increment"]["point"], nan=-999), reverse=True)
     return rows
+
+
+def auprc(score: np.ndarray, labels: np.ndarray) -> float:
+    score = np.asarray(score, float)
+    labels = np.asarray(labels, int)
+    finite = np.isfinite(score)
+    if finite.sum() == 0 or np.unique(labels[finite]).size < 2:
+        return float("nan")
+    return float(average_precision_score(labels[finite], score[finite]))
+
+
+def cluster_boot_metric_increment(
+    augmented: np.ndarray,
+    baseline: np.ndarray,
+    labels: np.ndarray,
+    groups: np.ndarray,
+    *,
+    metric,
+    n_boot: int,
+    seed: int,
+) -> Dict[str, object]:
+    """Cluster-bootstrap a paired metric difference on shared OOF rows."""
+
+    augmented = np.asarray(augmented, float)
+    baseline = np.asarray(baseline, float)
+    labels = np.asarray(labels, int)
+    groups = np.asarray(groups)
+    finite = np.isfinite(augmented) & np.isfinite(baseline)
+    if finite.sum() < 30 or np.unique(labels[finite]).size < 2:
+        return {
+            "point": float("nan"),
+            "lo": float("nan"),
+            "hi": float("nan"),
+            "supports_positive_increment": False,
+        }
+    point = float(metric(augmented[finite], labels[finite]) - metric(baseline[finite], labels[finite]))
+    unique = np.unique(groups[finite])
+    if n_boot <= 0 or unique.size < 2:
+        return {
+            "point": point,
+            "lo": float("nan"),
+            "hi": float("nan"),
+            "supports_positive_increment": False,
+        }
+    by_group = {group: np.where(finite & (groups == group))[0] for group in unique}
+    rng = np.random.default_rng(int(seed))
+    values: List[float] = []
+    for _ in range(int(n_boot)):
+        chosen = rng.choice(unique, size=unique.size, replace=True)
+        index = np.concatenate([by_group[group] for group in chosen])
+        if np.unique(labels[index]).size < 2:
+            continue
+        value = float(metric(augmented[index], labels[index]) - metric(baseline[index], labels[index]))
+        if np.isfinite(value):
+            values.append(value)
+    if not values:
+        return {
+            "point": point,
+            "lo": float("nan"),
+            "hi": float("nan"),
+            "supports_positive_increment": False,
+        }
+    low, high = np.percentile(np.asarray(values, float), [2.5, 97.5])
+    return {
+        "point": point,
+        "lo": float(low),
+        "hi": float(high),
+        "supports_positive_increment": bool(low > 0.0),
+    }
+
+
+def _model_metrics(score: np.ndarray, labels: np.ndarray) -> Dict[str, object]:
+    score = np.asarray(score, float)
+    labels = np.asarray(labels, int)
+    finite = np.isfinite(score)
+    return {
+        "auroc": auroc(score[finite], labels[finite]),
+        "auprc": auprc(score[finite], labels[finite]),
+        "n": int(finite.sum()),
+        "errors": int(labels[finite].sum()) if finite.any() else 0,
+        "coverage": float(finite.mean()) if len(finite) else 0.0,
+    }
+
+
+def build_fixed_mechanism_increment_audit(
+    chains: Sequence[Chain],
+    *,
+    folds: int,
+    n_boot: int,
+    seed: int = 20260714,
+) -> Dict[str, object]:
+    """Isolate baseline components and fixed dynamic additions without selection.
+
+    All models share candidate rows, GroupKFold splits, fold-local imputation,
+    scaling, and logistic-regression capacity.  Therefore the paired increment
+    reflects the one added signal rather than a split or sample-set change.
+    """
+
+    required_baseline = list(PREDECLARED_COMPONENT_MODELS["anchor_uncertainty"])
+    missing_baseline = [name for name in required_baseline if finite_count(chains, name) < 30]
+    if missing_baseline:
+        return {
+            "ready": False,
+            "reason": "missing baseline features",
+            "missing": missing_baseline,
+        }
+
+    additive = [
+        (label, feature)
+        for label, feature in PREDECLARED_ADDITIVE_SIGNALS
+        if finite_count(chains, feature) >= 30
+    ]
+    all_features = list(
+        dict.fromkeys(
+            required_baseline
+            + [name for names in PREDECLARED_COMPONENT_MODELS.values() for name in names]
+            + [feature for _, feature in additive]
+        )
+    )
+    X, labels, groups, _, _ = flatten_labeled(chains, all_features)
+    if X.size == 0 or np.unique(labels).size < 2:
+        return {"ready": False, "reason": "no labeled candidate rows"}
+    column = {name: index for index, name in enumerate(all_features)}
+
+    predictions: Dict[str, np.ndarray] = {}
+    coefficients: Dict[str, np.ndarray] = {}
+    model_rows: List[Dict[str, object]] = []
+
+    def score_model(name: str, features: Sequence[str]) -> np.ndarray:
+        indices = [column[feature] for feature in features]
+        score, coef = oof_logit_details(X[:, indices], labels, groups, folds)
+        predictions[name] = score
+        coefficients[name] = coef
+        model_rows.append(
+            {
+                "model": name,
+                "features": list(features),
+                **_model_metrics(score, labels),
+            }
+        )
+        return score
+
+    for name, features in PREDECLARED_COMPONENT_MODELS.items():
+        score_model(name, features)
+
+    baseline_name = "anchor_uncertainty"
+    baseline_score = predictions[baseline_name]
+    component_rows: List[Dict[str, object]] = []
+    reduced_by_component = {
+        "spread": "without_spread",
+        "anchor": "without_anchor",
+        "uncertainty": "without_uncertainty",
+    }
+    component_model_by_name = {
+        "spread": "controls+spread",
+        "anchor": "controls+anchor",
+        "uncertainty": "controls+uncertainty",
+    }
+    for index, (component, reduced_name) in enumerate(reduced_by_component.items()):
+        reduced_score = predictions[reduced_name]
+        component_model = component_model_by_name[component]
+        component_score = predictions[component_model]
+        controls_score = predictions["controls"]
+        component_rows.append(
+            {
+                "component": component,
+                "full_model": baseline_name,
+                "reduced_model": reduced_name,
+                "component_model": component_model,
+                "controls_model": "controls",
+                "component_over_controls_auroc": cluster_boot_metric_increment(
+                    component_score,
+                    controls_score,
+                    labels,
+                    groups,
+                    metric=auroc,
+                    n_boot=n_boot,
+                    seed=seed + 20 + index,
+                ),
+                "component_over_controls_auprc": cluster_boot_metric_increment(
+                    component_score,
+                    controls_score,
+                    labels,
+                    groups,
+                    metric=auprc,
+                    n_boot=n_boot,
+                    seed=seed + 40 + index,
+                ),
+                "auroc_increment": cluster_boot_metric_increment(
+                    baseline_score,
+                    reduced_score,
+                    labels,
+                    groups,
+                    metric=auroc,
+                    n_boot=n_boot,
+                    seed=seed + index,
+                ),
+                "auprc_increment": cluster_boot_metric_increment(
+                    baseline_score,
+                    reduced_score,
+                    labels,
+                    groups,
+                    metric=auprc,
+                    n_boot=n_boot,
+                    seed=seed + 100 + index,
+                ),
+            }
+        )
+
+    additive_rows: List[Dict[str, object]] = []
+    for index, (label, feature) in enumerate(additive):
+        model_name = f"anchor_uncertainty+{label}"
+        features = required_baseline + [feature]
+        eligible = np.isfinite(X[:, column[feature]])
+        if eligible.sum() < 30 or np.unique(labels[eligible]).size < 2:
+            continue
+        eligible_X = X[eligible]
+        eligible_labels = labels[eligible]
+        eligible_groups = groups[eligible]
+        baseline_indices = [column[name] for name in required_baseline]
+        augmented_indices = [column[name] for name in features]
+        eligible_baseline, _ = oof_logit_details(
+            eligible_X[:, baseline_indices],
+            eligible_labels,
+            eligible_groups,
+            folds,
+        )
+        augmented_score, coef = oof_logit_details(
+            eligible_X[:, augmented_indices],
+            eligible_labels,
+            eligible_groups,
+            folds,
+        )
+        model_rows.append(
+            {
+                "model": model_name,
+                "features": list(features),
+                **_model_metrics(augmented_score, eligible_labels),
+            }
+        )
+        signal_coef = coef[:, -1] if coef.ndim == 2 and coef.shape[1] else np.asarray([], float)
+        additive_rows.append(
+            {
+                "signal": label,
+                "feature": feature,
+                "baseline_model": baseline_name,
+                "augmented_model": model_name,
+                "eligible_rows": int(eligible.sum()),
+                "eligible_coverage": float(eligible.mean()),
+                "baseline": _model_metrics(eligible_baseline, eligible_labels),
+                "augmented": _model_metrics(augmented_score, eligible_labels),
+                "auroc_increment": cluster_boot_metric_increment(
+                    augmented_score,
+                    eligible_baseline,
+                    eligible_labels,
+                    eligible_groups,
+                    metric=auroc,
+                    n_boot=n_boot,
+                    seed=seed + 1000 + index,
+                ),
+                "auprc_increment": cluster_boot_metric_increment(
+                    augmented_score,
+                    eligible_baseline,
+                    eligible_labels,
+                    eligible_groups,
+                    metric=auprc,
+                    n_boot=n_boot,
+                    seed=seed + 2000 + index,
+                ),
+                "standardized_coefficient": {
+                    "median": safe_mean([np.median(signal_coef)]) if signal_coef.size else float("nan"),
+                    "positive_fraction": float(np.mean(signal_coef > 0.0)) if signal_coef.size else float("nan"),
+                    "fold_values": signal_coef.tolist(),
+                },
+            }
+        )
+
+    return {
+        "ready": True,
+        "candidate_rows": int(len(labels)),
+        "errors": int(labels.sum()),
+        "folds": int(min(int(folds), len(np.unique(groups)))),
+        "baseline_definition": {
+            "name": baseline_name,
+            "features": required_baseline,
+            "note": "supervised OOF logistic baseline; anchor_loss is only one component",
+        },
+        "model_scores": model_rows,
+        "unique_component_value": component_rows,
+        "additive_value": additive_rows,
+    }
 
 
 def within_chain_rank(chains: Sequence[Chain], feature: str, sign: float):
@@ -1052,6 +1421,9 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
     residual_source = [
         "spread",
         "step_direction_jump",
+        "depth_band_update_relative_norm",
+        "depth_band_prompt_conditioned_norm",
+        "depth_band_state_rewire",
         "unanchored_divergence",
         "confident_divergence",
         "d_spread",
@@ -1143,6 +1515,11 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
         n_boot=args.n_boot,
         seed=13,
     )
+    fixed_mechanism_increment = build_fixed_mechanism_increment_audit(
+        chains,
+        folds=args.folds,
+        n_boot=args.n_boot,
+    )
     group_scores = group_table(chains, groups, folds=args.folds)
     res = {
         "meta": {**meta, "chain_dynamic_layer": args.layer},
@@ -1159,6 +1536,7 @@ def run(npz: str, args: argparse.Namespace) -> Dict[str, object]:
         "control_residualization": residual_info,
         "trajectory_pattern_features": pattern_names,
         "predeclared_replication": predeclared_replication,
+        "fixed_mechanism_increment": fixed_mechanism_increment,
         "overall_features": feature_table(chains, all_names, top=args.top),
         "high_spread_features": feature_table(chains, all_names, high_spread_q=args.high_spread_q, top=args.top),
         "control_residual_features": feature_table(chains, residual_names, top=args.top),
@@ -1243,6 +1621,29 @@ def print_result(res: Dict[str, object]) -> None:
             f"{float(residual_loc.get('top1', np.nan)):.3f}"
         )
 
+    fixed = res.get("fixed_mechanism_increment", {})
+    if fixed.get("ready"):
+        print("\nFixed component value inside anchor_uncertainty:")
+        for row in fixed.get("unique_component_value", []):
+            auc_inc = row["auroc_increment"]
+            pr_inc = row["auprc_increment"]
+            print(
+                f"  {row['component']:12s} AUROC {auc_inc['point']:+.3f} "
+                f"[{auc_inc['lo']:+.3f},{auc_inc['hi']:+.3f}] "
+                f"AUPRC {pr_inc['point']:+.3f} [{pr_inc['lo']:+.3f},{pr_inc['hi']:+.3f}]"
+            )
+        print("\nFixed additions beyond anchor_uncertainty:")
+        for row in fixed.get("additive_value", []):
+            auc_inc = row["auroc_increment"]
+            pr_inc = row["auprc_increment"]
+            coef = row["standardized_coefficient"]
+            print(
+                f"  {row['signal']:48s} AUROC {auc_inc['point']:+.3f} "
+                f"[{auc_inc['lo']:+.3f},{auc_inc['hi']:+.3f}] "
+                f"AUPRC {pr_inc['point']:+.3f} "
+                f"coef {coef['median']:+.3f} sign+ {coef['positive_fraction']:.2f}"
+            )
+
     print("\nWithin-chain localization:")
     for r in res["localization"][:12]:
         gain = r["top1"] - r["expected_top1"]
@@ -1289,7 +1690,7 @@ def _object_array(xs: Sequence[object]) -> np.ndarray:
 def make_selftest_npz(path: str, *, n_chains: int = 90, layer: int = 14, seed: int = 21) -> None:
     rng = np.random.default_rng(seed)
     layers = np.array([layer], dtype=int)
-    sv_layers = np.array([layer], dtype=int)
+    sv_layers = np.array([layer - 2, layer], dtype=int)
     cloud_names = np.array(["resultant", "coherence", "cloud_D"], dtype=object)
     geom_names = np.array(["ae"], dtype=object)
     gold, pids, ranges_all = [], [], []
@@ -1335,8 +1736,8 @@ def make_selftest_npz(path: str, *, n_chains: int = 90, layer: int = 14, seed: i
         sg[:, 0, 0] = spread
         q = rng.normal(size=d)
         q = q / np.linalg.norm(q)
-        qv = q[None, :]
-        sv = np.zeros((T, 1, d), float)
+        qv = np.stack([q, q], axis=0)
+        sv = np.zeros((T, 2, d), float)
         prev = q
         for t in range(T):
             off = rng.normal(size=d)
@@ -1346,7 +1747,10 @@ def make_selftest_npz(path: str, *, n_chains: int = 90, layer: int = 14, seed: i
             if t > 0:
                 cur = 0.65 * prev + 0.35 * cur
             cur = cur / max(np.linalg.norm(cur), EPS)
-            sv[t, 0] = cur
+            previous_depth = 0.82 * cur + 0.18 * q + 0.01 * rng.normal(size=d)
+            previous_depth = previous_depth / max(np.linalg.norm(previous_depth), EPS)
+            sv[t, 0] = previous_depth
+            sv[t, 1] = cur
             prev = cur
         ud = np.concatenate([rng.normal(uncertainty[t], 0.02, size=int(lens[t])) for t in range(T)])
         uc = np.concatenate([rng.normal(uncertainty[t] * 0.8, 0.02, size=int(lens[t])) for t in range(T)])

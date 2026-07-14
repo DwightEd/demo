@@ -76,6 +76,8 @@ tests them without per-dataset sign selection on ProcessBench GSM8K, MATH, and
 OmniMath. It reports raw and length/position-residualized AUROC, cluster
 bootstrap intervals, and fixed-direction within-chain localization. The three
 canonical `full_*.npz` files are sufficient; no re-extraction is needed.
+The first three-subset result and its claim boundary are recorded in
+[RESULT_CROSS_DATASET_TRANSITION_2026-07-14.md](RESULT_CROSS_DATASET_TRANSITION_2026-07-14.md).
 
 Use `--store_step_vectors` during extraction to save the shared per-step
 residual-flow vector store for PCA/VAE/spectral chart comparisons.  This is

@@ -139,6 +139,7 @@ def summarize_result(dataset: str, layer: int, res: Dict, *, max_fpr: float) -> 
         ),
         "online_alarm": alarm or {},
         "predeclared_replication": list(res.get("predeclared_replication", [])),
+        "fixed_mechanism_increment": dict(res.get("fixed_mechanism_increment", {})),
         "recommendation": recommendation(anchor, sequence, seq_inc, alarm),
     }
 
@@ -304,10 +305,179 @@ def write_replication_csv(path: str, summaries: Sequence[Dict]) -> None:
         writer.writerows(rows)
 
 
+def flatten_component_rows(summaries: Sequence[Dict]) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+    for summary in summaries:
+        audit = summary.get("fixed_mechanism_increment", {}) or {}
+        model_lookup = {
+            str(row["model"]): row for row in audit.get("model_scores", [])
+        }
+        for row in audit.get("unique_component_value", []):
+            auc_inc = row.get("auroc_increment", {}) or {}
+            pr_inc = row.get("auprc_increment", {}) or {}
+            component_auc_inc = row.get("component_over_controls_auroc", {}) or {}
+            component_pr_inc = row.get("component_over_controls_auprc", {}) or {}
+            full = model_lookup.get(str(row.get("full_model")), {})
+            reduced = model_lookup.get(str(row.get("reduced_model")), {})
+            component_model = model_lookup.get(str(row.get("component_model")), {})
+            controls_model = model_lookup.get(str(row.get("controls_model")), {})
+            rows.append(
+                {
+                    "dataset": summary["dataset"],
+                    "layer": int(summary["layer"]),
+                    "component": row["component"],
+                    "controls_auroc": _number(controls_model.get("auroc")),
+                    "component_model_auroc": _number(component_model.get("auroc")),
+                    "component_over_controls_auroc_delta": _number(
+                        component_auc_inc.get("point")
+                    ),
+                    "component_over_controls_auroc_low": _number(
+                        component_auc_inc.get("lo")
+                    ),
+                    "component_over_controls_auroc_high": _number(
+                        component_auc_inc.get("hi")
+                    ),
+                    "controls_auprc": _number(controls_model.get("auprc")),
+                    "component_model_auprc": _number(component_model.get("auprc")),
+                    "component_over_controls_auprc_delta": _number(
+                        component_pr_inc.get("point")
+                    ),
+                    "full_auroc": _number(full.get("auroc")),
+                    "reduced_auroc": _number(reduced.get("auroc")),
+                    "auroc_delta": _number(auc_inc.get("point")),
+                    "auroc_delta_low": _number(auc_inc.get("lo")),
+                    "auroc_delta_high": _number(auc_inc.get("hi")),
+                    "full_auprc": _number(full.get("auprc")),
+                    "reduced_auprc": _number(reduced.get("auprc")),
+                    "auprc_delta": _number(pr_inc.get("point")),
+                    "auprc_delta_low": _number(pr_inc.get("lo")),
+                    "auprc_delta_high": _number(pr_inc.get("hi")),
+                }
+            )
+    return rows
+
+
+def flatten_additive_rows(summaries: Sequence[Dict]) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+    for summary in summaries:
+        audit = summary.get("fixed_mechanism_increment", {}) or {}
+        for row in audit.get("additive_value", []):
+            baseline = row.get("baseline", {}) or {}
+            augmented = row.get("augmented", {}) or {}
+            auc_inc = row.get("auroc_increment", {}) or {}
+            pr_inc = row.get("auprc_increment", {}) or {}
+            coefficient = row.get("standardized_coefficient", {}) or {}
+            rows.append(
+                {
+                    "dataset": summary["dataset"],
+                    "layer": int(summary["layer"]),
+                    "signal": row["signal"],
+                    "feature": row["feature"],
+                    "baseline_auroc": _number(baseline.get("auroc")),
+                    "augmented_auroc": _number(augmented.get("auroc")),
+                    "auroc_delta": _number(auc_inc.get("point")),
+                    "auroc_delta_low": _number(auc_inc.get("lo")),
+                    "auroc_delta_high": _number(auc_inc.get("hi")),
+                    "baseline_auprc": _number(baseline.get("auprc")),
+                    "augmented_auprc": _number(augmented.get("auprc")),
+                    "auprc_delta": _number(pr_inc.get("point")),
+                    "auprc_delta_low": _number(pr_inc.get("lo")),
+                    "auprc_delta_high": _number(pr_inc.get("hi")),
+                    "coefficient_median": _number(coefficient.get("median")),
+                    "coefficient_positive_fraction": _number(
+                        coefficient.get("positive_fraction")
+                    ),
+                    "eligible_coverage": _number(row.get("eligible_coverage")),
+                    "n": int(augmented.get("n", 0) or 0),
+                    "errors": int(augmented.get("errors", 0) or 0),
+                }
+            )
+    return rows
+
+
+def aggregate_increment_rows(
+    rows: Sequence[Dict[str, object]],
+    expected_datasets: Sequence[str],
+    *,
+    key: str,
+) -> List[Dict[str, object]]:
+    expected = list(dict.fromkeys(str(name) for name in expected_datasets))
+    grouped: Dict[tuple[int, str], List[Dict[str, object]]] = {}
+    for row in rows:
+        grouped.setdefault((int(row["layer"]), str(row[key])), []).append(row)
+
+    output: List[Dict[str, object]] = []
+    for (layer, name), values in sorted(grouped.items()):
+        by_dataset = {str(row["dataset"]): row for row in values}
+        observed = [dataset for dataset in expected if dataset in by_dataset]
+        selected = [by_dataset[dataset] for dataset in observed]
+        auc_delta = np.asarray([row["auroc_delta"] for row in selected], float)
+        auc_low = np.asarray([row["auroc_delta_low"] for row in selected], float)
+        pr_delta = np.asarray([row["auprc_delta"] for row in selected], float)
+        pr_low = np.asarray([row["auprc_delta_low"] for row in selected], float)
+        complete = bool(len(observed) == len(expected) and len(expected) > 0)
+        finite_auc = bool(auc_delta.size and np.all(np.isfinite(auc_delta)))
+        finite_pr = bool(pr_delta.size and np.all(np.isfinite(pr_delta)))
+        output.append(
+            {
+                "layer": int(layer),
+                key: name,
+                "expected_datasets": expected,
+                "observed_datasets": observed,
+                "complete": complete,
+                "auroc_delta_macro": (
+                    float(np.mean(auc_delta)) if finite_auc else float("nan")
+                ),
+                "auroc_delta_min": (
+                    float(np.min(auc_delta)) if finite_auc else float("nan")
+                ),
+                "auprc_delta_macro": (
+                    float(np.mean(pr_delta)) if finite_pr else float("nan")
+                ),
+                "auprc_delta_min": (
+                    float(np.min(pr_delta)) if finite_pr else float("nan")
+                ),
+                "auroc_direction_consistent": bool(
+                    complete and finite_auc and np.all(auc_delta > 0.0)
+                ),
+                "auroc_ci_replication": bool(
+                    complete
+                    and auc_low.size
+                    and np.all(np.isfinite(auc_low))
+                    and np.all(auc_low > 0.0)
+                ),
+                "auprc_direction_consistent": bool(
+                    complete and finite_pr and np.all(pr_delta > 0.0)
+                ),
+                "auprc_ci_replication": bool(
+                    complete
+                    and pr_low.size
+                    and np.all(np.isfinite(pr_low))
+                    and np.all(pr_low > 0.0)
+                ),
+            }
+        )
+    return output
+
+
+def write_rows_csv(path: str, rows: Sequence[Dict[str, object]]) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    if not rows:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("")
+        return
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def write_markdown(
     path: str,
     summaries: Sequence[Dict],
     replication: Sequence[Dict[str, object]] = (),
+    component_replication: Sequence[Dict[str, object]] = (),
+    additive_replication: Sequence[Dict[str, object]] = (),
 ) -> None:
     lines = [
         "# Mainline Validation Summary",
@@ -416,6 +586,120 @@ def write_markdown(
                     res_ci=int(row["residual_ci_replication"]),
                 )
             )
+
+    component_rows = flatten_component_rows(summaries)
+    if component_rows:
+        lines.extend(
+            [
+                "",
+                "## What Is Inside `anchor_uncertainty`?",
+                "",
+                "`anchor_uncertainty` is a supervised OOF logistic model over spread, "
+                "anchor loss, uncertainty, step length, and relative position. It is not "
+                "the question-vector cosine alone. Each row below removes one component "
+                "while holding rows, folds, preprocessing, and model capacity fixed.",
+                "",
+                "| dataset | L | component | controls/component AUROC | component gain [CI95] | full/without AUROC | unique AUROC delta [CI95] | unique AUPRC delta [CI95] |",
+                "|---|---:|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for row in component_rows:
+            lines.append(
+                "| {dataset} | {layer} | {component} | {controls:.3f}/{component_auc:.3f} | "
+                "{component_delta:+.3f} [{component_lo:+.3f}, {component_hi:+.3f}] | "
+                "{full:.3f}/{reduced:.3f} | {delta:+.3f} [{lo:+.3f}, {hi:+.3f}] | "
+                "{pr:+.3f} [{prlo:+.3f}, {prhi:+.3f}] |".format(
+                    dataset=row["dataset"],
+                    layer=row["layer"],
+                    component=row["component"],
+                    controls=row["controls_auroc"],
+                    component_auc=row["component_model_auroc"],
+                    component_delta=row["component_over_controls_auroc_delta"],
+                    component_lo=row["component_over_controls_auroc_low"],
+                    component_hi=row["component_over_controls_auroc_high"],
+                    full=row["full_auroc"],
+                    reduced=row["reduced_auroc"],
+                    delta=row["auroc_delta"],
+                    lo=row["auroc_delta_low"],
+                    hi=row["auroc_delta_high"],
+                    pr=row["auprc_delta"],
+                    prlo=row["auprc_delta_low"],
+                    prhi=row["auprc_delta_high"],
+                )
+            )
+
+    additive_rows = flatten_additive_rows(summaries)
+    if additive_rows:
+        lines.extend(
+            [
+                "",
+                "## Fixed Additive Value Beyond `anchor_uncertainty`",
+                "",
+                "Each augmented model adds exactly one predeclared temporal or transition "
+                "score to the full baseline. Positive CI replication is required; a strong "
+                "standalone score is not evidence of incremental information.",
+                "",
+                "| dataset | L | added signal | coverage | base/aug AUROC | AUROC delta [CI95] | AUPRC delta [CI95] | coef median / positive folds |",
+                "|---|---:|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for row in additive_rows:
+            lines.append(
+                "| {dataset} | {layer} | {signal} | {coverage:.3f} | {base:.3f}/{aug:.3f} | "
+                "{delta:+.3f} [{lo:+.3f}, {hi:+.3f}] | {pr:+.3f} [{prlo:+.3f}, {prhi:+.3f}] | "
+                "{coef:+.3f} / {sign:.2f} |".format(
+                    dataset=row["dataset"],
+                    layer=row["layer"],
+                    signal=row["signal"],
+                    coverage=row["eligible_coverage"],
+                    base=row["baseline_auroc"],
+                    aug=row["augmented_auroc"],
+                    delta=row["auroc_delta"],
+                    lo=row["auroc_delta_low"],
+                    hi=row["auroc_delta_high"],
+                    pr=row["auprc_delta"],
+                    prlo=row["auprc_delta_low"],
+                    prhi=row["auprc_delta_high"],
+                    coef=row["coefficient_median"],
+                    sign=row["coefficient_positive_fraction"],
+                )
+            )
+
+    if component_replication or additive_replication:
+        lines.extend(
+            [
+                "",
+                "## Cross-Dataset Increment Gates",
+                "",
+                "The CI gate passes only when every requested dataset has a paired "
+                "cluster-bootstrap lower bound above zero.",
+                "",
+                "| family | item | observed | AUROC delta macro/min | AUROC dir/CI | AUPRC delta macro/min | AUPRC dir/CI |",
+                "|---|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for family, key, rows in (
+            ("component", "component", component_replication),
+            ("addition", "signal", additive_replication),
+        ):
+            for row in rows:
+                lines.append(
+                    "| {family} | {item} | {observed}/{expected} | {auc_macro:+.3f}/{auc_min:+.3f} | "
+                    "{auc_dir}/{auc_ci} | {pr_macro:+.3f}/{pr_min:+.3f} | {pr_dir}/{pr_ci} |".format(
+                        family=family,
+                        item=row[key],
+                        observed=len(row["observed_datasets"]),
+                        expected=len(row["expected_datasets"]),
+                        auc_macro=row["auroc_delta_macro"],
+                        auc_min=row["auroc_delta_min"],
+                        auc_dir=int(row["auroc_direction_consistent"]),
+                        auc_ci=int(row["auroc_ci_replication"]),
+                        pr_macro=row["auprc_delta_macro"],
+                        pr_min=row["auprc_delta_min"],
+                        pr_dir=int(row["auprc_direction_consistent"]),
+                        pr_ci=int(row["auprc_ci_replication"]),
+                    )
+                )
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
 
@@ -477,6 +761,48 @@ def print_replication(replication: Sequence[Dict[str, object]]) -> None:
         )
 
 
+def print_increment_replication(
+    component_replication: Sequence[Dict[str, object]],
+    additive_replication: Sequence[Dict[str, object]],
+) -> None:
+    if not component_replication and not additive_replication:
+        return
+    print("\n===== fixed additive-value replication =====", flush=True)
+    print(
+        f"{'family':10s} {'item':48s} {'seen':>5s} {'dAUC macro/min':>17s} "
+        f"{'AUC gate':>9s} {'dAUPRC macro/min':>18s} {'PR gate':>9s}",
+        flush=True,
+    )
+    for family, key, rows in (
+        ("component", "component", component_replication),
+        ("addition", "signal", additive_replication),
+    ):
+        for row in rows:
+            auc_gate = (
+                "CI"
+                if row["auroc_ci_replication"]
+                else "dir"
+                if row["auroc_direction_consistent"]
+                else "fail"
+            )
+            pr_gate = (
+                "CI"
+                if row["auprc_ci_replication"]
+                else "dir"
+                if row["auprc_direction_consistent"]
+                else "fail"
+            )
+            print(
+                f"{family:10s} {str(row[key])[:48]:48s} "
+                f"{len(row['observed_datasets']):2d}/{len(row['expected_datasets']):2d} "
+                f"{float(row['auroc_delta_macro']):+.3f}/{float(row['auroc_delta_min']):+.3f} "
+                f"{auc_gate:>9s} "
+                f"{float(row['auprc_delta_macro']):+.3f}/{float(row['auprc_delta_min']):+.3f} "
+                f"{pr_gate:>9s}",
+                flush=True,
+            )
+
+
 def run_suite(args: argparse.Namespace) -> Dict[str, object]:
     datasets = parse_csv(args.datasets, cast=str)
     layers = parse_csv(args.layers, cast=int)
@@ -498,6 +824,18 @@ def run_suite(args: argparse.Namespace) -> Dict[str, object]:
             summary = summarize_result(dataset, layer, res, max_fpr=args.max_alarm_fpr)
             summaries.append(summary)
             replication = aggregate_replication(summaries, datasets)
+            component_rows = flatten_component_rows(summaries)
+            additive_rows = flatten_additive_rows(summaries)
+            component_replication = aggregate_increment_rows(
+                component_rows,
+                datasets,
+                key="component",
+            )
+            additive_replication = aggregate_increment_rows(
+                additive_rows,
+                datasets,
+                key="signal",
+            )
             print(f"[mainline] finished {dataset} L{layer} in {time.time() - t0:.1f}s", flush=True)
             print_summary([summary])
             partial = {
@@ -512,18 +850,46 @@ def run_suite(args: argparse.Namespace) -> Dict[str, object]:
                 },
                 "summaries": summaries,
                 "cross_dataset_replication": replication,
+                "cross_dataset_component_value": component_replication,
+                "cross_dataset_additive_value": additive_replication,
                 "results": full_results if args.keep_full_results else {},
             }
             with open(partial_json_path, "w", encoding="utf-8") as fh:
                 json.dump(finite_json(partial), fh, indent=2, ensure_ascii=False)
-            write_markdown(partial_md_path, summaries, replication)
+            write_markdown(
+                partial_md_path,
+                summaries,
+                replication,
+                component_replication,
+                additive_replication,
+            )
             write_replication_csv(
                 os.path.join(args.output_dir, "cross_dataset_replication_partial.csv"),
                 summaries,
             )
+            write_rows_csv(
+                os.path.join(args.output_dir, "mechanism_component_ablation_partial.csv"),
+                component_rows,
+            )
+            write_rows_csv(
+                os.path.join(args.output_dir, "transition_additive_value_partial.csv"),
+                additive_rows,
+            )
             print(f"[mainline] partial saved: {partial_json_path}", flush=True)
 
     replication = aggregate_replication(summaries, datasets)
+    component_rows = flatten_component_rows(summaries)
+    additive_rows = flatten_additive_rows(summaries)
+    component_replication = aggregate_increment_rows(
+        component_rows,
+        datasets,
+        key="component",
+    )
+    additive_replication = aggregate_increment_rows(
+        additive_rows,
+        datasets,
+        key="signal",
+    )
     out = {
         "meta": {
             "datasets": datasets,
@@ -536,18 +902,32 @@ def run_suite(args: argparse.Namespace) -> Dict[str, object]:
         },
         "summaries": summaries,
         "cross_dataset_replication": replication,
+        "cross_dataset_component_value": component_replication,
+        "cross_dataset_additive_value": additive_replication,
         "results": full_results if args.keep_full_results else {},
     }
     json_path = os.path.join(args.output_dir, "mainline_validation_summary.json")
     md_path = os.path.join(args.output_dir, "mainline_validation_summary.md")
     with open(json_path, "w", encoding="utf-8") as fh:
         json.dump(finite_json(out), fh, indent=2, ensure_ascii=False)
-    write_markdown(md_path, summaries, replication)
+    write_markdown(
+        md_path,
+        summaries,
+        replication,
+        component_replication,
+        additive_replication,
+    )
     csv_path = os.path.join(args.output_dir, "cross_dataset_replication.csv")
     write_replication_csv(csv_path, summaries)
+    component_csv_path = os.path.join(args.output_dir, "mechanism_component_ablation.csv")
+    additive_csv_path = os.path.join(args.output_dir, "transition_additive_value.csv")
+    write_rows_csv(component_csv_path, component_rows)
+    write_rows_csv(additive_csv_path, additive_rows)
     out["saved_json"] = json_path
     out["saved_markdown"] = md_path
     out["saved_replication_csv"] = csv_path
+    out["saved_component_csv"] = component_csv_path
+    out["saved_additive_csv"] = additive_csv_path
     return out
 
 
@@ -563,10 +943,24 @@ def run_selftest(args: argparse.Namespace) -> Dict[str, object]:
         assert_selftest(res)
         summary = summarize_result("selftest", 14, res, max_fpr=args.max_alarm_fpr)
         replication = aggregate_replication([summary], ["selftest"])
+        component_rows = flatten_component_rows([summary])
+        additive_rows = flatten_additive_rows([summary])
+        component_replication = aggregate_increment_rows(
+            component_rows,
+            ["selftest"],
+            key="component",
+        )
+        additive_replication = aggregate_increment_rows(
+            additive_rows,
+            ["selftest"],
+            key="signal",
+        )
         os.makedirs(args.output_dir, exist_ok=True)
         out = {
             "summaries": [summary],
             "cross_dataset_replication": replication,
+            "cross_dataset_component_value": component_replication,
+            "cross_dataset_additive_value": additive_replication,
             "results": {"selftest_L14": res},
         }
         path = os.path.join(args.output_dir, "mainline_validation_selftest.json")
@@ -576,11 +970,19 @@ def run_selftest(args: argparse.Namespace) -> Dict[str, object]:
             os.path.join(args.output_dir, "mainline_validation_selftest.md"),
             [summary],
             replication,
+            component_replication,
+            additive_replication,
         )
         csv_path = os.path.join(args.output_dir, "cross_dataset_replication_selftest.csv")
+        component_csv_path = os.path.join(args.output_dir, "mechanism_component_ablation_selftest.csv")
+        additive_csv_path = os.path.join(args.output_dir, "transition_additive_value_selftest.csv")
         write_replication_csv(csv_path, [summary])
+        write_rows_csv(component_csv_path, component_rows)
+        write_rows_csv(additive_csv_path, additive_rows)
         out["saved_json"] = path
         out["saved_replication_csv"] = csv_path
+        out["saved_component_csv"] = component_csv_path
+        out["saved_additive_csv"] = additive_csv_path
         return out
 
 
@@ -614,11 +1016,19 @@ def main() -> None:
     out = run_selftest(args) if args.selftest else run_suite(args)
     print_summary(out["summaries"])
     print_replication(out.get("cross_dataset_replication", []))
+    print_increment_replication(
+        out.get("cross_dataset_component_value", []),
+        out.get("cross_dataset_additive_value", []),
+    )
     print(f"\nsaved json: {out['saved_json']}")
     if "saved_markdown" in out:
         print(f"saved markdown: {out['saved_markdown']}")
     if "saved_replication_csv" in out:
         print(f"saved replication csv: {out['saved_replication_csv']}")
+    if "saved_component_csv" in out:
+        print(f"saved component csv: {out['saved_component_csv']}")
+    if "saved_additive_csv" in out:
+        print(f"saved additive csv: {out['saved_additive_csv']}")
 
 
 if __name__ == "__main__":
