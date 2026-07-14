@@ -38,6 +38,25 @@ class CrossFitConfig:
             raise ValueError("chart_variance must lie in (0, 1]")
         if self.chart_max_dim < 1:
             raise ValueError("chart_max_dim must be positive")
+        if self.seed < 0:
+            raise ValueError("seed must be non-negative")
+
+
+def binary_task_bootstrap_seed(base_seed: int, checkpoint: float) -> int:
+    """Return a deterministic non-negative seed for one binary task.
+
+    Relative checkpoints use their percentage as a small offset. The online
+    task uses ``checkpoint=-1`` as a semantic sentinel, so it receives a
+    separate seed namespace instead of turning that sentinel into a negative
+    NumPy seed.
+    """
+
+    seed = int(base_seed)
+    if seed < 0:
+        raise ValueError("base_seed must be non-negative")
+    if float(checkpoint) < 0.0:
+        return seed + 10_000
+    return seed + int(round(float(checkpoint) * 100.0))
 
 
 class FiniteStandardizer:

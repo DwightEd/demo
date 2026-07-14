@@ -25,6 +25,7 @@ from .metrics import (
 )
 from .models import (
     CrossFitConfig,
+    binary_task_bootstrap_seed,
     crossfit_binary_increment,
     crossfit_forecast_increment,
     crossfit_geometry_explainability,
@@ -92,7 +93,7 @@ def _binary_run(
     summary = summarize_binary_increment(
         result,
         n_boot=cfg.bootstrap,
-        seed=cfg.crossfit.seed + int(round(task.checkpoint * 100)),
+        seed=binary_task_bootstrap_seed(cfg.crossfit.seed, task.checkpoint),
     )
     summary["checkpoint"] = float(task.checkpoint)
     summary["feature_importance"] = ranked_feature_importance(

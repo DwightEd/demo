@@ -22,6 +22,7 @@ from prompt_control_flow.ocgpi.dataset import (
 from prompt_control_flow.ocgpi.models import (
     CrossFitConfig,
     FiniteStandardizer,
+    binary_task_bootstrap_seed,
     crossfit_binary_increment,
     crossfit_forecast_increment,
     grouped_splits,
@@ -246,6 +247,13 @@ def test_online_prefix_task_does_not_require_final_relative_position() -> None:
     np.testing.assert_array_equal(task.step_idx, np.asarray([0, 1, 2]))
     assert len(task.y) == 3
     assert not any("relative" in name for name in task.output_names)
+
+
+def test_online_binary_task_uses_non_negative_bootstrap_seed() -> None:
+    assert binary_task_bootstrap_seed(17, -1.0) == 10_017
+    assert binary_task_bootstrap_seed(17, 0.25) == 42
+    with pytest.raises(ValueError, match="base_seed must be non-negative"):
+        binary_task_bootstrap_seed(-1, -1.0)
 
 
 def test_forecast_task_uses_only_causal_length_controls() -> None:
