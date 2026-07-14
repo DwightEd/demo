@@ -59,6 +59,15 @@ fixed token windows, token-length matching, problem bootstrap, and within-
 problem label permutation. It consumes the existing `sv_clouds`; no new model
 forward pass is required.
 
+[METHOD_PREDICTIVE_STATE_GEOMETRY.md](METHOD_PREDICTIVE_STATE_GEOMETRY.md)
+implements the next claim-driven pilot after directional debiasing failed to
+improve AUROC over raw spread. It learns a correct-only reduced-rank chart from
+future-window predictability, not VAE reconstruction, and requires ordered
+innovation to beat shuffled futures, same-problem mismatched futures, static
+latent density, lexical bigram NLL, length controls, and fixed-window
+directional consensus. It uses exact stored token IDs and `sv_clouds`, so no
+new model forward pass is required.
+
 Use `--store_step_vectors` during extraction to save the shared per-step
 residual-flow vector store for PCA/VAE/spectral chart comparisons.  This is
 important: prompt SVD, VAE, and other charts should be compared on the same
@@ -113,6 +122,9 @@ prompt_control_flow/
   flow_signature_data.py
   flow_signature_audit.py
   directional_consensus.py
+  predictive_state_data.py
+  predictive_state_model.py
+  predictive_state_audit.py
   metrics.py
   extraction.py
   evaluate.py
@@ -183,6 +195,31 @@ python audit_directional_consensus.py \
 
 This audit is response-level. Its estimator, controls, stopping rule, and
 replication command are frozen in `METHOD_DIRECTIONAL_CONSENSUS.md`.
+
+The predictive-state pilot also uses a direct Linux entry point:
+
+```bash
+python audit_predictive_state.py \
+  --input data/gsm8k_v2_custom.npz \
+  --output outputs/predictive_state/gsm8k_custom_scores.npz \
+  --output_dir outputs/predictive_state/gsm8k_custom_audit \
+  --vector_key sv_vec_step_exp \
+  --cloud_layers all \
+  --label_policy answer_format_ok \
+  --projection_dim 96 \
+  --window_tokens 16 \
+  --window_stride 16 \
+  --horizons 1,2 \
+  --latent_dim 16 \
+  --compute_device cuda \
+  --bootstrap 2000 \
+  --permutations 2000
+```
+
+Run `--preflight` first. The loader fails if cloud states cannot be matched
+exactly to `input_ids` through `time_axis_token_ranges`. Method, null models,
+and frozen stop/go gates are documented in
+`METHOD_PREDICTIVE_STATE_GEOMETRY.md`.
 
 ## File Responsibilities and Main Interfaces
 
