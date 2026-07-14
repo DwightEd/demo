@@ -97,6 +97,10 @@ def _empty_scores(n_samples: int) -> dict[str, np.ndarray]:
     names = [
         "predictive.raw.mahalanobis_mean",
         "predictive.raw.euclidean_mean",
+        "predictive.raw.transverse_mean",
+        "predictive.raw.parallel_mean",
+        "predictive.raw.offchart_mean",
+        "static.raw.mahalanobis_mean",
         "predictive.token_residual.mahalanobis_mean",
         "predictive.token_residual.euclidean_mean",
         "predictive.token_residual.transverse_mean",
@@ -122,27 +126,31 @@ def _assign_test_scores(
         for name, values in ordered_by_horizon.items()
     }
     if channel == "raw":
-        destination["predictive.raw.mahalanobis_mean"][test_indices] = ordered[
-            "mahalanobis"
-        ][test_indices]
-        destination["predictive.raw.euclidean_mean"][test_indices] = ordered[
-            "euclidean"
-        ][test_indices]
-        return
-    mapping = {
-        "predictive.token_residual.mahalanobis_mean": "mahalanobis",
-        "predictive.token_residual.euclidean_mean": "euclidean",
-        "predictive.token_residual.transverse_mean": "transverse",
-        "predictive.token_residual.parallel_mean": "parallel",
-        "predictive.token_residual.offchart_mean": "offchart",
-        "static.token_residual.mahalanobis_mean": "static_mahalanobis",
-    }
+        mapping = {
+            "predictive.raw.mahalanobis_mean": "mahalanobis",
+            "predictive.raw.euclidean_mean": "euclidean",
+            "predictive.raw.transverse_mean": "transverse",
+            "predictive.raw.parallel_mean": "parallel",
+            "predictive.raw.offchart_mean": "offchart",
+            "static.raw.mahalanobis_mean": "static_mahalanobis",
+        }
+    else:
+        mapping = {
+            "predictive.token_residual.mahalanobis_mean": "mahalanobis",
+            "predictive.token_residual.euclidean_mean": "euclidean",
+            "predictive.token_residual.transverse_mean": "transverse",
+            "predictive.token_residual.parallel_mean": "parallel",
+            "predictive.token_residual.offchart_mean": "offchart",
+            "static.token_residual.mahalanobis_mean": "static_mahalanobis",
+        }
     for destination_name, source_name in mapping.items():
         destination[destination_name][test_indices] = ordered[source_name][test_indices]
     for destination_name, source_name in (
         ("null.shuffle.mahalanobis_mean", "shuffle"),
         ("null.same_problem_mismatch.mahalanobis_mean", "mismatch"),
     ):
+        if not null_by_horizon[source_name]:
+            continue
         values = average_horizon_scores(null_by_horizon[source_name])
         destination[destination_name][test_indices] = values[test_indices]
 
@@ -204,6 +212,7 @@ def _fit_fold_channel(
     test_indices: np.ndarray,
     *,
     token_residual: bool,
+    compute_nulls: bool,
     window_cfg: WindowConfig,
     model_cfg: PredictiveModelConfig,
     audit_cfg: PredictiveStateAuditConfig,
@@ -288,7 +297,7 @@ def _fit_fold_channel(
                     compute_device=window_cfg.compute_device,
                 )
             )
-        if token_residual:
+        if compute_nulls:
             for mode, output_name in (
                 ("within_response", "shuffle"),
                 ("same_problem_mismatch", "mismatch"),
@@ -353,6 +362,9 @@ def run_predictive_state_audit(
     projected, projection_meta = project_token_clouds(dataset, projection_cfg)
     n_samples = dataset.n_samples
     score_map = _empty_scores(n_samples)
+    primary_channel = "token_residual" if dataset.exact_token_alignment else "raw"
+    primary_name = f"predictive.{primary_channel}.mahalanobis_mean"
+    static_name = f"static.{primary_channel}.mahalanobis_mean"
     oof_window_counts = np.full(n_samples, -1, dtype=np.int64)
     fold_rows: list[dict[str, Any]] = []
 
@@ -369,34 +381,39 @@ def run_predictive_state_audit(
                 f"fold {fold + 1}/{audit_cfg.folds}: train_correct={train_correct.size} "
                 f"test={test_indices.size}"
             )
-        bigram = fit_token_bigram(
-            dataset.token_ids,
-            dataset.token_positions,
-            train_correct,
-        )
-        for sample in test_indices.tolist():
-            score_map["control.token_bigram_nll"][sample] = bigram.score(
-                dataset.token_ids[sample], dataset.token_positions[sample]
+        if dataset.token_ids is not None:
+            bigram = fit_token_bigram(
+                dataset.token_ids,
+                dataset.token_positions,
+                train_correct,
             )
-        for channel, token_residual in (("raw", False), ("token_residual", True)):
+            for sample in test_indices.tolist():
+                score_map["control.token_bigram_nll"][sample] = bigram.score(
+                    dataset.token_ids[sample], dataset.token_positions[sample]
+                )
+        channels = [("raw", False)]
+        if dataset.exact_token_alignment:
+            channels.append(("token_residual", True))
+        for channel, token_residual in channels:
             ordered, null, window_counts, diagnostics = _fit_fold_channel(
                 dataset,
                 projected,
                 train_correct,
                 test_indices,
                 token_residual=token_residual,
+                compute_nulls=channel == primary_channel,
                 window_cfg=window_cfg,
                 model_cfg=model_cfg,
                 audit_cfg=audit_cfg,
                 fold=fold,
             )
             _assign_test_scores(score_map, test_indices, channel, ordered, null)
-            if token_residual:
+            if channel == primary_channel:
                 oof_window_counts[test_indices] = window_counts[test_indices]
             fold_rows.extend(diagnostics)
         if audit_cfg.verbose:
             finite = np.isfinite(
-                score_map["predictive.token_residual.mahalanobis_mean"][test_indices]
+                score_map[f"predictive.{primary_channel}.mahalanobis_mean"][test_indices]
             )
             print(
                 f"  fold {fold + 1}: scored={int(np.sum(finite))}/{test_indices.size} "
@@ -443,23 +460,25 @@ def run_predictive_state_audit(
     )
     residualize = [
         "predictive.raw.mahalanobis_mean",
-        "predictive.token_residual.mahalanobis_mean",
-        "static.token_residual.mahalanobis_mean",
+        primary_name,
+        static_name,
         "null.shuffle.mahalanobis_mean",
         "null.same_problem_mismatch.mahalanobis_mean",
-        "control.token_bigram_nll",
         "baseline.fixed_window_consensus",
     ]
+    if dataset.exact_token_alignment:
+        residualize.append("control.token_bigram_nll")
+    residualize = list(dict.fromkeys(residualize))
     for name in residualize:
         score_map[f"{name}.length_residual"] = crossfit_residualize_score(
             score_map[name], controls, base.problem_ids, statistical_cfg
         )
 
     confirmatory = [
-        "predictive.token_residual.mahalanobis_mean",
-        "predictive.token_residual.mahalanobis_mean.length_residual",
+        primary_name,
+        f"{primary_name}.length_residual",
         "null.shuffle.mahalanobis_mean",
-        "static.token_residual.mahalanobis_mean",
+        static_name,
         "baseline.fixed_window_consensus",
     ]
     rows: list[dict[str, Any]] = []
@@ -504,7 +523,7 @@ def run_predictive_state_audit(
         row["spearman_response_tokens"] = _safe_spearman(
             score, dataset.cloud.response_tokens
         )
-        row["confirmatory"] = bool(name in confirmatory)
+        row["confirmatory"] = bool(dataset.exact_token_alignment and name in confirmatory)
         rows.append(row)
     row_by_name = {row["name"]: row for row in rows}
     q_values = _bh_qvalues(
@@ -515,18 +534,8 @@ def run_predictive_state_audit(
     for name, q_value in zip(confirmatory, q_values):
         row_by_name[name]["same_problem_bh_q"] = float(q_value)
 
-    primary_name = "predictive.token_residual.mahalanobis_mean"
     primary_residual_name = f"{primary_name}.length_residual"
     deltas = {
-        "token_residual_minus_raw": _bootstrap_auc_delta(
-            score_map[primary_name],
-            score_map["predictive.raw.mahalanobis_mean"],
-            base.y_error,
-            base.problem_ids,
-            draws=audit_cfg.bootstrap,
-            seed=audit_cfg.seed + 301,
-            compute_device=projection_cfg.compute_device,
-        ),
         "ordered_minus_shuffle": _bootstrap_auc_delta(
             score_map[primary_name],
             score_map["null.shuffle.mahalanobis_mean"],
@@ -565,7 +574,7 @@ def run_predictive_state_audit(
         ),
         "ordered_minus_static": _bootstrap_auc_delta(
             score_map[primary_name],
-            score_map["static.token_residual.mahalanobis_mean"],
+            score_map[static_name],
             base.y_error,
             base.problem_ids,
             draws=audit_cfg.bootstrap,
@@ -574,7 +583,7 @@ def run_predictive_state_audit(
         ),
         "ordered_minus_static_length_residual": _bootstrap_auc_delta(
             score_map[primary_residual_name],
-            score_map["static.token_residual.mahalanobis_mean.length_residual"],
+            score_map[f"{static_name}.length_residual"],
             base.y_error,
             base.problem_ids,
             draws=audit_cfg.bootstrap,
@@ -599,7 +608,18 @@ def run_predictive_state_audit(
             seed=audit_cfg.seed + 801,
             compute_device=projection_cfg.compute_device,
         ),
-        "ordered_minus_token_bigram_length_residual": _bootstrap_auc_delta(
+    }
+    if dataset.exact_token_alignment:
+        deltas["token_residual_minus_raw"] = _bootstrap_auc_delta(
+            score_map[primary_name],
+            score_map["predictive.raw.mahalanobis_mean"],
+            base.y_error,
+            base.problem_ids,
+            draws=audit_cfg.bootstrap,
+            seed=audit_cfg.seed + 301,
+            compute_device=projection_cfg.compute_device,
+        )
+        deltas["ordered_minus_token_bigram_length_residual"] = _bootstrap_auc_delta(
             score_map[primary_residual_name],
             score_map["control.token_bigram_nll.length_residual"],
             base.y_error,
@@ -607,8 +627,7 @@ def run_predictive_state_audit(
             draws=audit_cfg.bootstrap,
             seed=audit_cfg.seed + 851,
             compute_device=projection_cfg.compute_device,
-        ),
-    }
+        )
     correct_predictive_advantage = {
         "shuffle_minus_ordered": _correct_problem_difference(
             score_map["null.shuffle.mahalanobis_mean"],
@@ -636,7 +655,7 @@ def run_predictive_state_audit(
     ]
     static_delta = deltas["ordered_minus_static_length_residual"]
     consensus_delta = deltas["ordered_minus_fixed_consensus_length_residual"]
-    lexical_delta = deltas["ordered_minus_token_bigram_length_residual"]
+    lexical_delta = deltas.get("ordered_minus_token_bigram_length_residual")
     correct_advantage = correct_predictive_advantage["shuffle_minus_ordered"]
     mismatch_advantage = correct_predictive_advantage[
         "same_problem_mismatch_minus_ordered"
@@ -671,7 +690,8 @@ def run_predictive_state_audit(
             and consensus_delta["ci95"][0] > 0.0
         ),
         "beats_lexical_bigram": bool(
-            lexical_delta["point"] > 0.0
+            lexical_delta is not None
+            and lexical_delta["point"] > 0.0
             and np.isfinite(lexical_delta["ci95"][0])
             and lexical_delta["ci95"][0] > 0.0
         ),
@@ -684,6 +704,7 @@ def run_predictive_state_audit(
             and mismatch_advantage["ci95"][0] > 0.0
         ),
         "coverage_at_least_080": bool(primary["coverage"] >= 0.8),
+        "exact_lexical_control_available": bool(dataset.exact_token_alignment),
     }
     report = {
         "meta": {
@@ -701,6 +722,14 @@ def run_predictive_state_audit(
             ),
             "cloud_layers": dataset.cloud.cloud_layer_ids.tolist(),
             "token_range_key": dataset.token_range_key,
+            "alignment_mode": dataset.alignment_mode,
+            "exact_token_alignment": dataset.exact_token_alignment,
+            "analysis_tier": (
+                "confirmatory_exact_trace"
+                if dataset.exact_token_alignment
+                else "exploratory_legacy_state_only"
+            ),
+            "primary_channel": primary_channel,
             "projection": projection_meta,
             "window_tokens": int(window_cfg.window_tokens),
             "window_stride": int(window_cfg.window_stride),
@@ -718,7 +747,11 @@ def run_predictive_state_audit(
         ),
         "method": {
             "preconditioner": "fixed label-free Gaussian projection",
-            "lexical_quotient": "training-fold correct-only token-ID conditional mean subtraction",
+            "lexical_quotient": (
+                "training-fold correct-only token-ID conditional mean subtraction"
+                if dataset.exact_token_alignment
+                else "unavailable in legacy artifact; global correct-only centering only"
+            ),
             "chart": "top predictable target directions of correct-only ridge dynamics",
             "risk": "shrinkage-Gaussian Mahalanobis innovation averaged equally over horizons",
             "response_weighting": "each response has unit total transition weight during fitting",
@@ -732,8 +765,9 @@ def run_predictive_state_audit(
             "checks": gate_checks,
             "passes": bool(all(gate_checks.values())),
             "replication_requirement": (
-                "The gate must pass without changing hyperparameters on both gsm8k_v2_custom "
-                "and gsm8k_v2_5shot before training a nonlinear predictive encoder."
+                "The full gate requires exact trace fields and must pass without changing "
+                "hyperparameters on both custom and 5shot before training a nonlinear "
+                "predictive encoder. Legacy state-only runs are exploratory and cannot pass."
             ),
         },
         "claim_scope": {
@@ -745,6 +779,10 @@ def run_predictive_state_audit(
             "not_supported": (
                 "first-error localization, a globally low-dimensional reasoning manifold, "
                 "causal error generation, model self-awareness, or output-logit sensitivity"
+            ),
+            "legacy_limitation": (
+                "without stored input_ids, hidden-state lexical nuisance cannot be removed; "
+                "legacy results can reject the dynamic hypothesis but cannot confirm it"
             ),
         },
     }
@@ -800,7 +838,8 @@ def _write_markdown(path: Path, report: Mapping[str, Any]) -> None:
         "",
         f"- Samples: `{meta['samples']}` (`{meta['errors']}` errors, `{meta['correct']}` correct)",
         f"- Problems: `{meta['problems']}`; contrastive: `{meta['contrastive_problems']}`",
-        f"- Layers: `{meta['cloud_layers']}`; exact token alignment: `{meta['token_range_key']}`",
+        f"- Layers: `{meta['cloud_layers']}`; alignment mode: `{meta['alignment_mode']}`",
+        f"- Analysis tier: `{meta['analysis_tier']}`; token ranges: `{meta['token_range_key']}`",
         f"- Window/horizons: `{meta['window_tokens']}` tokens / `{meta['horizons']}`",
         f"- Predictive latent dimension: `{meta['latent_dim']}`",
         "",
@@ -871,6 +910,7 @@ def _write_markdown(path: Path, report: Mapping[str, Any]) -> None:
         "",
         f"- Supported only after replication: {report['claim_scope']['supported_if_replicated']}.",
         f"- Not supported: {report['claim_scope']['not_supported']}.",
+        f"- Legacy limitation: {report['claim_scope']['legacy_limitation']}.",
         "",
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -885,10 +925,17 @@ def _render_plots(
     names = [str(value) for value in packed["score_names"].tolist()]
     matrix = np.asarray(packed["scores"], dtype=np.float64)
     labels = np.asarray(packed["y_error"], dtype=np.int64)
+    primary_channel = (
+        "token_residual"
+        if np.any(
+            np.isfinite(matrix[:, names.index("predictive.token_residual.mahalanobis_mean")])
+        )
+        else "raw"
+    )
     selected = [
-        "predictive.token_residual.mahalanobis_mean",
+        f"predictive.{primary_channel}.mahalanobis_mean",
         "null.shuffle.mahalanobis_mean",
-        "static.token_residual.mahalanobis_mean",
+        f"static.{primary_channel}.mahalanobis_mean",
         "baseline.fixed_window_consensus",
     ]
     figure, axes = plt.subplots(1, len(selected), figsize=(16, 4))

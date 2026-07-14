@@ -65,8 +65,10 @@ improve AUROC over raw spread. It learns a correct-only reduced-rank chart from
 future-window predictability, not VAE reconstruction, and requires ordered
 innovation to beat shuffled futures, same-problem mismatched futures, static
 latent density, lexical bigram NLL, length controls, and fixed-window
-directional consensus. It uses exact stored token IDs and `sv_clouds`, so no
-new model forward pass is required.
+directional consensus. Existing legacy multisample files have `sv_clouds` but
+not exact token IDs: they run an explicitly exploratory state-only tier without
+re-extraction. Exact-trace artifacts enable token-ID residualization and the
+full confirmatory gate.
 
 Use `--store_step_vectors` during extraction to save the shared per-step
 residual-flow vector store for PCA/VAE/spectral chart comparisons.  This is
@@ -216,9 +218,10 @@ python audit_predictive_state.py \
   --permutations 2000
 ```
 
-Run `--preflight` first. The loader fails if cloud states cannot be matched
-exactly to `input_ids` through `time_axis_token_ranges`. Method, null models,
-and frozen stop/go gates are documented in
+Run `--preflight` first. It reports `legacy_cloud_order` for the current
+`gsm8k_v2_*` files and `exact_trace` when cloud states can be matched exactly
+to stored `input_ids`. Legacy runs are state-only and cannot pass the full
+gate. Method, null models, and frozen stop/go gates are documented in
 `METHOD_PREDICTIVE_STATE_GEOMETRY.md`.
 
 ## File Responsibilities and Main Interfaces

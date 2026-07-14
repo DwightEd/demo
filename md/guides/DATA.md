@@ -92,18 +92,27 @@ cloud_sizes     semantic-step token counts; sum equals N
 cloud_layers    actual model layer ids for the L slices
 ```
 
-They also contain the exact trace fields required by the predictive-state
-geometry pilot:
+The existing `gsm8k_v2_custom.npz` and `gsm8k_v2_5shot.npz` were extracted
+before exact generation traces were added. They do **not** contain:
 
 ```text
 input_ids                  exact teacher-forced model input IDs
 time_axis_token_ranges     inclusive absolute ranges concatenated into sv_clouds
 ```
 
-`audit_predictive_state.py --preflight` reconstructs the token ID for every
-cloud row and rejects any range/cloud-size mismatch. Therefore the primary
-token-ID nuisance control and reduced-rank predictive-state experiment do not
-need re-extraction. The frozen method is documented in
+`audit_predictive_state.py --preflight` therefore reports
+`alignment_mode=legacy_cloud_order`. The existing artifacts can run the
+state-only predictive dynamics, chronology nulls, static-density control,
+length residualization, and directional-consensus comparison without
+re-extraction. Token-ID conditional residualization and token bigram NLL are
+disabled, and the full confirmatory gate is forced to fail. This legacy run
+can reject the hypothesis or justify exact-trace re-extraction, but cannot
+confirm lexical-independent predictive geometry.
+
+Future artifacts produced by the current `10_sample_and_extract.py` include the
+two exact-trace fields above. On those files preflight reports
+`alignment_mode=exact_trace` and enables the full gate. The frozen two-tier
+protocol is documented in
 `prompt_control_flow/METHOD_PREDICTIVE_STATE_GEOMETRY.md`.
 
 No re-extraction is needed for this test. Verify alignment before the audit:

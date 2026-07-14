@@ -107,6 +107,12 @@ def main() -> None:
         print(json.dumps(schema, indent=2, ensure_ascii=False))
         if not schema["ready"]:
             raise SystemExit("no same-problem correct/error contrast remains after filtering")
+        if not schema["confirmatory_ready"]:
+            print(
+                "WARNING: legacy artifact detected. The audit can run state-only, "
+                "but exact token-ID nuisance control is unavailable and the full "
+                "confirmatory gate is forced to fail."
+            )
         return
 
     device = _device(args.compute_device)
@@ -171,17 +177,20 @@ def main() -> None:
     meta = report["meta"]
     print(
         f"samples {meta['samples']} | errors {meta['errors']} | correct {meta['correct']} | "
-        f"contrastive problems {meta['contrastive_problems']} | layers {meta['cloud_layers']}"
+        f"contrastive problems {meta['contrastive_problems']} | layers {meta['cloud_layers']} | "
+        f"tier {meta['analysis_tier']}"
     )
+    primary_channel = meta["primary_channel"]
     selected = {
-        "predictive.token_residual.mahalanobis_mean",
-        "predictive.token_residual.mahalanobis_mean.length_residual",
+        f"predictive.{primary_channel}.mahalanobis_mean",
+        f"predictive.{primary_channel}.mahalanobis_mean.length_residual",
         "null.shuffle.mahalanobis_mean",
         "null.same_problem_mismatch.mahalanobis_mean",
-        "static.token_residual.mahalanobis_mean",
-        "control.token_bigram_nll",
+        f"static.{primary_channel}.mahalanobis_mean",
         "baseline.fixed_window_consensus",
     }
+    if meta["exact_token_alignment"]:
+        selected.add("control.token_bigram_nll")
     for row in report["scores"]:
         if row["name"] not in selected:
             continue

@@ -17,13 +17,18 @@ from .directional_consensus import (
 @dataclass
 class PredictiveStateDataset:
     cloud: DirectionalCloudDataset
-    token_ids: list[np.ndarray]
+    token_ids: list[np.ndarray] | None
     token_positions: list[np.ndarray]
-    token_range_key: str
+    token_range_key: str | None
+    alignment_mode: str
 
     @property
     def n_samples(self) -> int:
         return self.cloud.n_samples
+
+    @property
+    def exact_token_alignment(self) -> bool:
+        return self.alignment_mode == "exact_trace"
 
 
 @dataclass(frozen=True)
@@ -97,14 +102,11 @@ def _range_array(value: Any, name: str) -> np.ndarray:
     return array
 
 
-def _resolve_time_range_key(files: Sequence[str]) -> str:
+def _resolve_time_range_key(files: Sequence[str]) -> str | None:
     for key in ("time_axis_token_ranges", "step_token_ranges"):
         if key in files:
             return key
-    raise FileNotFoundError(
-        "predictive-state analysis requires time_axis_token_ranges or "
-        "step_token_ranges so every cloud token can be tied to its exact token ID"
-    )
+    return None
 
 
 def load_predictive_state_dataset(
@@ -115,13 +117,13 @@ def load_predictive_state_dataset(
     label_policy: str = "answer_format_ok",
     max_samples: int = 0,
 ) -> PredictiveStateDataset:
-    """Load token clouds with exact cloud-to-token alignment.
+    """Load token clouds and declare the strongest available alignment mode.
 
-    The stored cloud is a concatenation of inclusive semantic-step token
-    ranges. We reconstruct the corresponding token IDs from the exact model
-    input and reject the artifact if any stored cloud size disagrees with its
-    declared absolute token range. No response re-tokenization fallback is
-    allowed for the confirmatory analysis.
+    Exact-trace artifacts reconstruct every cloud token ID from the stored
+    teacher-forced model input. Legacy multisample artifacts predate those
+    fields; they retain cloud order but cannot support token-ID nuisance
+    removal. The loader never re-tokenizes response text or fabricates token
+    IDs, and it exposes the downgrade through ``alignment_mode``.
     """
 
     path = Path(path)
@@ -133,56 +135,82 @@ def load_predictive_state_dataset(
         max_samples=max_samples,
     )
     z = np.load(path, allow_pickle=True)
-    if "input_ids" not in z.files:
-        raise FileNotFoundError(
-            f"{path}: missing input_ids; exact lexical-nuisance control cannot be run"
-        )
     range_key = _resolve_time_range_key(z.files)
-    raw_input_ids = z["input_ids"]
-    raw_ranges = z[range_key]
+    has_input_ids = "input_ids" in z.files
+    if has_input_ids and range_key is None:
+        raise FileNotFoundError(
+            f"{path}: input_ids is present but no time_axis_token_ranges or "
+            "step_token_ranges was stored"
+        )
+    raw_input_ids = z["input_ids"] if has_input_ids else None
+    raw_ranges = z[range_key] if range_key is not None else None
 
-    token_ids: list[np.ndarray] = []
+    token_ids: list[np.ndarray] | None = [] if has_input_ids else None
     token_positions: list[np.ndarray] = []
     for local_index, original in enumerate(cloud.base.original_indices.tolist()):
-        ids = _flat_int_array(raw_input_ids[int(original)], "input_ids")
-        ranges = _range_array(raw_ranges[int(original)], range_key)
         sizes = np.asarray(cloud.step_sizes[local_index], dtype=np.int64).reshape(-1)
-        if ranges.shape[0] != sizes.size:
-            raise ValueError(
-                f"record {original}: {range_key} has {ranges.shape[0]} rows but "
-                f"cloud_sizes has {sizes.size}"
-            )
-        pieces: list[np.ndarray] = []
-        positions: list[np.ndarray] = []
-        for step, ((start, stop), expected) in enumerate(zip(ranges.tolist(), sizes.tolist())):
-            start, stop, expected = int(start), int(stop), int(expected)
-            if start < 0 or stop < start or stop >= ids.size:
-                raise ValueError(
-                    f"record {original} step {step}: invalid inclusive token range "
-                    f"[{start}, {stop}] for input length {ids.size}"
-                )
-            if stop - start + 1 != expected:
-                raise ValueError(
-                    f"record {original} step {step}: range length {stop - start + 1} "
-                    f"does not equal cloud size {expected}"
-                )
-            pieces.append(ids[start : stop + 1])
-            positions.append(np.arange(start, stop + 1, dtype=np.int64))
-        aligned_ids = np.concatenate(pieces)
-        aligned_positions = np.concatenate(positions)
         cloud_tokens = int(cloud.clouds[local_index].shape[0])
-        if aligned_ids.size != cloud_tokens:
+        if range_key is None:
+            aligned_positions = np.arange(cloud_tokens, dtype=np.int64)
+            aligned_ids = None
+        else:
+            ranges = _range_array(raw_ranges[int(original)], range_key)
+            if ranges.shape[0] != sizes.size:
+                raise ValueError(
+                    f"record {original}: {range_key} has {ranges.shape[0]} rows but "
+                    f"cloud_sizes has {sizes.size}"
+                )
+            ids = (
+                _flat_int_array(raw_input_ids[int(original)], "input_ids")
+                if has_input_ids
+                else None
+            )
+            pieces: list[np.ndarray] = []
+            positions: list[np.ndarray] = []
+            for step, ((start, stop), expected) in enumerate(
+                zip(ranges.tolist(), sizes.tolist())
+            ):
+                start, stop, expected = int(start), int(stop), int(expected)
+                if start < 0 or stop < start or (ids is not None and stop >= ids.size):
+                    suffix = f" for input length {ids.size}" if ids is not None else ""
+                    raise ValueError(
+                        f"record {original} step {step}: invalid inclusive token range "
+                        f"[{start}, {stop}]{suffix}"
+                    )
+                if stop - start + 1 != expected:
+                    raise ValueError(
+                        f"record {original} step {step}: range length {stop - start + 1} "
+                        f"does not equal cloud size {expected}"
+                    )
+                if ids is not None:
+                    pieces.append(ids[start : stop + 1])
+                positions.append(np.arange(start, stop + 1, dtype=np.int64))
+            aligned_ids = np.concatenate(pieces) if ids is not None else None
+            aligned_positions = np.concatenate(positions)
+        if aligned_positions.size != cloud_tokens:
             raise ValueError(
-                f"record {original}: reconstructed {aligned_ids.size} token IDs but "
+                f"record {original}: reconstructed {aligned_positions.size} positions but "
                 f"cloud stores {cloud_tokens} states"
             )
-        token_ids.append(np.ascontiguousarray(aligned_ids, dtype=np.int64))
+        if token_ids is not None:
+            if aligned_ids is None or aligned_ids.size != cloud_tokens:
+                raise ValueError(
+                    f"record {original}: exact token-ID reconstruction does not match cloud"
+                )
+            token_ids.append(np.ascontiguousarray(aligned_ids, dtype=np.int64))
         token_positions.append(np.ascontiguousarray(aligned_positions, dtype=np.int64))
+    if has_input_ids:
+        alignment_mode = "exact_trace"
+    elif range_key is not None:
+        alignment_mode = "legacy_ranges_without_token_ids"
+    else:
+        alignment_mode = "legacy_cloud_order"
     return PredictiveStateDataset(
         cloud=cloud,
         token_ids=token_ids,
         token_positions=token_positions,
         token_range_key=range_key,
+        alignment_mode=alignment_mode,
     )
 
 
@@ -217,11 +245,19 @@ def inspect_predictive_state_source(
         "cloud_layers": dataset.cloud.cloud_layer_ids.tolist(),
         "cloud_hidden_dim": int(dataset.cloud.cloud_hidden_dim),
         "token_range_key": dataset.token_range_key,
-        "exact_token_alignment": True,
-        "min_tokens": int(min(len(x) for x in dataset.token_ids)),
-        "median_tokens": float(np.median([len(x) for x in dataset.token_ids])),
-        "max_tokens": int(max(len(x) for x in dataset.token_ids)),
+        "alignment_mode": dataset.alignment_mode,
+        "exact_token_alignment": dataset.exact_token_alignment,
+        "lexical_nuisance_available": dataset.token_ids is not None,
+        "confirmatory_ready": bool(dataset.exact_token_alignment and contrastive > 0),
+        "min_tokens": int(min(len(x) for x in dataset.token_positions)),
+        "median_tokens": float(np.median([len(x) for x in dataset.token_positions])),
+        "max_tokens": int(max(len(x) for x in dataset.token_positions)),
         "ready": bool(contrastive > 0),
+        "recommendation": (
+            "run the full exact-trace confirmatory audit"
+            if dataset.exact_token_alignment
+            else "run legacy state-only exploration now; re-extract exact trace fields only if the dynamic signal passes its exploratory controls"
+        ),
     }
 
 

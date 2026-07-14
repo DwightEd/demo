@@ -124,7 +124,7 @@ def _response_equal_token_weights(
 @torch.inference_mode()
 def fit_token_nuisance_transform(
     sequences: Sequence[np.ndarray],
-    token_ids: Sequence[np.ndarray],
+    token_ids: Sequence[np.ndarray] | None,
     train_correct_indices: Sequence[int],
     *,
     token_residual: bool,
@@ -138,22 +138,33 @@ def fit_token_nuisance_transform(
         raise ValueError("at least two correct training responses are required")
     if min_token_count < 1:
         raise ValueError("min_token_count must be positive")
+    if token_residual and token_ids is None:
+        raise ValueError("token-ID residualization requires exact stored token IDs")
+    if token_ids is not None and len(sequences) != len(token_ids):
+        raise ValueError("sequence/token-id lengths differ")
     device = torch.device(compute_device)
     joined = torch.as_tensor(
         np.concatenate([np.asarray(sequences[int(i)], dtype=np.float32) for i in indices], axis=0),
         device=device,
         dtype=torch.float32,
     )
-    ids = torch.as_tensor(
-        np.concatenate([np.asarray(token_ids[int(i)], dtype=np.int64) for i in indices]),
-        device=device,
-        dtype=torch.long,
+    ids = (
+        torch.as_tensor(
+            np.concatenate(
+                [np.asarray(token_ids[int(i)], dtype=np.int64) for i in indices]
+            ),
+            device=device,
+            dtype=torch.long,
+        )
+        if token_ids is not None
+        else None
     )
     weights = _response_equal_token_weights(sequences, indices, device=device)
     total_weight = weights.sum().clamp_min(1e-8)
     global_mean = (joined * weights[:, None]).sum(dim=0) / total_weight
 
     if token_residual:
+        assert ids is not None
         unique_ids, inverse, counts = torch.unique(
             ids,
             sorted=True,
@@ -196,13 +207,15 @@ def fit_token_nuisance_transform(
 @torch.inference_mode()
 def transform_projected_sequences(
     sequences: Sequence[np.ndarray],
-    token_ids: Sequence[np.ndarray],
+    token_ids: Sequence[np.ndarray] | None,
     transform: TokenNuisanceTransform,
     *,
     compute_device: str,
     max_batch_tokens: int = 32768,
 ) -> list[np.ndarray]:
-    if len(sequences) != len(token_ids):
+    if transform.token_residual and token_ids is None:
+        raise ValueError("token-ID residualization requires exact stored token IDs")
+    if token_ids is not None and len(sequences) != len(token_ids):
         raise ValueError("sequence/token-id lengths differ")
     device = torch.device(compute_device)
     lengths = np.asarray([len(sequence) for sequence in sequences], dtype=np.int64)
@@ -229,14 +242,21 @@ def transform_projected_sequences(
             device=device,
             dtype=torch.float32,
         )
-        joined_ids = torch.as_tensor(
-            np.concatenate([np.asarray(token_ids[index], dtype=np.int64) for index in batch]),
-            device=device,
-            dtype=torch.long,
+        joined_ids = (
+            torch.as_tensor(
+                np.concatenate(
+                    [np.asarray(token_ids[index], dtype=np.int64) for index in batch]
+                ),
+                device=device,
+                dtype=torch.long,
+            )
+            if token_ids is not None
+            else None
         )
-        if joined.shape[0] != joined_ids.numel():
+        if joined_ids is not None and joined.shape[0] != joined_ids.numel():
             raise ValueError("projected sequence/token-id mismatch")
         if transform.token_residual and transform.token_ids.numel():
+            assert joined_ids is not None
             position = torch.searchsorted(transform.token_ids, joined_ids)
             clipped = position.clamp(max=transform.token_ids.numel() - 1)
             seen = (position < transform.token_ids.numel()) & (

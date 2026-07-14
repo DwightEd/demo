@@ -43,7 +43,7 @@ scientific chart is consequently learned from dynamics rather than
 reconstruction. VAE, time-lagged AE, Koopman AE, and nonlinear JEPA-style
 encoders are later baselines, not part of Stage A.
 
-## 3. Existing Inputs and Exact Alignment
+## 3. Two Input Tiers
 
 No model forward pass is required. Use:
 
@@ -52,20 +52,31 @@ data/gsm8k_v2_custom.npz
 data/gsm8k_v2_5shot.npz
 ```
 
-Required arrays are:
+Both existing files provide the legacy state-only arrays:
 
 ```text
 sv_clouds                  token hidden states, response -> (N, L, D)
 cloud_sizes                stored token count for each kept semantic step
 cloud_layers               actual cloud layer IDs
-input_ids                  exact teacher-forced model input IDs
-time_axis_token_ranges     inclusive absolute ranges used to build the cloud
 problem_ids, sample_idx
 is_correct, format_ok
 responses
 ```
 
-For each response, the loader reconstructs cloud token IDs as
+These files predate exact generation-trace storage. Their preflight mode is
+`legacy_cloud_order`: token-cloud order is preserved, but model token IDs and
+absolute omitted-token gaps are unavailable. They support an exploratory
+state-only test with global correct-only centering. They do not support the
+lexical quotient in Section 5 and cannot pass the full confirmatory gate.
+
+New artifacts produced by the current extractor additionally provide:
+
+```text
+input_ids                  exact teacher-forced model input IDs
+time_axis_token_ranges     inclusive absolute ranges used to build the cloud
+```
+
+For this `exact_trace` tier, the loader reconstructs cloud token IDs as
 
 \[
 \operatorname{ids}_{cloud}
@@ -77,6 +88,7 @@ For each response, the loader reconstructs cloud token IDs as
 Every range length must equal the corresponding `cloud_sizes` entry, and the
 concatenation length must equal `sv_clouds.shape[0]`. The program fails rather
 than re-tokenizing response text or silently dropping a mismatched sample.
+The exact tier is required to confirm lexical-independent predictive geometry.
 
 ## 4. Label-Free Computational Sketch
 
@@ -114,7 +126,9 @@ x_i=\operatorname{standardize}_{train,correct}(\tilde h_i-\mu_{token_i}).
 \]
 
 An otherwise identical raw channel omits token-ID subtraction. This makes the
-increment from lexical quotienting directly testable.
+increment from lexical quotienting directly testable. On legacy artifacts,
+only this raw channel is available; the implementation does not invent token
+IDs by re-tokenizing decoded text.
 
 ## 6. Fixed Token Windows
 
@@ -205,8 +219,8 @@ The same ordered target chart is reused for the two chronology nulls:
    index.
 3. `static`: target states are scored under a correct-only Gaussian density in
    the same latent chart, without a transition predictor.
-4. `token_bigram_nll`: correct-only lexical bigram surprise over exactly
-   adjacent stored token IDs.
+4. `token_bigram_nll`: exact-tier-only correct-trained lexical bigram surprise
+   over adjacent stored token IDs.
 5. `fixed_window_consensus`: the previous debiased directional baseline.
 
 If ordered innovation does not beat these controls, there is no evidence that
@@ -215,8 +229,9 @@ temporal predictive state adds information.
 ## 10. Leakage-Safe Evaluation
 
 All responses from one problem stay in one fold. Projection is fixed globally,
-while token means, feature scales, transition models, charts, covariances, and
-bigram counts are fitted on correct responses from training problems only.
+while feature scales, transition models, charts, and covariances are fitted on
+correct responses from training problems only. Token means and bigram counts
+are additionally fitted in the exact tier only.
 
 The primary report includes:
 
@@ -229,6 +244,16 @@ The primary report includes:
 - paired AUROC deltas against every mandatory null.
 
 ## 11. Frozen Stage-A Gate
+
+The current legacy files first run a Stage-A0 exploration. They report all
+state-dynamics, chronology-null, static, length, and consensus comparisons,
+but `exact_lexical_control_available=False` forces the overall decision to
+`FAIL`. A weak legacy result rejects the current global predictive-state
+hypothesis without spending GPU time on re-extraction. A strong legacy result
+only justifies creating exact-trace artifacts.
+
+The full Stage-A1 gate below applies only when preflight reports
+`alignment_mode=exact_trace`.
 
 The pilot passes on one dataset only if all conditions hold:
 
@@ -259,14 +284,14 @@ diagnostics only. The ordered model must have lower held-out innovation than
 both chronology nulls on correct responses, and finite score coverage must be
 at least 80 percent.
 
-The exact same hyperparameters must pass independently on both `custom` and
-`5shot` before a nonlinear predictive encoder is justified. A failed gate
-retires the current global predictive-state hypothesis; it must not be rescued
-with a VAE or a supervised ensemble.
+The exact same hyperparameters must pass independently on exact-trace versions
+of both `custom` and `5shot` before a nonlinear predictive encoder is
+justified. A failed gate retires the current global predictive-state
+hypothesis; it must not be rescued with a VAE or a supervised ensemble.
 
 ## 12. Commands
 
-Preflight exact token alignment:
+Preflight the available alignment tier:
 
 ```bash
 cd /gz-data/research/demo
@@ -275,7 +300,7 @@ python audit_predictive_state.py \
   --preflight
 ```
 
-Run the primary GPU audit:
+Run the legacy state-only GPU audit on the existing artifact:
 
 ```bash
 python audit_predictive_state.py \
@@ -317,9 +342,11 @@ python audit_predictive_state.py \
 
 ## 13. Claim Boundary
 
-Passing supports a response-level statement that compact correct-only
+Passing the exact-trace gate supports a response-level statement that compact correct-only
 predictive dynamics add error discrimination beyond lexical, static,
 chronology-null, length, and directional-consensus controls. It does not prove
 first-error localization, prompt-conditioned state sufficiency, a global
 reasoning manifold, causal error generation, model self-awareness, or
-output-logit sensitivity.
+output-logit sensitivity. A legacy state-only result is exploratory: it can
+falsify the dynamic hypothesis or motivate exact-trace extraction, but cannot
+establish independence from lexical content.

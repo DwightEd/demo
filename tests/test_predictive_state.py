@@ -122,6 +122,75 @@ def test_predictive_state_loader_requires_exact_cloud_token_alignment(tmp_path: 
         raise AssertionError("misaligned token ranges must fail preflight")
 
 
+def test_legacy_multisample_runs_state_only_and_cannot_pass_full_gate(
+    tmp_path: Path,
+) -> None:
+    exact = tmp_path / "exact.npz"
+    _write_predictive_synthetic(exact)
+    z = np.load(exact, allow_pickle=True)
+    payload = {
+        key: z[key]
+        for key in z.files
+        if key not in {"input_ids", "time_axis_token_ranges"}
+    }
+    legacy = tmp_path / "legacy.npz"
+    np.savez(legacy, **payload)
+
+    schema = inspect_predictive_state_source(legacy)
+    assert schema["alignment_mode"] == "legacy_cloud_order"
+    assert schema["exact_token_alignment"] is False
+    assert schema["confirmatory_ready"] is False
+    dataset = load_predictive_state_dataset(legacy)
+    assert dataset.token_ids is None
+    assert np.array_equal(dataset.token_positions[0], np.arange(48))
+
+    report, packed = run_predictive_state_audit(
+        dataset,
+        ProjectionConfig(
+            projection_dim=8,
+            batch_size=32,
+            max_batch_tokens=2048,
+            seed=7,
+            compute_device="cpu",
+        ),
+        WindowConfig(
+            window_tokens=4,
+            window_stride=4,
+            max_skipped_tokens=0,
+            window_batch_size=512,
+            compute_device="cpu",
+        ),
+        PredictiveModelConfig(
+            latent_dim=4,
+            ridge=1e-2,
+            covariance_shrinkage=0.15,
+            tangent_variance=0.8,
+        ),
+        PredictiveStateAuditConfig(
+            folds=3,
+            horizons=(1,),
+            bootstrap=20,
+            permutations=9,
+            length_match_ratio=1.0,
+            seed=5,
+            verbose=False,
+        ),
+    )
+
+    assert report["meta"]["analysis_tier"] == "exploratory_legacy_state_only"
+    assert report["meta"]["primary_channel"] == "raw"
+    assert report["decision_gate"]["checks"]["exact_lexical_control_available"] is False
+    assert report["decision_gate"]["passes"] is False
+    names = packed["score_names"].tolist()
+    token_residual = packed["scores"][:, names.index(
+        "predictive.token_residual.mahalanobis_mean"
+    )]
+    assert not np.any(np.isfinite(token_residual))
+    assert np.any(np.isfinite(packed["scores"][:, names.index(
+        "predictive.raw.mahalanobis_mean"
+    )]))
+
+
 def test_transition_builder_rejects_unobserved_token_gap() -> None:
     sequence = np.arange(16, dtype=np.float32).reshape(8, 2)
     token_positions = np.asarray([0, 1, 2, 3, 20, 21, 22, 23], dtype=np.int64)
