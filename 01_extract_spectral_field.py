@@ -44,6 +44,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 
+from prompt_control_flow.data_contract import DATA_CONTRACT_VERSION
 from utils import (
     step_layer_spectral_summary,
     step_layer_cim_summary,
@@ -415,7 +416,7 @@ def extract_spectral_field(
     #   committal = p(1-p), p = prob of the actual token t   committal aleatoric
     # Computed from the SAME forward pass (no extra memory / no output_logits in generate),
     # vectorised over the response range -> one (R, V) tensor per chain, freed immediately.
-    tok_ent = tok_com = None
+    tok_ent = tok_com = tok_chosen_logp = tok_margin = tok_top5_mass = None
     if step_vectors and token_uncertainty and logits is not None and len(safe) > 0:
         import torch
         a0 = max(1, int(safe[0][1])); b1 = int(safe[-1][2])
@@ -425,11 +426,18 @@ def extract_spectral_field(
             lp = torch.log_softmax(sub, dim=-1); p = lp.exp()
             ent = -(p * lp).sum(-1)                                 # (R,)
             tgt = encoding["input_ids"][0].index_select(0, pos)     # actual next tokens
-            ptok = p.gather(-1, tgt.view(-1, 1)).squeeze(-1)
+            chosen_lp = lp.gather(-1, tgt.view(-1, 1)).squeeze(-1)
+            ptok = chosen_lp.exp()
             com = ptok * (1 - ptok)
+            top_logits = torch.topk(sub, k=2, dim=-1).values
+            margin = top_logits[:, 0] - top_logits[:, 1]
+            top5_mass = torch.topk(p, k=5, dim=-1).values.sum(dim=-1)
             tok_ent = ent.detach().cpu().numpy().astype(np.float32)
             tok_com = com.detach().cpu().numpy().astype(np.float32)
-            del sub, lp, p
+            tok_chosen_logp = chosen_lp.detach().cpu().numpy().astype(np.float32)
+            tok_margin = margin.detach().cpu().numpy().astype(np.float32)
+            tok_top5_mass = top5_mass.detach().cpu().numpy().astype(np.float32)
+            del sub, lp, p, chosen_lp, top_logits, margin, top5_mass
 
     if store_geometry and geom_mu is not None:
         GEOM = {"mu": geom_mu, "eigvals": geom_eigvals, "eigvecs": geom_eigvecs}
@@ -463,6 +471,9 @@ def extract_spectral_field(
         if tok_ent is not None:
             SV["tok_entropy"] = tok_ent
             SV["tok_committal"] = tok_com
+            SV["tok_chosen_logprob"] = tok_chosen_logp
+            SV["tok_logit_margin"] = tok_margin
+            SV["tok_top5_mass"] = tok_top5_mass
             SV["tok_token_range"] = np.asarray([a0, b1 + 1], dtype=np.int32)
             trace["token_uncertainty_token_range"] = (int(a0), int(b1 + 1))
     elif CLOUDS is not None:
@@ -555,8 +566,17 @@ def main():
                              "(fp16) per (step,layer,mode), so participation can be "
                              "re-normalized (raw / healthy-standardized / whitened) "
                              "in analysis WITHOUT re-running the model. Storage ~ "
-                             "n_chains x T x L x d x 2 bytes per mode; restrict with "
-                             "--sv_modes step_exp to keep it small.")
+                              "n_chains x T x L x d x 2 bytes per mode; restrict with "
+                              "--sv_modes step_exp to keep it small.")
+    parser.add_argument(
+        "--store_token_outputs",
+        action="store_true",
+        help=(
+            "Store compact token-aligned output summaries (entropy, realized-token "
+            "log-probability, top-1/top-2 margin, and top-5 mass). Requires "
+            "--step_vectors; full vocabulary logits are not saved."
+        ),
+    )
     parser.add_argument("--store_prompt_hidden", action="store_true",
                         help="Store the exact rendered-prompt hidden span (fp16) "
                              "at --prompt_hidden_layers for semantic anchors.")
@@ -571,6 +591,8 @@ def main():
                         help="Comma-separated hidden-state indices stored as "
                              "raw token clouds when --store_clouds is enabled.")
     args = parser.parse_args()
+    if args.store_token_outputs and not args.step_vectors:
+        parser.error("--store_token_outputs requires --step_vectors")
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 
@@ -655,6 +677,7 @@ def main():
                     prompt_hidden_layer_indices=prompt_hidden_layers,
                     store_clouds=args.store_clouds,
                     cloud_layer_indices=cloud_layers,
+                    token_uncertainty=args.store_token_outputs,
                 )
             except TokenAlignmentError:
                 # Trace corruption is a pipeline invariant violation, not a
@@ -685,7 +708,11 @@ def main():
             rows.append({
                 "id": str(ex.get("id", len(rows))),
                 "problem": str(ex.get("problem", "")),
+                "generator": str(ex.get("generator", "")),
                 "label": mapped_label,
+                "final_answer_correct": int(
+                    bool(ex.get("final_answer_correct", False))
+                ),
                 "n_steps": int(M_D.shape[0]),
                 "steps_text": np.array([steps[int(k)] for k in kept_steps], dtype=object),
                 "M_D": M_D.astype(np.float32),
@@ -710,9 +737,16 @@ def main():
     save_dict = dict(
         ids=np.array([r["id"] for r in rows], dtype=object),
         problems=np.array([r["problem"] for r in rows], dtype=object),
+        problem_ids=np.array([r["problem"] for r in rows], dtype=object),
+        sample_idx=np.zeros(len(rows), dtype=np.int32),
         labels=np.array([r["label"] for r in rows], dtype=np.int32),
         gold_error_step=np.array([r["label"] for r in rows], dtype=np.int32),
+        process_correct=np.array([r["label"] < 0 for r in rows], dtype=np.int32),
+        final_answer_correct=np.array(
+            [r["final_answer_correct"] for r in rows], dtype=np.int32
+        ),
         is_correct=np.array([r["label"] < 0 for r in rows], dtype=np.int32),
+        source_generators=np.array([r["generator"] for r in rows], dtype=object),
         n_steps=np.array([r["n_steps"] for r in rows], dtype=np.int32),
         steps_text=np.array([r["steps_text"] for r in rows], dtype=object),
         M_D=np.array([r["M_D"] for r in rows], dtype=object),
@@ -726,6 +760,13 @@ def main():
         rank_mode=np.array(args.rank_mode),
         rank_topk=np.array(args.rank_topk),
         rank_energy_threshold=np.array(args.rank_energy_threshold),
+        data_contract_version=np.array(DATA_CONTRACT_VERSION),
+        trace_semantics=np.array("benchmark_observer_teacher_forcing"),
+        prompt_provenance=np.array("fixed_plain_problem_solution_observer_prompt"),
+        response_provenance=np.array("processbench_reformatted_steps_double_newline"),
+        original_generation_trace_available=np.array(False),
+        is_correct_semantics=np.array("process_correct"),
+        label_semantics=np.array("gold_error_step_processbench"),
     )
     # Shared exact-generation/teacher-forcing trace schema. This records the
     # actual no-special-token model input, offsets, question/response spans,
@@ -740,6 +781,12 @@ def main():
         "torch_dtype": str(dtype),
         "device": str(device),
         "source_mode": "teacher_forced_processbench",
+        "trace_semantics": "benchmark_observer_teacher_forcing",
+        "prompt_provenance": "fixed_plain_problem_solution_observer_prompt",
+        "response_provenance": "processbench_reformatted_steps_double_newline",
+        "original_generation_prompt_available": False,
+        "original_generation_token_trace_available": False,
+        "label_semantics": "gold_error_step_processbench",
         "do_sample": False,
         "seed": int(args.seed),
         "max_seq_len": int(args.max_seq_len),
@@ -798,6 +845,25 @@ def main():
                     [r["SV"]["ae"][m] if r["SV"] else None for r in rows], dtype=object)
             save_dict["sv_out_entropy"] = np.array(
                 [r["SV"]["out_entropy"] if r["SV"] else None for r in rows], dtype=object)
+            if rows[0]["SV"].get("tok_entropy") is not None:
+                save_dict["token_output_summary_schema"] = np.array(
+                    "compact_token_output_v1"
+                )
+                save_dict["sv_tok_entropy"] = np.array(
+                    [r["SV"].get("tok_entropy") for r in rows], dtype=object
+                )
+                save_dict["sv_tok_committal"] = np.array(
+                    [r["SV"].get("tok_committal") for r in rows], dtype=object
+                )
+                save_dict["chosen_token_logprobs"] = np.array(
+                    [r["SV"].get("tok_chosen_logprob") for r in rows], dtype=object
+                )
+                save_dict["top1_top2_margin"] = np.array(
+                    [r["SV"].get("tok_logit_margin") for r in rows], dtype=object
+                )
+                save_dict["top5_mass"] = np.array(
+                    [r["SV"].get("tok_top5_mass") for r in rows], dtype=object
+                )
             # raw step vectors (fp16), for post-hoc re-normalization in analysis
             if args.store_vectors and rows[0]["SV"].get("vec") is not None:
                 save_dict["sv_vectors_stored"] = np.array(True)

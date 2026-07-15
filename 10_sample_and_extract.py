@@ -75,6 +75,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 
+from prompt_control_flow.data_contract import DATA_CONTRACT_VERSION
 from utils.step_boundaries import (
     TokenAlignmentError,
     build_exact_trace_alignment,
@@ -438,10 +439,10 @@ def main():
                     help="comma list of layer indices to store token clouds for "
                          "(only with --store_clouds). Default a single mid layer.")
     ap.add_argument("--store_token_uncertainty", action="store_true",
-                    help="capture per-generated-token uncertainty (entropy + committal "
-                         "p(1-p)) from generation logits, for the uncertainty-trace-profile "
-                         "analysis (33/34). Stores sv_tok_entropy / sv_tok_committal "
-                         "(fp32, one variable-length array per kept chain).")
+                    help="capture compact token-aligned output summaries from the "
+                         "teacher-forcing logits: entropy, realized-token probability, "
+                         "realized-token log-probability, top-1/top-2 margin, and top-5 "
+                         "mass. Full vocabulary logits are not stored.")
     ap.add_argument("--output", default="data/gsm8k_multisample_sv.npz")
     args = ap.parse_args()
 
@@ -636,6 +637,11 @@ def main():
                 "kept_steps": np.asarray(kept_steps, dtype=np.int32),
                 "tok_entropy": (SV.get("tok_entropy") if SV else None),
                 "tok_committal": (SV.get("tok_committal") if SV else None),
+                "tok_chosen_logprob": (
+                    SV.get("tok_chosen_logprob") if SV else None
+                ),
+                "tok_logit_margin": (SV.get("tok_logit_margin") if SV else None),
+                "tok_top5_mass": (SV.get("tok_top5_mass") if SV else None),
                 "SV": SV,
                 "TRACE": TRACE,
             })
@@ -650,6 +656,10 @@ def main():
         problem_ids=np.array([r["problem_id"] for r in rows], dtype=np.int32),
         sample_idx=np.array([r["sample_idx"] for r in rows], dtype=np.int32),
         is_correct=np.array([r["is_correct"] for r in rows], dtype=np.int32),
+        final_answer_correct=np.array(
+            [r["is_correct"] for r in rows], dtype=np.int32
+        ),
+        process_correct=np.full(len(rows), -1, dtype=np.int8),
         # NEW: strict label (also requires '####' format) + format-fail flag +
         # parser path. Lets downstream scripts rerun with either label policy.
         is_correct_strict=np.array([r["is_correct_strict"] for r in rows], dtype=np.int32),
@@ -669,9 +679,17 @@ def main():
         step_split=np.array(args.step_split),
         prompt_style=np.array(args.prompt_style),
         model_name=np.array(args.model),
+        source_generators=np.full(len(rows), args.model, dtype=object),
         dataset=np.array(f"{args.dataset_format}:{args.dataset}/{args.subset}"),
         whitened=np.array(whiten is not None),
         whiten_baseline=np.array(args.whiten_baseline or ""),
+        data_contract_version=np.array(DATA_CONTRACT_VERSION),
+        trace_semantics=np.array("generation_matched_teacher_forcing"),
+        prompt_provenance=np.array("stored_apply_chat_template_generation_prompt"),
+        response_provenance=np.array("same_checkpoint_sampled_generation"),
+        original_generation_trace_available=np.array(True),
+        is_correct_semantics=np.array("final_answer_correct_lenient"),
+        label_semantics=np.array("automatic_final_answer_numeric_match"),
     )
     save.update(trace_records_to_npz([r["TRACE"] for r in rows]))
     model_sampling_meta = {
@@ -683,6 +701,12 @@ def main():
         "torch_dtype": str(dtype),
         "device": str(device),
         "source_mode": "sampled_generation_then_exact_teacher_forcing",
+        "trace_semantics": "generation_matched_teacher_forcing",
+        "prompt_provenance": "stored_apply_chat_template_generation_prompt",
+        "response_provenance": "same_checkpoint_sampled_generation",
+        "generation_prompt_and_token_axis_exact": True,
+        "teacher_forcing_replay_of_own_generation": True,
+        "label_semantics": "automatic_final_answer_numeric_match",
         "do_sample": True,
         "temperature": float(args.temperature),
         "top_p": float(args.top_p),
@@ -740,8 +764,18 @@ def main():
     # per-token uncertainty traces (entropy + committal), for 33/34 profile analysis
     if args.store_token_uncertainty and rows[0].get("tok_entropy") is not None:
         save["tok_uncertainty_stored"] = np.array(True)
+        save["token_output_summary_schema"] = np.array("compact_token_output_v1")
         save["sv_tok_entropy"] = np.array([r["tok_entropy"] for r in rows], dtype=object)
         save["sv_tok_committal"] = np.array([r["tok_committal"] for r in rows], dtype=object)
+        save["chosen_token_logprobs"] = np.array(
+            [r["tok_chosen_logprob"] for r in rows], dtype=object
+        )
+        save["top1_top2_margin"] = np.array(
+            [r["tok_logit_margin"] for r in rows], dtype=object
+        )
+        save["top5_mass"] = np.array(
+            [r["tok_top5_mass"] for r in rows], dtype=object
+        )
     else:
         save["tok_uncertainty_stored"] = np.array(False)
 

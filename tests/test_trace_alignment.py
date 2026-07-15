@@ -82,6 +82,15 @@ class TraceAlignmentTest(unittest.TestCase):
         np.testing.assert_array_equal(payload["step_token_ranges"][0], expected)
         self.assertEqual(payload["time_axis_kind"].item(), "kept_step_index")
         self.assertFalse(bool(payload["trace_token_add_special_tokens"]))
+        self.assertEqual(
+            payload["hidden_state_token_semantics"].item(),
+            "h_i_after_reading_token_i",
+        )
+        self.assertEqual(
+            payload["logit_prediction_semantics"].item(),
+            "logits_i_predict_token_i_plus_1",
+        )
+        self.assertEqual(int(payload["step_prediction_position_shift"]), -1)
 
     def test_prompt_token_mismatch_fails_fast(self):
         wrong = self.tok.ids(self.prompt)

@@ -36,6 +36,7 @@ import torch
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from prompt_control_flow.data_contract import DATA_CONTRACT_VERSION
 from utils.step_boundaries import find_step_token_ranges
 from utils.step_vector import step_vector
 from utils.spectral import step_layer_spectral_summary, cim_tle_intrinsic_dim
@@ -107,6 +108,7 @@ def _pb_record(d, subset, n):
     if len(steps) < 3:
         return None
     correct = bool(d.get("final_answer_correct", d.get("label", 0) == -1))
+    gold_error_step = int(d.get("label", -1))
     return {
         "id": str(d.get("id", f"{subset}-{n}")),
         "source": "processbench",
@@ -117,8 +119,11 @@ def _pb_record(d, subset, n):
         "steps_text": steps,
         "is_correct": int(correct),
         "is_correct_strict": int(correct),
+        "final_answer_correct": int(correct),
+        "process_correct": int(gold_error_step < 0),
         "format_ok": 1,
-        "gold_error_step": int(d.get("label", -1)),
+        "gold_error_step": gold_error_step,
+        "source_generator": str(d.get("generator", "")),
         "gold_answer": float("nan"),
         "pred_answer": float("nan"),
     }
@@ -225,6 +230,9 @@ def iter_sampled(npz_path, problems, limit=None):
     fok = z["format_ok"] if "format_ok" in z.files else np.ones(len(pids), int)
     gold = z["gold_answers"] if "gold_answers" in z.files else np.full(len(pids), np.nan)
     pred = z["pred_answers"] if "pred_answers" in z.files else np.full(len(pids), np.nan)
+    source_model = (
+        str(np.asarray(z["model_name"]).item()) if "model_name" in z.files else ""
+    )
     maxpid = int(np.max(pids)) if len(pids) else -1
     if maxpid >= len(problems):
         print(f"  WARN: max problem_id {maxpid} >= #reconstructed problems "
@@ -250,8 +258,11 @@ def iter_sampled(npz_path, problems, limit=None):
             "steps_text": steps,
             "is_correct": int(isc[i]),
             "is_correct_strict": int(iscs[i]),
+            "final_answer_correct": int(isc[i]),
+            "process_correct": -1,
             "format_ok": int(fok[i]),
-            "gold_error_step": -1,
+            "gold_error_step": None,
+            "source_generator": source_model,
             "gold_answer": float(gold[i]),
             "pred_answer": float(pred[i]),
         }
@@ -775,7 +786,11 @@ def main():
         is_correct=np.array([r["is_correct"] for r in rows], dtype=np.int32),
         is_correct_strict=np.array([r["is_correct_strict"] for r in rows], dtype=np.int32),
         format_ok=np.array([r["format_ok"] for r in rows], dtype=np.int32),
-        gold_error_step=np.array([r["gold_error_step"] for r in rows], dtype=np.int32),
+        process_correct=np.array([r["process_correct"] for r in rows], dtype=np.int8),
+        final_answer_correct=np.array(
+            [r["final_answer_correct"] for r in rows], dtype=np.int8
+        ),
+        source_generators=np.array([r["source_generator"] for r in rows], dtype=object),
         gold_answers=np.array([r["gold_answer"] for r in rows], dtype=np.float64),
         pred_answers=np.array([r["pred_answer"] for r in rows], dtype=np.float64),
         n_steps=np.array([r["n_steps"] for r in rows], dtype=np.int32),
@@ -839,7 +854,30 @@ def main():
         token_geom_stored=np.array(not args.no_token_geom),
         source_tag=np.array(args.source),
         pb_subset=np.array(args.pb_subset),
+        data_contract_version=np.array(DATA_CONTRACT_VERSION),
+        trace_semantics=np.array(
+            "legacy_benchmark_observer_states_without_exact_token_axis"
+            if args.source == "processbench"
+            else "legacy_same_problem_states_without_exact_token_axis"
+        ),
+        prompt_provenance=np.array("fixed_plain_problem_solution_observer_prompt"),
+        response_provenance=np.array(
+            "processbench_reformatted_steps_single_newline"
+            if args.source == "processbench"
+            else "decoded_sampled_response_retokenized"
+        ),
+        original_generation_trace_available=np.array(False),
+        is_correct_semantics=np.array("final_answer_correct"),
+        label_semantics=np.array(
+            "gold_error_step_processbench_and_final_answer_correct"
+            if args.source == "processbench"
+            else "automatic_final_answer_correct_only"
+        ),
     )
+    if all(r["gold_error_step"] is not None for r in rows):
+        save["gold_error_step"] = np.array(
+            [r["gold_error_step"] for r in rows], dtype=np.int32
+        )
     np.savez(args.output, **save)
     print(f"\nKept {n_kept}/{n_seen} chains.")
     print(f"  correct(strict): {int(save['is_correct_strict'].sum())}; "

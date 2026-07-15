@@ -1,5 +1,10 @@
 # Prompt-Controlled Residual Flow
 
+Data provenance, label semantics, teacher-forcing alignment, and the distinction
+between observer traces and generation-matched self traces are defined in
+[DATA_CONTRACT_REASONING_TRACES.md](DATA_CONTRACT_REASONING_TRACES.md). Run
+`audit_reasoning_data.py` before selecting an artifact for a new experiment.
+
 The repository-wide experiment history, including negative results, superseded
 claims, evidence grades, and the current frozen conclusion, is maintained in
 [`../EXPERIMENT_LEDGER.md`](../EXPERIMENT_LEDGER.md).

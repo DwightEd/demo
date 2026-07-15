@@ -1,5 +1,6 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "data_contract": "prompt_control_flow/DATA_CONTRACT_REASONING_TRACES.md",
   "canonical_artifacts": {
     "same_problem_multisample_raw_hidden": {
       "path": "data/gsm8k_v2_custom.npz",
@@ -7,6 +8,12 @@
         "same-problem donor fields",
         "raw token hidden-state geometry",
         "causal residual intervention pilot"
+      ],
+      "evidence_tier": "legacy_same_problem_trace",
+      "limitations": [
+        "no exact rendered generation prompt or input token axis",
+        "final-answer labels only; no human first-error labels",
+        "not confirmatory for online self-state or causal intervention"
       ],
       "required_keys": [
         "problem_ids",
@@ -36,9 +43,41 @@
         "cross-dataset replication",
         "sparse step hidden-state geometry"
       ],
+      "evidence_tier": "legacy_benchmark_observer_trace",
+      "label_contract": {
+        "process_label": "gold_error_step",
+        "legacy_is_correct": "final_answer_correct",
+        "warning": "never use legacy is_correct as a process-correct label"
+      },
       "not_valid_for": [
         "same-problem donor fields",
-        "exact causal replay without a separate prompt trace"
+        "exact causal replay without a separate prompt trace",
+        "original solution-generator internal states"
+      ]
+    },
+    "generation_matched_same_problem_trace": {
+      "writer": "10_sample_and_extract.py",
+      "evidence_tier": "generation_matched_self_trace",
+      "required_keys": [
+        "data_contract_version",
+        "trace_semantics",
+        "prompts",
+        "generated_token_ids",
+        "input_ids",
+        "attention_mask",
+        "step_token_ranges",
+        "problem_ids",
+        "sample_idx",
+        "final_answer_correct",
+        "process_correct"
+      ],
+      "roles": [
+        "same-problem difficulty-controlled analysis",
+        "generation-matched self-state geometry",
+        "causal intervention after alignment gates"
+      ],
+      "limitations": [
+        "process_correct is unknown until a separate process annotation is added"
       ]
     }
   }

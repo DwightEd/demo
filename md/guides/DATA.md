@@ -1,5 +1,13 @@
 # SMCD / NTS data map (box: `/gz-data/research/demo/data/`)
 
+## Canonical reasoning-trace contract
+
+Before using any old or newly extracted artifact, read and run the contract in
+[`prompt_control_flow/DATA_CONTRACT_REASONING_TRACES.md`](../../prompt_control_flow/DATA_CONTRACT_REASONING_TRACES.md).
+It separates ProcessBench observer traces, same-problem sampled trajectories,
+and exact generation-matched traces; it also fixes the process-label versus
+final-answer-label ambiguity and the one-token causal indexing convention.
+
 ## 2026-07-15 causal pullback flow replay
 
 Exploratory same-problem input:
