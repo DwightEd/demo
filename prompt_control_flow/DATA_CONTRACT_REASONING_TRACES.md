@@ -51,15 +51,16 @@ The last column is why `final_answer_correct` must never substitute for
 
 ```bash
 python audit_reasoning_data.py \
-  data/hf_datasets/ProcessBench/gsm8k.jsonl \
-  data/hf_datasets/ProcessBench/math.jsonl \
-  data/hf_datasets/ProcessBench/olympiadbench.jsonl \
-  data/hf_datasets/ProcessBench/omnimath.jsonl \
+  data/hf_datasets/ProcessBench/gsm8k.json \
+  data/hf_datasets/ProcessBench/math.json \
+  data/hf_datasets/ProcessBench/olympiadbench.json \
+  data/hf_datasets/ProcessBench/omnimath.json \
   --strict_source \
   --output outputs/data_audit/processbench_sources.json
 ```
 
-Paths can point to the canonical raw JSONL directory on the machine; the local
+These `.json` names match the canonical files in `Qwen/ProcessBench`. Paths may
+also point to a compatible raw JSONL directory on another machine; the local
 checkout currently uses `../data/processbench`.
 
 ## 3. Teacher forcing and token semantics
