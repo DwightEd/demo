@@ -28,7 +28,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--vector_key", default="sv_vec_step_exp")
+    parser.add_argument(
+        "--vector_key",
+        default="sv_vec_step_exp",
+        help=(
+            "Legacy step-vector key used only to align rows and semantic steps. "
+            "Residual interventions always pool raw sv_clouds; projected sv_vec_* "
+            "values are never injected into the model."
+        ),
+    )
     parser.add_argument("--layer", type=int, default=16)
     parser.add_argument(
         "--label_policy",
@@ -36,11 +44,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=("answer", "strict", "answer_format_ok", "processbench"),
     )
     parser.add_argument(
-        "--problem_source",
-        default="data/hf_datasets/ProcessBench",
-        help="Canonical ProcessBench source used only to reconstruct legacy prompts.",
+        "--problem_format",
+        default="auto",
+        choices=("auto", "gsm8k", "processbench"),
+        help="Legacy prompt source. auto reads the NPZ `dataset` provenance.",
     )
-    parser.add_argument("--problem_subset", default="gsm8k")
+    parser.add_argument(
+        "--problem_source",
+        default="",
+        help="Optional explicit HF/local source overriding NPZ provenance.",
+    )
+    parser.add_argument("--problem_subset", default="")
+    parser.add_argument("--problem_split", default="test")
     parser.add_argument("--prompt_style", default="")
     parser.add_argument(
         "--max_samples",
@@ -80,10 +95,12 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     from prompt_control_flow.causal_pullback import (
         CausalPullbackConfig,
-        load_ordered_processbench_questions,
+        load_ordered_problem_questions,
         load_pullback_source,
+        resolve_problem_source_spec,
         run_causal_pullback_extraction,
         source_preflight,
+        validate_problem_question_map,
     )
     from prompt_control_flow.causal_pullback.field import ConditionalFieldBank
 
@@ -121,13 +138,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         }
     )
     print(json.dumps(preflight, indent=2, ensure_ascii=False))
+    if not preflight["residual_intervention_ready"]:
+        raise SystemExit(
+            "Causal residual intervention requires raw sv_clouds pooled in the "
+            "model hidden dimension; projected sv_vec_* states are not valid."
+        )
     if eligible.size == 0:
         raise SystemExit(
             "No sample has enough same-problem correct donors under the selected "
             "label policy and --min_donors."
         )
-    if args.preflight:
-        return
     if source.model_name and not _identity_matches(source.model_name, args.model):
         if not args.allow_model_mismatch:
             raise SystemExit(
@@ -136,11 +156,57 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
 
     ordered_questions = None
+    problem_spec = None
     if preflight["legacy_problem_reconstruction_required"]:
-        ordered_questions = load_ordered_processbench_questions(
-            args.problem_source,
-            args.problem_subset,
+        problem_spec = resolve_problem_source_spec(
+            source.dataset_provenance,
+            dataset_format=args.problem_format,
+            path=args.problem_source,
+            subset=args.problem_subset,
+            split=args.problem_split,
         )
+        ordered_questions = load_ordered_problem_questions(problem_spec)
+        map_status = validate_problem_question_map(
+            source, ordered_questions, problem_spec
+        )
+        print(
+            json.dumps(
+                {"problem_source": problem_spec.as_dict(), **map_status},
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+
+    from transformers import AutoConfig
+
+    model_config = AutoConfig.from_pretrained(
+        args.model,
+        trust_remote_code=bool(args.trust_remote_code),
+    )
+    model_hidden_dim = int(
+        getattr(model_config, "hidden_size", getattr(model_config, "d_model", -1))
+    )
+    if model_hidden_dim <= 0:
+        raise SystemExit("Observer model config does not expose hidden_size or d_model.")
+    if int(source.dataset.hidden_dim) != model_hidden_dim:
+        raise SystemExit(
+            "Raw stored hidden dimension does not match observer residual width: "
+            f"stored={source.dataset.hidden_dim}, model={model_hidden_dim}. "
+            "Check --model, --layer, cloud_layers, and extraction provenance."
+        )
+    print(
+        json.dumps(
+            {
+                "observer_model": args.model,
+                "observer_hidden_dim": model_hidden_dim,
+                "stored_hidden_dim": int(source.dataset.hidden_dim),
+                "hidden_width_match": True,
+            },
+            indent=2,
+        )
+    )
+    if args.preflight:
+        return
 
     import torch
     from tqdm import tqdm

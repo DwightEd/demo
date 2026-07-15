@@ -200,6 +200,95 @@ def test_torch_step_exp_pool_matches_legacy_numpy_implementation() -> None:
     np.testing.assert_allclose(pooled, expected, atol=2e-6, rtol=2e-6)
 
 
+def test_pullback_source_pools_raw_hidden_clouds_not_projected_vectors(tmp_path) -> None:
+    pytest.importorskip("torch")
+    from prompt_control_flow.causal_pullback.data import load_pullback_source
+    from utils.step_vector import step_vector
+
+    rng = np.random.default_rng(29)
+    projected = np.empty(2, dtype=object)
+    clouds = np.empty(2, dtype=object)
+    sizes = np.empty(2, dtype=object)
+    steps = np.empty(2, dtype=object)
+    for index in range(2):
+        projected[index] = rng.normal(size=(2, 1, 5)).astype(np.float16)
+        clouds[index] = rng.normal(size=(5, 1, 7)).astype(np.float16)
+        sizes[index] = np.asarray([2, 3], dtype=np.int32)
+        steps[index] = ["first", "second"]
+    path = tmp_path / "multisample.npz"
+    np.savez_compressed(
+        path,
+        sv_vec_step_exp=projected,
+        layers_used=np.asarray([16]),
+        sv_clouds=clouds,
+        cloud_sizes=sizes,
+        cloud_layers=np.asarray([16]),
+        problem_ids=np.asarray([0, 0]),
+        sample_idx=np.asarray([0, 1]),
+        is_correct=np.asarray([1, 0]),
+        responses=np.asarray(["first\nsecond", "first\nsecond"], dtype=object),
+        steps_text=steps,
+        prompt_style=np.asarray("custom_zeroshot"),
+        model_name=np.asarray("toy"),
+        dataset=np.asarray("gsm8k:openai/gsm8k/main"),
+    )
+    source = load_pullback_source(
+        path,
+        vector_key="sv_vec_step_exp",
+        layer=16,
+        label_policy="answer",
+        max_samples=0,
+    )
+    assert source.dataset.hidden_dim == 7
+    assert source.dataset.vector_key == "sv_clouds:raw_hidden_step_exp"
+    assert source.state_source == "sv_clouds"
+    assert source.dataset_provenance == "gsm8k:openai/gsm8k/main"
+    assert source.dataset.trajectories[0].shape == (2, 1, 7)
+    expected = np.stack(
+        [
+            step_vector(clouds[0][:2, 0], mode="step_exp", l2_normalize=False),
+            step_vector(clouds[0][2:, 0], mode="step_exp", l2_normalize=False),
+        ]
+    )
+    np.testing.assert_allclose(
+        source.dataset.trajectories[0][:, 0], expected, atol=2e-4, rtol=2e-4
+    )
+
+
+def test_problem_source_resolution_uses_artifact_provenance() -> None:
+    from prompt_control_flow.causal_pullback.data import resolve_problem_source_spec
+
+    direct = resolve_problem_source_spec("gsm8k:openai/gsm8k/main")
+    assert direct.dataset_format == "gsm8k"
+    assert direct.path == "openai/gsm8k"
+    assert direct.subset == "main"
+    assert direct.split == "test"
+    process = resolve_problem_source_spec(
+        "processbench:data/hf_datasets/ProcessBench/gsm8k"
+    )
+    assert process.dataset_format == "processbench"
+    assert process.path == "data/hf_datasets/ProcessBench"
+    assert process.subset == "gsm8k"
+
+
+def test_hidden_layout_canonicalization_is_explicit() -> None:
+    torch = pytest.importorskip("torch")
+    from prompt_control_flow.causal_pullback.replay import _canonical_hidden_layout
+
+    standard = torch.randn(2, 7, 11)
+    canonical, layout = _canonical_hidden_layout(
+        standard, batch=2, sequence=7, width=11, context="test"
+    )
+    assert layout == "batch_sequence_hidden"
+    assert canonical.shape == (2, 7, 11)
+    channel_first = standard.transpose(1, 2)
+    canonical, layout = _canonical_hidden_layout(
+        channel_first, batch=2, sequence=7, width=11, context="test"
+    )
+    assert layout == "batch_hidden_sequence"
+    torch.testing.assert_close(canonical, standard)
+
+
 def test_exact_trace_replay_does_not_require_prompt_reconstruction() -> None:
     pytest.importorskip("torch")
     from prompt_control_flow.causal_pullback.data import prepare_record_trace

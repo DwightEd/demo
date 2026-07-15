@@ -100,12 +100,43 @@ def _step_exp_pool(hidden: torch.Tensor, ranges: Sequence[tuple[int, int]]) -> t
 
 
 def _cosine_rows(first: torch.Tensor, second: torch.Tensor) -> np.ndarray:
+    if first.ndim != 2 or second.ndim != 2 or first.shape != second.shape:
+        raise ReplayAlignmentError(
+            "replay/stored step-state shape mismatch: "
+            f"replay={tuple(first.shape)}, stored={tuple(second.shape)}. "
+            "Residual interventions require raw sv_clouds in the model hidden "
+            "dimension; projected sv_vec_* coordinates are invalid."
+        )
     first = first.float()
     second = second.float()
     numerator = torch.sum(first * second, dim=-1)
     denominator = first.norm(dim=-1) * second.norm(dim=-1)
     value = numerator / denominator.clamp_min(EPS)
     return value.detach().cpu().numpy().astype(np.float32)
+
+
+def _canonical_hidden_layout(
+    hidden: torch.Tensor,
+    *,
+    batch: int,
+    sequence: int,
+    width: int,
+    context: str,
+) -> tuple[torch.Tensor, str]:
+    """Return hidden states as [batch, sequence, width] with an explicit layout."""
+
+    if hidden.ndim != 3 or int(hidden.shape[0]) != int(batch):
+        raise ReplayAlignmentError(
+            f"{context}: expected rank-3 hidden batch {batch}, got {tuple(hidden.shape)}"
+        )
+    if tuple(hidden.shape[1:]) == (int(sequence), int(width)):
+        return hidden, "batch_sequence_hidden"
+    if tuple(hidden.shape[1:]) == (int(width), int(sequence)):
+        return hidden.transpose(1, 2), "batch_hidden_sequence"
+    raise ReplayAlignmentError(
+        f"{context}: cannot identify hidden layout {tuple(hidden.shape)} using "
+        f"sequence={sequence}, hidden_width={width}"
+    )
 
 
 def _prediction_axis(
@@ -257,6 +288,7 @@ def _run_perturbed_backbone(
     base_scale: torch.Tensor,
     *,
     model,
+    hidden_width: int,
 ) -> torch.Tensor:
     batch = len(variants)
     variant_direction = torch.stack(
@@ -275,16 +307,28 @@ def _run_perturbed_backbone(
     )
 
     def hook(_module, _inputs, output):
-        hidden = output[0] if isinstance(output, tuple) else output
+        raw_hidden = output[0] if isinstance(output, tuple) else output
+        hidden, layout = _canonical_hidden_layout(
+            raw_hidden,
+            batch=batch,
+            sequence=int(input_ids.numel()),
+            width=int(hidden_width),
+            context="perturbed decoder hook",
+        )
         hidden = hidden.clone()
         row = torch.arange(batch, device=hidden.device)
         hidden[row, variant_position.to(hidden.device)] += (
             variant_direction.to(hidden.device, dtype=hidden.dtype)
             * variant_amplitude.to(hidden.device, dtype=hidden.dtype)[:, None]
         )
+        restored = (
+            hidden.transpose(1, 2)
+            if layout == "batch_hidden_sequence"
+            else hidden
+        )
         if isinstance(output, tuple):
-            return (hidden,) + output[1:]
-        return hidden
+            return (restored,) + output[1:]
+        return restored
 
     handle = layer_module.register_forward_hook(hook)
     try:
@@ -296,7 +340,14 @@ def _run_perturbed_backbone(
                 output_hidden_states=False,
                 return_dict=True,
             )
-        return output.last_hidden_state
+        final_hidden, _ = _canonical_hidden_layout(
+            output.last_hidden_state,
+            batch=batch,
+            sequence=int(input_ids.numel()),
+            width=int(hidden_width),
+            context="perturbed backbone output",
+        )
+        return final_hidden
     finally:
         handle.remove()
 
@@ -308,12 +359,21 @@ def _run_baseline_backbone(
     attention_mask: torch.Tensor,
     *,
     model,
-) -> tuple[Any, torch.Tensor]:
-    captured: list[torch.Tensor] = []
+    hidden_width: int,
+) -> tuple[Any, torch.Tensor, str, torch.Tensor, str]:
+    captured: list[tuple[torch.Tensor, str]] = []
 
     def capture(_module, _inputs, output):
-        hidden = output[0] if isinstance(output, tuple) else output
-        captured.append(hidden)
+        raw_hidden = output[0] if isinstance(output, tuple) else output
+        captured.append(
+            _canonical_hidden_layout(
+                raw_hidden,
+                batch=1,
+                sequence=int(input_ids.numel()),
+                width=int(hidden_width),
+                context="baseline decoder hook",
+            )
+        )
 
     handle = layer_module.register_forward_hook(capture)
     try:
@@ -331,7 +391,15 @@ def _run_baseline_backbone(
         raise RuntimeError(
             f"target decoder hook fired {len(captured)} times during baseline replay"
         )
-    return output, captured[0]
+    final_hidden, final_layout = _canonical_hidden_layout(
+        output.last_hidden_state,
+        batch=1,
+        sequence=int(input_ids.numel()),
+        width=int(hidden_width),
+        context="baseline backbone output",
+    )
+    captured_hidden, captured_layout = captured[0]
+    return output, captured_hidden, captured_layout, final_hidden, final_layout
 
 
 @torch.inference_mode()
@@ -358,12 +426,18 @@ def compute_causal_pullback(
     )
     ranges = [(int(a), int(b)) for a, b in trace["step_token_ranges"]]
     n_steps = len(ranges)
-    if n_steps != int(np.asarray(stored_step_states).shape[0]):
+    stored_array = np.asarray(stored_step_states)
+    if stored_array.ndim != 2:
+        raise ReplayAlignmentError(
+            f"stored step states must be [step, hidden], got {stored_array.shape}"
+        )
+    if n_steps != int(stored_array.shape[0]):
         raise ReplayAlignmentError(
             f"replay has {n_steps} steps but stored trajectory has "
-            f"{np.asarray(stored_step_states).shape[0]}"
+            f"{stored_array.shape[0]}"
         )
-    witnesses.validate(int(np.asarray(stored_step_states).shape[-1]))
+    hidden_width = int(stored_array.shape[-1])
+    witnesses.validate(hidden_width)
     if witnesses.n_transitions != n_steps - 1:
         raise ReplayAlignmentError("witness transition count does not match replay steps")
 
@@ -373,15 +447,22 @@ def compute_causal_pullback(
             f"hidden-state layer {cfg.layer} exceeds decoder depth {len(layers)}"
         )
     layer_module = layers[cfg.layer - 1]
-    baseline, captured_layer = _run_baseline_backbone(
+    (
+        baseline,
+        captured_layer,
+        captured_layout,
+        baseline_final,
+        final_layout,
+    ) = _run_baseline_backbone(
         backbone,
         layer_module,
         input_ids,
         attention_mask,
         model=model,
+        hidden_width=hidden_width,
     )
     layer_hidden = captured_layer[0]
-    final_hidden = baseline.last_hidden_state[0]
+    final_hidden = baseline_final[0]
     replay_step_states = _step_exp_pool(layer_hidden, ranges)
     stored = torch.as_tensor(
         stored_step_states, dtype=replay_step_states.dtype, device=device
@@ -464,6 +545,7 @@ def compute_causal_pullback(
             source_positions,
             base_scale,
             model=model,
+            hidden_width=hidden_width,
         )
         compared = _compare_variant_hidden(
             model,
@@ -541,8 +623,19 @@ def compute_causal_pullback(
             "transition_t_is_observed_at_step_t_plus_1_and_scores_only_steps_after_t_plus_1"
         ),
         "source_hidden_state_index": int(cfg.layer),
+        "captured_layer_layout": captured_layout,
+        "final_hidden_layout": final_layout,
+        "intervention_hidden_width": hidden_width,
+        "stored_state_source": "raw_hidden_step_exp_from_sv_clouds",
     }
-    del baseline, captured_layer, layer_hidden, final_hidden, baseline_logp
+    del (
+        baseline,
+        baseline_final,
+        captured_layer,
+        layer_hidden,
+        final_hidden,
+        baseline_logp,
+    )
     return PullbackReplayResult(
         replay_cosine=replay_cosine,
         baseline_step_features=baseline_features,

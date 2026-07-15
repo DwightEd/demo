@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "canonical_artifacts": {
+    "same_problem_multisample_raw_hidden": {
+      "path": "data/gsm8k_v2_custom.npz",
+      "roles": [
+        "same-problem donor fields",
+        "raw token hidden-state geometry",
+        "causal residual intervention pilot"
+      ],
+      "required_keys": [
+        "problem_ids",
+        "sample_idx",
+        "is_correct",
+        "responses",
+        "steps_text",
+        "sv_clouds",
+        "cloud_sizes",
+        "cloud_layers"
+      ],
+      "representation_contract": {
+        "intervention_state": "sv_clouds pooled by cloud_sizes at cloud_layers=16",
+        "alignment_only": "sv_vec_step_exp",
+        "forbidden_intervention_state": "sv_vec_step_exp because legacy files may use a projected reasoning basis"
+      }
+    },
+    "processbench_cross_problem_features": {
+      "paths": [
+        "data/features/full_gsm8k.npz",
+        "data/features/full_math.npz",
+        "data/features/full_omnimath.npz"
+      ],
+      "roles": [
+        "first-error localization",
+        "cross-dataset replication",
+        "sparse step hidden-state geometry"
+      ],
+      "not_valid_for": [
+        "same-problem donor fields",
+        "exact causal replay without a separate prompt trace"
+      ]
+    }
+  }
+}

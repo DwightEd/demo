@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -281,10 +282,20 @@ def load_flow_trajectory_dataset(
         "model_name": _scalar_text(z["model_name"] if "model_name" in z.files else None),
         "prompt_style": _scalar_text(z["prompt_style"] if "prompt_style" in z.files else None),
         "step_split": _scalar_text(z["step_split"] if "step_split" in z.files else None),
+        "dataset_provenance": _scalar_text(
+            z["dataset"] if "dataset" in z.files else None
+        ),
         "available_layer_ids": all_layer_ids.tolist(),
         "selected_layer_positions": layer_positions.tolist(),
         "selected_layer_ids": selected_layer_ids.tolist(),
     }
+    if "model_sampling_metadata_json" in z.files:
+        try:
+            metadata["model_sampling_metadata"] = json.loads(
+                _scalar_text(z["model_sampling_metadata_json"])
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata["model_sampling_metadata"] = {}
     return FlowTrajectoryDataset(
         source_path=str(path.resolve()),
         vector_key=key,

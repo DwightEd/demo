@@ -207,6 +207,16 @@ The implementation batches perturbation variants on GPU and chunks vocabulary
 projection across response-token positions. It never saves full attention or
 full logits.
 
+### Representation contract
+
+The intervention direction must live in the observer model's ambient residual
+coordinates. For the legacy same-problem artifact, the implementation pools
+raw layer-16 token states from `sv_clouds` using `cloud_sizes`. The
+`sv_vec_step_exp` key is used only to align rows and semantic steps because it
+may already be projected into a lower-dimensional reasoning basis. Injecting
+that projected vector into the raw residual stream is undefined and is rejected
+by the preflight hidden-width check.
+
 ## 9. Remote Commands
 
 Preflight does not load the model:

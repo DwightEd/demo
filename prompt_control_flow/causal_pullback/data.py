@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from ..data import ChainRecord, load_chain_records
-from ..flow_signature_data import FlowTrajectoryDataset, load_flow_trajectory_dataset
+from ..flow_signature_data import FlowTrajectoryDataset
 from ..teacher_forcing import prepare_teacher_forcing_trace
 
 
@@ -26,6 +26,26 @@ class PullbackSource:
     records_by_original_index: dict[int, ChainRecord]
     prompt_style: str
     model_name: str
+    dataset_provenance: str
+    state_source: str
+
+
+@dataclass(frozen=True)
+class ProblemSourceSpec:
+    dataset_format: str
+    path: str
+    subset: str
+    split: str
+    provenance: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "dataset_format": self.dataset_format,
+            "path": self.path,
+            "subset": self.subset,
+            "split": self.split,
+            "provenance": self.provenance,
+        }
 
 
 def _number(value: str | None) -> float | None:
@@ -89,6 +109,212 @@ def load_ordered_processbench_questions(
     return list(problems)
 
 
+def load_ordered_gsm8k_questions(
+    path: str,
+    subset: str,
+    split: str,
+) -> list[str]:
+    """Reproduce the ordered direct-GSM8K problem axis used during sampling."""
+
+    from datasets import load_dataset
+
+    dataset = load_dataset(str(path), str(subset), split=str(split))
+    questions: list[str] = []
+    for example in dataset:
+        question = example.get("question")
+        answer = example.get("answer")
+        if question and _number(str(answer)) is not None:
+            questions.append(str(question))
+    return questions
+
+
+def _provenance_spec(value: str) -> ProblemSourceSpec | None:
+    text = str(value).strip().replace("\\", "/")
+    if ":" not in text:
+        return None
+    dataset_format, payload = text.split(":", 1)
+    dataset_format = dataset_format.strip().lower()
+    if dataset_format not in {"gsm8k", "processbench"} or "/" not in payload:
+        return None
+    path, subset = payload.rsplit("/", 1)
+    if not path or not subset:
+        return None
+    return ProblemSourceSpec(
+        dataset_format=dataset_format,
+        path=path,
+        subset=subset,
+        split="test",
+        provenance=text,
+    )
+
+
+def resolve_problem_source_spec(
+    provenance: str,
+    *,
+    dataset_format: str = "auto",
+    path: str = "",
+    subset: str = "",
+    split: str = "test",
+) -> ProblemSourceSpec:
+    """Resolve legacy prompt reconstruction without silently changing datasets."""
+
+    requested_format = str(dataset_format).strip().lower()
+    if requested_format not in {"auto", "gsm8k", "processbench"}:
+        raise ValueError(f"unknown problem dataset format {dataset_format!r}")
+    inferred = _provenance_spec(provenance)
+    if requested_format == "auto" and inferred is not None:
+        requested_format = inferred.dataset_format
+    if requested_format == "auto":
+        source_hint = str(path).replace("\\", "/").lower()
+        if "processbench" in source_hint:
+            requested_format = "processbench"
+        elif source_hint:
+            requested_format = "gsm8k"
+        else:
+            raise ValueError(
+                "legacy artifact has no parseable `dataset` provenance. Pass "
+                "--problem_format, --problem_source, and --problem_subset explicitly"
+            )
+    resolved_path = str(path).strip() or (inferred.path if inferred else "")
+    resolved_subset = str(subset).strip() or (inferred.subset if inferred else "")
+    if not resolved_path:
+        resolved_path = (
+            "data/hf_datasets/ProcessBench"
+            if requested_format == "processbench"
+            else "openai/gsm8k"
+        )
+    if not resolved_subset:
+        resolved_subset = "gsm8k" if requested_format == "processbench" else "main"
+    return ProblemSourceSpec(
+        dataset_format=requested_format,
+        path=resolved_path,
+        subset=resolved_subset,
+        split=str(split),
+        provenance=str(provenance),
+    )
+
+
+def load_ordered_problem_questions(spec: ProblemSourceSpec) -> list[str]:
+    if spec.dataset_format == "processbench":
+        return load_ordered_processbench_questions(spec.path, spec.subset)
+    if spec.dataset_format == "gsm8k":
+        return load_ordered_gsm8k_questions(spec.path, spec.subset, spec.split)
+    raise ValueError(f"unsupported problem source format {spec.dataset_format!r}")
+
+
+def validate_problem_question_map(
+    source: PullbackSource,
+    ordered_questions: list[str],
+    spec: ProblemSourceSpec,
+) -> dict[str, Any]:
+    required = []
+    for original in source.dataset.original_indices:
+        record = source.records_by_original_index[int(original)]
+        if (
+            record.exact_input_ids is None
+            and not record.rendered_prompt
+            and not record.problem
+        ):
+            required.append(int(record.problem_id))
+    if not required:
+        return {"required_problem_ids": 0, "question_map_size": len(ordered_questions)}
+    invalid = sorted({value for value in required if value < 0 or value >= len(ordered_questions)})
+    if invalid:
+        raise ValueError(
+            "reconstructed question map does not cover artifact problem IDs: "
+            f"missing={invalid[:10]}, max_required={max(required)}, "
+            f"map_size={len(ordered_questions)}, source={spec.as_dict()}. "
+            "The NPZ and question source are not the same extraction cohort."
+        )
+    return {
+        "required_problem_ids": len(set(required)),
+        "maximum_required_problem_id": max(required),
+        "question_map_size": len(ordered_questions),
+    }
+
+
+def _pool_raw_cloud_steps(cloud: np.ndarray, sizes: np.ndarray) -> np.ndarray:
+    """Pool raw token hidden states exactly like the replay step-exp operator."""
+
+    cloud = np.asarray(cloud, dtype=np.float32)
+    sizes = np.asarray(sizes, dtype=np.int64).reshape(-1)
+    if cloud.ndim != 2:
+        raise ValueError(f"expected raw token cloud [token, hidden], got {cloud.shape}")
+    if sizes.size == 0 or np.any(sizes <= 0) or int(sizes.sum()) != cloud.shape[0]:
+        raise ValueError("cloud_sizes does not partition the raw token cloud")
+    rows: list[np.ndarray] = []
+    start = 0
+    for width in sizes.tolist():
+        stop = start + int(width)
+        local = cloud[start:stop]
+        if int(width) == 1:
+            rows.append(local[0])
+        else:
+            position = np.linspace(0.0, 1.0, int(width), dtype=np.float32)
+            weight = np.exp(position - float(np.max(position)))
+            weight /= float(np.sum(weight))
+            rows.append(np.sum(local * weight[:, None], axis=0, dtype=np.float32))
+        start = stop
+    return np.stack(rows).astype(np.float32, copy=False)
+
+
+def _raw_hidden_dataset_from_clouds(
+    path: str | Path,
+    *,
+    vector_key: str,
+    layer: int,
+    label_policy: str,
+    max_samples: int,
+) -> FlowTrajectoryDataset:
+    from ..directional_consensus import load_directional_cloud_dataset
+
+    cloud = load_directional_cloud_dataset(
+        path,
+        vector_key=vector_key,
+        cloud_layers=str(int(layer)),
+        label_policy=label_policy,
+        max_samples=max_samples,
+    )
+    if cloud.cloud_layer_ids.tolist() != [int(layer)]:
+        raise ValueError(
+            f"raw token clouds do not contain requested layer {layer}; "
+            f"selected={cloud.cloud_layer_ids.tolist()}"
+        )
+    trajectories = []
+    for values, sizes in zip(cloud.clouds, cloud.step_sizes):
+        pooled = _pool_raw_cloud_steps(values[:, 0, :], sizes)
+        trajectories.append(np.ascontiguousarray(pooled[:, None, :]))
+    base = cloud.base
+    metadata = dict(base.metadata)
+    metadata.update(
+        {
+            "alignment_vector_key": base.vector_key,
+            "state_source": "sv_clouds",
+            "state_pooling": "raw_hidden_step_exp",
+            "state_representation": "raw_hidden_state",
+            "cloud_layer_ids": cloud.cloud_layer_ids.tolist(),
+            "cloud_hidden_dim": int(cloud.cloud_hidden_dim),
+        }
+    )
+    return FlowTrajectoryDataset(
+        source_path=base.source_path,
+        vector_key="sv_clouds:raw_hidden_step_exp",
+        trajectories=trajectories,
+        original_indices=base.original_indices.copy(),
+        problem_ids=base.problem_ids.copy(),
+        sample_idx=base.sample_idx.copy(),
+        y_error=base.y_error.copy(),
+        is_correct=base.is_correct.copy(),
+        n_steps=base.n_steps.copy(),
+        response_chars=base.response_chars.copy(),
+        layer_ids=cloud.cloud_layer_ids.copy(),
+        hidden_dim=int(cloud.cloud_hidden_dim),
+        label_policy=base.label_policy,
+        skipped={**base.skipped, **{f"cloud_{k}": v for k, v in cloud.skipped_clouds.items()}},
+        metadata=metadata,
+    )
+
+
 def build_legacy_rendered_prompt(
     tokenizer,
     question: str,
@@ -122,10 +348,13 @@ def load_pullback_source(
     label_policy: str,
     max_samples: int,
 ) -> PullbackSource:
-    dataset = load_flow_trajectory_dataset(
+    # Residual interventions require ambient model hidden states.  The legacy
+    # ``sv_vec_*`` arrays may live in a projected reasoning basis (467 dims in
+    # the canonical artifact) and are therefore alignment metadata only.
+    dataset = _raw_hidden_dataset_from_clouds(
         path,
         vector_key=vector_key,
-        layers=str(int(layer)),
+        layer=int(layer),
         label_policy=label_policy,
         max_samples=max_samples,
     )
@@ -143,6 +372,8 @@ def load_pullback_source(
         records_by_original_index=records_by_original,
         prompt_style=str(dataset.metadata.get("prompt_style", "")),
         model_name=str(dataset.metadata.get("model_name", "")),
+        dataset_provenance=str(dataset.metadata.get("dataset_provenance", "")),
+        state_source=str(dataset.metadata.get("state_source", "")),
     )
 
 
@@ -170,12 +401,26 @@ def source_preflight(source: PullbackSource) -> dict[str, Any]:
         "hidden_dim": int(source.dataset.hidden_dim),
         "prompt_style": source.prompt_style,
         "model_name": source.model_name,
+        "dataset_provenance": source.dataset_provenance,
+        "state_source": source.state_source,
+        "state_representation": source.dataset.metadata.get(
+            "state_representation", "unknown"
+        ),
+        "state_pooling": source.dataset.metadata.get("state_pooling", "unknown"),
+        "alignment_vector_key": source.dataset.metadata.get(
+            "alignment_vector_key", ""
+        ),
         "exact_trace_records": exact,
         "rendered_prompt_records": rendered,
         "records_with_problem_text": has_problem,
         "legacy_problem_reconstruction_records": int(needs_reconstruction),
         "legacy_problem_reconstruction_required": bool(needs_reconstruction),
-        "stored_vector_key": source.dataset.vector_key,
+        "stored_state_key": source.dataset.vector_key,
+        "residual_intervention_ready": bool(
+            source.state_source == "sv_clouds"
+            and source.dataset.metadata.get("state_representation")
+            == "raw_hidden_state"
+        ),
         "label_policy": source.dataset.label_policy,
         "skipped": source.dataset.skipped,
     }

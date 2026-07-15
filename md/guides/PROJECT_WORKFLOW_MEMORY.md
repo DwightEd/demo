@@ -33,6 +33,23 @@ After each confirmed update:
 - Progress summaries and dated implementation plans go under `md/progress/`.
 - Operational instructions, data conventions, and workflow memory go under `md/guides/`.
 
+## Non-Negotiable Data Roles
+
+- `data/gsm8k_v2_custom.npz` is the canonical same-problem multisample artifact.
+  It is required for donor-field experiments.
+- Causal residual interventions on that artifact must reconstruct raw
+  4096-dimensional states from `sv_clouds`, `cloud_sizes`, and `cloud_layers`.
+- `sv_vec_step_exp` in the legacy multisample artifact may be in a projected
+  reasoning basis (about 467 dimensions). It is valid for statistical
+  trajectory analyses and row/step alignment, but it must never be injected
+  into a 4096-dimensional model residual stream.
+- `data/features/full_gsm8k.npz`, `full_math.npz`, and `full_omnimath.npz` are
+  cross-problem ProcessBench feature artifacts. They cannot replace the
+  same-problem artifact in donor-field experiments.
+- Machine-readable roles and required fields live in
+  `prompt_control_flow/DATA_REGISTRY.json`; new intervention code must enforce
+  the representation contract before loading model weights.
+
 ## Writing And Formula Policy
 
 - Present all mathematical formulas in LaTeX-rendered form.

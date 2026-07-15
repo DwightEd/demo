@@ -248,6 +248,15 @@ def extraction_metadata(
         "dtype": str(dtype),
         "source_path": str(source.dataset.source_path),
         "vector_key": str(source.dataset.vector_key),
+        "alignment_vector_key": str(
+            source.dataset.metadata.get("alignment_vector_key", "")
+        ),
+        "state_source": str(source.state_source),
+        "state_representation": str(
+            source.dataset.metadata.get("state_representation", "")
+        ),
+        "state_pooling": str(source.dataset.metadata.get("state_pooling", "")),
+        "dataset_provenance": str(source.dataset_provenance),
         "label_policy": str(source.dataset.label_policy),
         "layer": int(cfg.layer),
         "config": asdict(cfg),

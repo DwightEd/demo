@@ -8,12 +8,33 @@ Exploratory same-problem input:
 data/gsm8k_v2_custom.npz
 ```
 
-It contains `sv_vec_step_exp`, `problem_ids`, `sample_idx`, final-answer
-labels, responses, steps, `prompt_style`, and `model_name`. It predates exact
+It contains `sv_vec_step_exp`, `sv_clouds`, `cloud_sizes`, `cloud_layers`,
+`problem_ids`, `sample_idx`, final-answer labels, responses, steps,
+`prompt_style`, `model_name`, and dataset provenance. It predates exact
 `input_ids`, so `extract_causal_pullback.py` reconstructs the custom zero-shot
 prompt and refuses each response unless replayed step vectors match stored
 layer-16 vectors above the configured cosine threshold. This is still a
 legacy replay-validated exploratory tier, not confirmatory evidence.
+
+The causal intervention representation contract is strict:
+
+```text
+sv_clouds + cloud_sizes + cloud_layers=16
+    -> raw 4096-dimensional token hidden states
+    -> step-exp pooling
+    -> valid residual-stream intervention coordinates
+
+sv_vec_step_exp
+    -> legacy projected step coordinates (about 467 dimensions in this artifact)
+    -> alignment/statistical geometry only
+    -> NEVER inject directly into the 4096-dimensional residual stream
+```
+
+The canonical path was correct in the July 15 pilot; the initial `4096 vs 467`
+failure came from using the wrong representation key inside the loader, not
+from selecting the wrong NPZ. The executable contract is also recorded in
+`prompt_control_flow/DATA_REGISTRY.json` and enforced before model weights are
+loaded.
 
 For causal-pullback pilots, `--max_samples` selects only expensive replay
 targets. The full artifact is always loaded to build same-problem correct
@@ -38,6 +59,17 @@ The NPZ stores variable-size step-to-future-step Fisher operators and compact
 baseline output features. Full vocabulary logits are never persisted. Exact
 trace fields are needed only if the exploratory mechanism and increment gates
 pass and the result is promoted to confirmatory status.
+
+To inventory the actual remote files before deciding what to copy locally:
+
+```bash
+python inventory_research_artifacts.py \
+  --roots data outputs \
+  --output_dir outputs/artifact_inventory
+```
+
+This inspects NPZ zip headers without loading giant tensor payloads and writes
+JSON, CSV, and Markdown manifests sorted by size.
 
 ## 2026-07-14 OC-GPI logits-conditional geometry audit
 
