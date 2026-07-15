@@ -436,6 +436,42 @@ The current ICR score is explicitly a routing/state-alignment proxy: it compares
 attention-selected source states with the total block update and is not exact
 per-head OV attribution. Artifacts record this limitation in `icr_semantics`.
 
+#### Dual-GPU ProcessBench extraction
+
+For two 24 GB GPUs and an 8B observer, use one complete BF16 model replica per
+GPU. This avoids model-parallel communication and dynamically assigns complete
+subset/mode jobs to whichever GPU becomes idle. Each output remains a complete,
+independently auditable artifact; no NPZ merge is required.
+
+```bash
+cd /share/home/tm902089733300000/a903202310/lys/research/demo
+
+python run_dual_gpu_extraction.py \
+  --input data/hf_datasets/ProcessBench \
+  --model /share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct \
+  --output_root data/exact/processbench_observer_llama31 \
+  --subsets gsm8k,math,olympiadbench,omnimath \
+  --modes selected,geometry \
+  --gpus 0,1
+```
+
+Run a bounded pilot first by adding `--max_chains 20` and using a distinct
+`--output_root`. `--dry_run` prints every assigned command without loading a
+model. `--resume` skips complete `trace.npz` files after an interrupted run.
+Per-job logs are written under `<output_root>/logs`, while the selected-layer
+and whole-layer manifests are stored as:
+
+```text
+<output_root>/<subset>/selected/trace.npz
+<output_root>/<subset>/geometry/trace.npz
+```
+
+The selected pass stores compact output uncertainty, step states, residual step
+vectors, and prompt/response token states at depths 8, 10, ..., 22. The geometry
+pass skips the LM head and stores mean/pre/end step states at every depth. ICR is
+not enabled in this high-throughput run because eager full attention is
+quadratic and would sharply reduce both speed and coverage.
+
 ### OC-GPI: output-conditioned geometry
 
 The current geometry/logits mainline is documented in
