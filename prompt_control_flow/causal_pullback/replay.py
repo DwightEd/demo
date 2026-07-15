@@ -43,6 +43,15 @@ class PullbackReplayResult:
     metadata: dict[str, Any]
 
 
+@dataclass
+class ReplayStepStateResult:
+    """Step states reconstructed on the observer's teacher-forcing trace."""
+
+    step_states: np.ndarray
+    source_cosine: np.ndarray
+    metadata: dict[str, Any]
+
+
 def _model_device(model) -> torch.device:
     try:
         return next(model.parameters()).device
@@ -403,6 +412,80 @@ def _run_baseline_backbone(
 
 
 @torch.inference_mode()
+def replay_step_states(
+    model,
+    trace: dict[str, Any],
+    source_step_states: np.ndarray,
+    cfg: CausalPullbackConfig,
+) -> ReplayStepStateResult:
+    """Reconstruct pooled step states without treating legacy states as coordinates.
+
+    Legacy artifacts can omit exact token IDs. Re-tokenizing their text may then
+    produce a nearby, but not identical, hidden trajectory. This function reports
+    that source drift while returning states that live on the exact observer trace
+    used by subsequent interventions.
+    """
+
+    cfg.validate()
+    device = _model_device(model)
+    input_ids = torch.as_tensor(trace["input_ids"], dtype=torch.long, device=device)
+    attention_mask = torch.as_tensor(
+        trace["attention_mask"], dtype=torch.long, device=device
+    )
+    ranges = [(int(a), int(b)) for a, b in trace["step_token_ranges"]]
+    source_array = np.asarray(source_step_states)
+    if source_array.ndim != 2:
+        raise ReplayAlignmentError(
+            f"source step states must be [step, hidden], got {source_array.shape}"
+        )
+    if len(ranges) != int(source_array.shape[0]):
+        raise ReplayAlignmentError(
+            f"replay has {len(ranges)} steps but source trajectory has "
+            f"{source_array.shape[0]}"
+        )
+    hidden_width = int(source_array.shape[-1])
+    backbone, layers, _ = locate_causal_components(model)
+    if cfg.layer > len(layers):
+        raise ValueError(
+            f"hidden-state layer {cfg.layer} exceeds decoder depth {len(layers)}"
+        )
+    layer_module = layers[cfg.layer - 1]
+    (
+        baseline,
+        captured_layer,
+        captured_layout,
+        baseline_final,
+        final_layout,
+    ) = _run_baseline_backbone(
+        backbone,
+        layer_module,
+        input_ids,
+        attention_mask,
+        model=model,
+        hidden_width=hidden_width,
+    )
+    replay_states = _step_exp_pool(captured_layer[0], ranges)
+    source = torch.as_tensor(
+        source_array, dtype=replay_states.dtype, device=device
+    )
+    source_cosine = _cosine_rows(replay_states, source)
+    result = ReplayStepStateResult(
+        step_states=replay_states.float().cpu().numpy().astype(np.float32),
+        source_cosine=source_cosine,
+        metadata={
+            "median_source_replay_cosine": float(np.nanmedian(source_cosine)),
+            "minimum_source_replay_cosine": float(np.nanmin(source_cosine)),
+            "captured_layer_layout": captured_layout,
+            "final_hidden_layout": final_layout,
+            "hidden_width": hidden_width,
+            "sequence_tokens": int(input_ids.numel()),
+        },
+    )
+    del baseline, baseline_final, captured_layer, replay_states, source
+    return result
+
+
+@torch.inference_mode()
 def compute_causal_pullback(
     model,
     trace: dict[str, Any],
@@ -626,7 +709,7 @@ def compute_causal_pullback(
         "captured_layer_layout": captured_layout,
         "final_hidden_layout": final_layout,
         "intervention_hidden_width": hidden_width,
-        "stored_state_source": "raw_hidden_step_exp_from_sv_clouds",
+        "alignment_state_source": "caller_supplied_replay_native_step_states",
     }
     del (
         baseline,

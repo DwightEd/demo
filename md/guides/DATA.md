@@ -12,9 +12,11 @@ It contains `sv_vec_step_exp`, `sv_clouds`, `cloud_sizes`, `cloud_layers`,
 `problem_ids`, `sample_idx`, final-answer labels, responses, steps,
 `prompt_style`, `model_name`, and dataset provenance. It predates exact
 `input_ids`, so `extract_causal_pullback.py` reconstructs the custom zero-shot
-prompt and refuses each response unless replayed step vectors match stored
-layer-16 vectors above the configured cosine threshold. This is still a
-legacy replay-validated exploratory tier, not confirmatory evidence.
+prompt. Target and correct same-problem donor trajectories are then replayed
+before the field is estimated. This keeps field construction and intervention
+inside one observer coordinate system. Stored layer-16 vectors are used only
+to report source-to-replay drift, so this remains a legacy replay-native
+exploratory tier rather than confirmatory evidence.
 
 The causal intervention representation contract is strict:
 
@@ -22,7 +24,11 @@ The causal intervention representation contract is strict:
 sv_clouds + cloud_sizes + cloud_layers=16
     -> raw 4096-dimensional token hidden states
     -> step-exp pooling
-    -> valid residual-stream intervention coordinates
+    -> model-width validation and source-to-replay drift audit
+
+observer replay states at layer 16
+    -> replay-native target/donor field coordinates
+    -> valid residual-stream intervention directions on the same replay trace
 
 sv_vec_step_exp
     -> legacy projected step coordinates (about 467 dimensions in this artifact)
@@ -32,9 +38,11 @@ sv_vec_step_exp
 
 The canonical path was correct in the July 15 pilot; the initial `4096 vs 467`
 failure came from using the wrong representation key inside the loader, not
-from selecting the wrong NPZ. The executable contract is also recorded in
-`prompt_control_flow/DATA_REGISTRY.json` and enforced before model weights are
-loaded.
+from selecting the wrong NPZ. A later all-skipped pilot found source/replay
+cosines around `0.93-0.96`, confirming that reconstructed legacy text is not
+an exact token trace. The field is consequently replay-native, while this
+drift remains visible in each item's metadata. The executable contract is also
+recorded in `prompt_control_flow/DATA_REGISTRY.json`.
 
 For causal-pullback pilots, `--max_samples` selects only expensive replay
 targets. The full artifact is always loaded to build same-problem correct

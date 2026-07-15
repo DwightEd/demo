@@ -44,7 +44,10 @@ Neither part is collapsed into one handcrafted scalar during extraction.
 ## 3. Geometry-Derived Witness
 
 The correct references use the same problem and matched causal transition
-index. For chordal energy
+index. Before field construction, both the target response and every selected
+correct donor are teacher-forced through the observer model. Thus field
+estimation and residual intervention share one replay-native coordinate
+system. For chordal energy
 
 \[
 \mathcal E(u;\mathcal F)
@@ -67,7 +70,7 @@ w_t
 The gradient norm is retained separately. It measures local field pressure;
 the normalized direction defines the intervention axis.
 
-There is one explicit modeling assumption here. The stored transition
+There is one explicit modeling assumption here. The replayed transition
 direction and the residual state at the intervention site live in the same
 ambient hidden coordinates, but identifying a tangent displacement direction
 with an admissible residual-state perturbation is **not** guaranteed by a
@@ -170,7 +173,7 @@ cross-fitted length residualization. No per-dataset sign flipping is allowed.
 ## 7. Ordered Decision Gates
 
 1. **Numerical validity**
-   - replay/stored-state cosine passes the threshold;
+   - repeated replay against the cached replay-native state passes the cosine threshold;
    - finite-difference relative error passes;
    - acausal KL leakage is negligible;
    - valid coverage and contrastive-problem support pass.
@@ -186,9 +189,10 @@ cross-fitted length residualization. No per-dataset sign flipping is allowed.
    - exact generation traces are used;
    - observer checkpoint identity is verified.
 
-The legacy multisample artifact can be replayed, but it remains exploratory
-even when stored-vector cosine is high. Exact-trace re-extraction is justified
-only after the exploratory operator passes.
+For a legacy artifact, source-to-replay cosine is reported as provenance drift
+but is not used to mix old coordinates into the field. Such a run estimates a
+teacher-forced observer operator and remains exploratory. Confirmatory status
+also requires the exact source trace and source-to-replay cosine to pass.
 
 ## 8. Code Structure
 
@@ -210,12 +214,24 @@ full logits.
 ### Representation contract
 
 The intervention direction must live in the observer model's ambient residual
-coordinates. For the legacy same-problem artifact, the implementation pools
-raw layer-16 token states from `sv_clouds` using `cloud_sizes`. The
-`sv_vec_step_exp` key is used only to align rows and semantic steps because it
-may already be projected into a lower-dimensional reasoning basis. Injecting
-that projected vector into the raw residual stream is undefined and is rejected
-by the preflight hidden-width check.
+coordinates. The implementation therefore replays the target and its correct
+same-problem donors and estimates the field from those replayed layer-16
+states. For the legacy artifact, raw layer-16 states pooled from `sv_clouds`
+are retained only to verify model width and quantify source-to-replay drift.
+The `sv_vec_step_exp` key is used only to align rows and semantic steps because
+it may already be projected into a lower-dimensional reasoning basis. Neither
+legacy state representation is injected into a different replay trace.
+
+```text
+legacy text + stored metadata
+    -> reconstruct one observer teacher-forcing trace per response
+    -> replay target and correct same-problem donors at layer 16
+    -> estimate field directions in replay coordinates
+    -> inject those directions into the identical target replay
+
+stored sv_clouds
+    -> source provenance and drift audit only
+```
 
 ## 9. Remote Commands
 
@@ -247,7 +263,7 @@ python extract_causal_pullback.py \
   --checkpoint_every 5
 ```
 
-If replay cosine and finite-difference diagnostics pass, run the complete
+If internal replay cosine and finite-difference diagnostics pass, run the complete
 artifact. A separate output path remains cleaner for reporting, although a
 pilot checkpoint can now be expanded safely with `--resume` because its donor
 reference bank is identical:

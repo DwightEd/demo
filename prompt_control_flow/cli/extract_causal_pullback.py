@@ -72,7 +72,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epsilon_fraction", type=float, default=0.02)
     parser.add_argument("--variant_batch_size", type=int, default=8)
     parser.add_argument("--logit_token_chunk", type=int, default=16)
-    parser.add_argument("--replay_cosine_threshold", type=float, default=0.98)
+    parser.add_argument(
+        "--replay_cosine_threshold",
+        type=float,
+        default=0.98,
+        help=(
+            "Minimum internal cosine between cached replay-native step states "
+            "and the intervention replay. Legacy source/replay drift is reported "
+            "separately and does not redefine the intervention coordinates."
+        ),
+    )
     parser.add_argument("--checkpoint_every", type=int, default=10)
     parser.add_argument("--min_success_fraction", type=float, default=0.80)
     parser.add_argument("--device", default="auto")

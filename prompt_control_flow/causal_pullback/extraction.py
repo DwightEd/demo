@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -9,7 +9,7 @@ import numpy as np
 from ..profiler import MechanismProfiler
 from .data import PullbackSource, prepare_record_trace
 from .field import ConditionalFieldBank
-from .replay import compute_causal_pullback
+from .replay import compute_causal_pullback, replay_step_states
 from .schema import (
     CausalPullbackArtifact,
     CausalPullbackConfig,
@@ -89,6 +89,73 @@ class CausalPullbackAccumulator:
         )
 
 
+@dataclass(frozen=True)
+class ReplayNativeFieldEntry:
+    trace: dict[str, Any]
+    step_states: np.ndarray
+    source_cosine: np.ndarray
+    metadata: dict[str, Any]
+
+
+class ReplayNativeFieldCache:
+    """Replay target and donor trajectories into one observer coordinate system."""
+
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        source: PullbackSource,
+        field_bank: ConditionalFieldBank,
+        cfg: CausalPullbackConfig,
+        *,
+        ordered_questions: list[str] | None,
+        max_seq_len: int,
+    ) -> None:
+        self.model = model
+        self.tokenizer = tokenizer
+        self.source = source
+        self.field_bank = field_bank
+        self.cfg = cfg
+        self.ordered_questions = ordered_questions
+        self.max_seq_len = int(max_seq_len)
+        self.entries: dict[int, ReplayNativeFieldEntry] = {}
+
+    def ensure(self, dataset_index: int) -> ReplayNativeFieldEntry:
+        dataset_index = int(dataset_index)
+        cached = self.entries.get(dataset_index)
+        if cached is not None:
+            return cached
+        dataset = self.source.dataset
+        original_index = int(dataset.original_indices[dataset_index])
+        record = self.source.records_by_original_index[original_index]
+        trace, _ = prepare_record_trace(
+            record,
+            self.tokenizer,
+            prompt_style=self.source.prompt_style,
+            ordered_questions=self.ordered_questions,
+            max_seq_len=self.max_seq_len,
+        )
+        source_states = np.asarray(
+            dataset.trajectories[dataset_index][:, 0, :], dtype=np.float32
+        )
+        replayed = replay_step_states(
+            self.model,
+            trace,
+            source_states,
+            self.cfg,
+        )
+        states = np.ascontiguousarray(replayed.step_states, dtype=np.float32)
+        self.field_bank.replace_trajectory(dataset_index, states[:, None, :])
+        entry = ReplayNativeFieldEntry(
+            trace=trace,
+            step_states=states,
+            source_cosine=np.asarray(replayed.source_cosine, dtype=np.float32),
+            metadata=dict(replayed.metadata),
+        )
+        self.entries[dataset_index] = entry
+        return entry
+
+
 def select_replay_targets(
     problem_ids: np.ndarray,
     y_error: np.ndarray,
@@ -162,14 +229,11 @@ def select_replay_targets(
 
 def extract_causal_pullback_item(
     model,
-    tokenizer,
     source: PullbackSource,
     field_bank: ConditionalFieldBank,
+    replay_field_cache: ReplayNativeFieldCache,
     dataset_index: int,
     cfg: CausalPullbackConfig,
-    *,
-    ordered_questions: list[str] | None,
-    max_seq_len: int,
 ) -> CausalPullbackItem:
     """Replay and causally probe one same-problem response."""
 
@@ -177,18 +241,29 @@ def extract_causal_pullback_item(
     dataset = source.dataset
     original_index = int(dataset.original_indices[dataset_index])
     record = source.records_by_original_index[original_index]
+    target_replay = replay_field_cache.ensure(dataset_index)
+    donors = field_bank.donor_indices(dataset_index)
+    if len(donors) < cfg.min_donors:
+        raise ValueError("insufficient_correct_same_problem_donors")
+    donor_replays = [
+        replay_field_cache.ensure(donor_index) for donor_index in donors
+    ]
     witnesses = field_bank.witnesses(dataset_index)
     if witnesses is None:
         raise ValueError("insufficient_correct_same_problem_donors")
-    trace, _ = prepare_record_trace(
-        record,
-        tokenizer,
-        prompt_style=source.prompt_style,
-        ordered_questions=ordered_questions,
-        max_seq_len=int(max_seq_len),
+    replay = compute_causal_pullback(
+        model,
+        target_replay.trace,
+        target_replay.step_states,
+        witnesses,
+        cfg,
     )
-    states = np.asarray(dataset.trajectories[dataset_index][:, 0, :], dtype=np.float32)
-    replay = compute_causal_pullback(model, trace, states, witnesses, cfg)
+    donor_source_cosine = np.concatenate(
+        [entry.source_cosine for entry in donor_replays]
+    )
+    field_source_cosine = np.concatenate(
+        [target_replay.source_cosine, donor_source_cosine]
+    )
     return CausalPullbackItem(
         chain_idx=int(record.chain_idx),
         original_index=original_index,
@@ -199,7 +274,7 @@ def extract_causal_pullback_item(
         response_chars=int(dataset.response_chars[dataset_index]),
         layer=int(cfg.layer),
         donor_count=int(witnesses.donor_count),
-        replay_kind=str(trace["replay_kind"]),
+        replay_kind=str(target_replay.trace["replay_kind"]),
         replay_cosine=replay.replay_cosine,
         baseline_step_features=replay.baseline_step_features,
         field_energy=witnesses.field_energy,
@@ -212,10 +287,25 @@ def extract_causal_pullback_item(
         perturbation_scale=replay.perturbation_scale,
         metadata={
             **replay.metadata,
-            "sequence_tokens": int(len(trace["input_ids"])),
+            "sequence_tokens": int(len(target_replay.trace["input_ids"])),
             "gold_error_step": int(record.gold_error_step),
             "dataset": str(record.dataset or ""),
             "generator": str(record.generator or ""),
+            "field_state_source": "observer_teacher_forcing_replay",
+            "source_state_usage": "provenance_drift_audit_only",
+            "source_replay_cosine": target_replay.source_cosine.tolist(),
+            "median_source_replay_cosine": float(
+                np.nanmedian(target_replay.source_cosine)
+            ),
+            "minimum_source_replay_cosine": float(
+                np.nanmin(target_replay.source_cosine)
+            ),
+            "median_donor_source_replay_cosine": float(
+                np.nanmedian(donor_source_cosine)
+            ),
+            "median_field_source_replay_cosine": float(
+                np.nanmedian(field_source_cosine)
+            ),
         },
     )
 
@@ -239,7 +329,7 @@ def extraction_metadata(
         for index in source.dataset.original_indices
     )
     return {
-        "schema": "causal_pullback_flow_v1",
+        "schema": "causal_pullback_flow_v2",
         "method": "Causal Pullback Flow Field",
         "observer_model": str(observer_model),
         "source_model": str(source.model_name),
@@ -261,13 +351,17 @@ def extraction_metadata(
         "layer": int(cfg.layer),
         "config": asdict(cfg),
         "full_logits_persisted": False,
+        "field_state_source": "observer_teacher_forcing_replay",
+        "source_state_usage": "provenance_drift_audit_only",
         "complete": bool(complete),
         "source_sample_count": int(source_sample_count),
         "donor_eligible_count": int(donor_eligible_count),
         "target_count": int(target_count),
         "max_targets": int(max_targets),
         "evidence_tier": (
-            "exact_trace_candidate" if exact else "legacy_replay_validated_exploration"
+            "exact_trace_candidate"
+            if exact
+            else "legacy_reconstructed_replay_native_field_exploration"
         ),
         "teacher_regime": (
             "same_problem_correct_ensemble_reference; not a deployable single-chain detector"
@@ -307,8 +401,38 @@ def run_causal_pullback_extraction(
         if bool(resume) and output_path.exists()
         else None
     )
+    if previous is not None and previous.n_items > 0:
+        previous_schema = str(previous.metadata.get("schema", ""))
+        previous_field_source = str(
+            previous.metadata.get("field_state_source", "")
+        )
+        if (
+            previous_schema != "causal_pullback_flow_v2"
+            or previous_field_source != "observer_teacher_forcing_replay"
+        ):
+            raise ValueError(
+                "cannot resume a stored-coordinate causal-pullback artifact into "
+                "the replay-native field protocol; choose a new --output path"
+            )
     accumulator = CausalPullbackAccumulator(previous)
-    field_bank = ConditionalFieldBank.build(source.dataset, cfg)
+    # Keep the legacy source states immutable. The field bank receives a
+    # shallow trajectory-list clone whose rows are replaced lazily by replay
+    # states before transition directions are computed.
+    field_dataset = replace(
+        source.dataset,
+        trajectories=list(source.dataset.trajectories),
+        metadata={**source.dataset.metadata, "field_state_source": "observer_replay"},
+    )
+    field_bank = ConditionalFieldBank.build(field_dataset, cfg)
+    replay_field_cache = ReplayNativeFieldCache(
+        model,
+        tokenizer,
+        source,
+        field_bank,
+        cfg,
+        ordered_questions=ordered_questions,
+        max_seq_len=max_seq_len,
+    )
     eligible = field_bank.eligible_target_indices()
     target_indices = select_replay_targets(
         source.dataset.problem_ids,
@@ -332,7 +456,7 @@ def run_causal_pullback_extraction(
     total = int(target_indices.size)
 
     def metadata(complete: bool) -> dict[str, Any]:
-        return extraction_metadata(
+        value = extraction_metadata(
             source,
             cfg,
             observer_model=observer_model,
@@ -345,6 +469,10 @@ def run_causal_pullback_extraction(
             target_count=total,
             max_targets=int(max_targets),
         )
+        value["replay_native_cached_responses"] = len(
+            replay_field_cache.entries
+        )
+        return value
 
     attempted_since_checkpoint = 0
     for target_position, dataset_index in enumerate(target_indices):
@@ -360,13 +488,11 @@ def run_causal_pullback_extraction(
             with profiler.phase("field_and_causal_replay"):
                 item = extract_causal_pullback_item(
                     model,
-                    tokenizer,
                     source,
                     field_bank,
+                    replay_field_cache,
                     dataset_index,
                     cfg,
-                    ordered_questions=ordered_questions,
-                    max_seq_len=max_seq_len,
                 )
             accumulator.add(item)
             profiler.record_success()

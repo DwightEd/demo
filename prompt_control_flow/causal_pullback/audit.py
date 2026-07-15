@@ -226,6 +226,8 @@ def _write_report(
         f"- Contrastive problems: `{report['preflight']['contrastive_problems']}`",
         f"- Valid coverage: `{report['preflight']['valid_coverage']:.4f}`",
         f"- Evidence tier: `{report['preflight']['evidence_tier']}`",
+        f"- Internal replay cosine: `{report['preflight']['median_replay_cosine']:.6f}`",
+        f"- Legacy-source drift cosine: `{report['preflight']['median_source_replay_cosine']:.6f}`",
         "",
         "## Direct Same-Problem Diagnosis",
         "",
@@ -387,6 +389,18 @@ def run_causal_pullback_audit(
     median_replay = np.asarray(
         [np.nanmedian(item.replay_cosine) for item in artifact.items], dtype=np.float64
     )
+    median_source_replay = np.asarray(
+        [
+            float(
+                item.metadata.get(
+                    "median_field_source_replay_cosine",
+                    item.metadata.get("median_source_replay_cosine", np.nan),
+                )
+            )
+            for item in artifact.items
+        ],
+        dtype=np.float64,
+    )
     acausal = np.asarray(
         [
             float(item.metadata.get("maximum_acausal_fisher_leakage", np.nan))
@@ -438,6 +452,15 @@ def run_causal_pullback_audit(
     source_model = str(artifact.metadata.get("source_model", ""))
     observer_model = str(artifact.metadata.get("observer_model", ""))
     model_match = _identity_matches(source_model, observer_model)
+    source_alignment_value = (
+        float(np.nanmedian(median_source_replay))
+        if np.isfinite(median_source_replay).any()
+        else float("nan")
+    )
+    source_alignment_pass = bool(
+        np.isfinite(source_alignment_value)
+        and source_alignment_value >= cfg.replay_cosine_threshold
+    )
     numerical_pass = all(numerical_conditions.values())
     mechanism_pass = numerical_pass and all(mechanism_conditions.values())
     detector_pass = numerical_pass and all(detector_conditions.values())
@@ -446,6 +469,7 @@ def run_causal_pullback_audit(
         and detector_pass
         and evidence_tier == "exact_trace_candidate"
         and model_match
+        and source_alignment_pass
     )
 
     report: dict[str, Any] = {
@@ -469,6 +493,7 @@ def run_causal_pullback_audit(
             "problems": int(np.unique(features.problem_ids).size),
             "contrastive_problems": contrastive,
             "median_replay_cosine": float(np.nanmedian(median_replay)),
+            "median_source_replay_cosine": source_alignment_value,
             "median_finite_difference_error": float(
                 np.nanmedian(finite_difference)
             ),
@@ -500,6 +525,10 @@ def run_causal_pullback_audit(
                 "conditions": detector_conditions,
             },
             "confirmatory_ready": confirmatory,
+            "confirmatory_source_alignment": {
+                "pass": source_alignment_pass,
+                "required_only_for_exact_trace_claim": True,
+            },
             "status": (
                 "confirmatory_support"
                 if confirmatory

@@ -38,7 +38,12 @@ After each confirmed update:
 - `data/gsm8k_v2_custom.npz` is the canonical same-problem multisample artifact.
   It is required for donor-field experiments.
 - Causal residual interventions on that artifact must reconstruct raw
-  4096-dimensional states from `sv_clouds`, `cloud_sizes`, and `cloud_layers`.
+  4096-dimensional states from `sv_clouds`, `cloud_sizes`, and `cloud_layers`
+  for width validation and source-drift auditing.
+- Because the artifact has no exact token IDs, causal donor fields must be
+  rebuilt from target and donor teacher-forcing replay states. Never combine a
+  direction estimated on the legacy stored trace with an intervention on a
+  re-tokenized trace.
 - `sv_vec_step_exp` in the legacy multisample artifact may be in a projected
   reasoning basis (about 467 dimensions). It is valid for statistical
   trajectory analyses and row/step alignment, but it must never be injected

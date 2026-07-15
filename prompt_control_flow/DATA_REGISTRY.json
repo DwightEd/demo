@@ -19,9 +19,10 @@
         "cloud_layers"
       ],
       "representation_contract": {
-        "intervention_state": "sv_clouds pooled by cloud_sizes at cloud_layers=16",
+        "intervention_state": "observer teacher-forcing replay states at layer 16",
+        "source_drift_audit": "sv_clouds pooled by cloud_sizes at cloud_layers=16",
         "alignment_only": "sv_vec_step_exp",
-        "forbidden_intervention_state": "sv_vec_step_exp because legacy files may use a projected reasoning basis"
+        "forbidden_intervention_state": "legacy stored states from a different token trace, or sv_vec_step_exp because it may use a projected reasoning basis"
       }
     },
     "processbench_cross_problem_features": {

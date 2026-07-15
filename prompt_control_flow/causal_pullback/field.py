@@ -130,6 +130,30 @@ class ConditionalFieldBank:
             )
         return self.transition_cache[index]
 
+    def donor_indices(self, target_index: int) -> tuple[int, ...]:
+        """Expose the deterministic donor cohort before trajectory replay."""
+
+        return self._donors(int(target_index))
+
+    def replace_trajectory(self, index: int, trajectory: np.ndarray) -> None:
+        """Replace one field trajectory and invalidate its derived transitions."""
+
+        index = int(index)
+        value = np.asarray(trajectory, dtype=np.float32)
+        expected = (
+            int(self.dataset.n_steps[index]),
+            1,
+            int(self.dataset.hidden_dim),
+        )
+        if value.shape != expected:
+            raise ValueError(
+                f"replacement trajectory has shape {value.shape}, expected {expected}"
+            )
+        if not np.isfinite(value).all():
+            raise ValueError("replacement trajectory contains non-finite values")
+        self.dataset.trajectories[index] = np.ascontiguousarray(value)
+        self.transition_cache.pop(index, None)
+
     def eligible_target_indices(self) -> np.ndarray:
         """Return rows with enough same-problem correct reference donors."""
 

@@ -322,6 +322,7 @@ def test_replay_operator_is_strictly_causal() -> None:
     from prompt_control_flow.causal_pullback.replay import (
         _step_exp_pool,
         compute_causal_pullback,
+        replay_step_states,
     )
 
     class CausalBlock(torch.nn.Module):
@@ -398,24 +399,34 @@ def test_replay_operator_is_strictly_causal() -> None:
         field_calibrated_energy=np.ones(transitions, dtype=np.float32),
         donor_count=6,
     )
+    trace = {
+        "input_ids": ids.tolist(),
+        "attention_mask": [1] * len(ids),
+        "step_token_ranges": ranges,
+    }
+    cfg = CausalPullbackConfig(
+        layer=1,
+        min_donors=3,
+        max_donors=6,
+        epsilon_fraction=0.01,
+        replay_cosine_threshold=0.999,
+        variant_batch_size=4,
+        logit_token_chunk=3,
+    )
+    # A legacy source trajectory can drift substantially after text is
+    # reconstructed and re-tokenized. It is an audit reference, not the
+    # coordinate system in which the replay-native field is intervened on.
+    reconstructed = replay_step_states(model, trace, -stored, cfg)
+    assert np.nanmedian(reconstructed.source_cosine) < 0.0
+    np.testing.assert_allclose(
+        reconstructed.step_states, stored, atol=2e-6, rtol=2e-6
+    )
     result = compute_causal_pullback(
         model,
-        {
-            "input_ids": ids.tolist(),
-            "attention_mask": [1] * len(ids),
-            "step_token_ranges": ranges,
-        },
-        stored,
+        trace,
+        reconstructed.step_states,
         witnesses,
-        CausalPullbackConfig(
-            layer=1,
-            min_donors=3,
-            max_donors=6,
-            epsilon_fraction=0.01,
-            replay_cosine_threshold=0.999,
-            variant_batch_size=4,
-            logit_token_chunk=3,
-        ),
+        cfg,
     )
     assert np.nanmin(result.replay_cosine) > 0.999
     # Transition zero ends at step one, so only steps two and three are causal.
@@ -424,6 +435,148 @@ def test_replay_operator_is_strictly_causal() -> None:
     # The final transition ends at the final step and has no measurable future.
     assert np.isnan(result.fisher_transfer[:, -1]).all()
     assert result.metadata["maximum_acausal_fisher_leakage"] < 1e-8
+
+
+def test_field_trajectory_replacement_invalidates_transition_cache() -> None:
+    pytest.importorskip("torch")
+    from prompt_control_flow.causal_pullback.field import ConditionalFieldBank
+    from prompt_control_flow.flow_signature_data import FlowTrajectoryDataset
+
+    original = np.asarray(
+        [[[1.0, 0.0, 0.0]], [[2.0, 0.0, 0.0]], [[3.0, 0.0, 0.0]]],
+        dtype=np.float32,
+    )
+    dataset = FlowTrajectoryDataset(
+        source_path="synthetic",
+        vector_key="synthetic",
+        trajectories=[original.copy()],
+        original_indices=np.asarray([0]),
+        problem_ids=np.asarray([0]),
+        sample_idx=np.asarray([0]),
+        y_error=np.asarray([0]),
+        is_correct=np.asarray([1]),
+        n_steps=np.asarray([3]),
+        response_chars=np.asarray([10]),
+        layer_ids=np.asarray([1]),
+        hidden_dim=3,
+        label_policy="answer",
+        skipped={},
+        metadata={},
+    )
+    bank = ConditionalFieldBank(
+        dataset=dataset,
+        cfg=CausalPullbackConfig(layer=1, min_donors=3, max_donors=3),
+        supports={},
+    )
+    before = bank.transitions(0).direction.copy()
+    assert 0 in bank.transition_cache
+    replacement = np.asarray(
+        [[[1.0, 0.0, 0.0]], [[1.0, 1.0, 0.0]], [[1.0, 1.0, 1.0]]],
+        dtype=np.float32,
+    )
+    bank.replace_trajectory(0, replacement)
+    assert 0 not in bank.transition_cache
+    after = bank.transitions(0).direction
+    assert not np.allclose(before, after)
+
+
+def test_replay_native_field_cache_does_not_mutate_legacy_source(monkeypatch) -> None:
+    pytest.importorskip("torch")
+    from dataclasses import replace
+
+    from prompt_control_flow.causal_pullback.data import PullbackSource
+    from prompt_control_flow.causal_pullback.extraction import ReplayNativeFieldCache
+    from prompt_control_flow.causal_pullback.field import ConditionalFieldBank
+    from prompt_control_flow.flow_signature_data import FlowTrajectoryDataset
+    import prompt_control_flow.causal_pullback.extraction as extraction_module
+
+    trajectories = [
+        np.asarray(
+            [
+                [[1.0 + index, 0.0, 0.0]],
+                [[1.0 + index, 1.0, 0.0]],
+                [[1.0 + index, 1.0, 1.0]],
+            ],
+            dtype=np.float32,
+        )
+        for index in range(4)
+    ]
+    dataset = FlowTrajectoryDataset(
+        source_path="synthetic",
+        vector_key="sv_clouds:raw_hidden_step_exp",
+        trajectories=trajectories,
+        original_indices=np.arange(4),
+        problem_ids=np.zeros(4, dtype=np.int64),
+        sample_idx=np.arange(4),
+        y_error=np.zeros(4, dtype=np.int64),
+        is_correct=np.ones(4, dtype=np.int64),
+        n_steps=np.full(4, 3, dtype=np.int64),
+        response_chars=np.full(4, 20, dtype=np.int64),
+        layer_ids=np.asarray([1]),
+        hidden_dim=3,
+        label_policy="answer",
+        skipped={},
+        metadata={},
+    )
+    records = {
+        index: ChainRecord(
+            chain_idx=index,
+            problem_id=0,
+            problem="problem",
+            steps=["one", "two", "three"],
+            response="one\ntwo\nthree",
+        )
+        for index in range(4)
+    }
+    source = PullbackSource(
+        dataset=dataset,
+        records_by_original_index=records,
+        prompt_style="custom_zeroshot",
+        model_name="toy",
+        dataset_provenance="synthetic",
+        state_source="sv_clouds",
+    )
+    cfg = CausalPullbackConfig(layer=1, min_donors=3, max_donors=3)
+    field_dataset = replace(dataset, trajectories=list(dataset.trajectories))
+    bank = ConditionalFieldBank.build(field_dataset, cfg)
+    calls: list[int] = []
+
+    def fake_trace(record, *_args, **_kwargs):
+        return {
+            "input_ids": [1, 2, 3],
+            "attention_mask": [1, 1, 1],
+            "step_token_ranges": [(0, 0), (1, 1), (2, 2)],
+            "replay_kind": "synthetic",
+        }, ""
+
+    def fake_replay(_model, _trace, source_states, _cfg):
+        calls.append(1)
+        return SimpleNamespace(
+            step_states=np.asarray(source_states) + 10.0,
+            source_cosine=np.full(3, 0.9, dtype=np.float32),
+            metadata={},
+        )
+
+    monkeypatch.setattr(extraction_module, "prepare_record_trace", fake_trace)
+    monkeypatch.setattr(extraction_module, "replay_step_states", fake_replay)
+    cache = ReplayNativeFieldCache(
+        object(),
+        object(),
+        source,
+        bank,
+        cfg,
+        ordered_questions=None,
+        max_seq_len=32,
+    )
+    source_before = source.dataset.trajectories[0].copy()
+    first = cache.ensure(0)
+    second = cache.ensure(0)
+    assert first is second
+    assert len(calls) == 1
+    np.testing.assert_allclose(source.dataset.trajectories[0], source_before)
+    np.testing.assert_allclose(
+        bank.dataset.trajectories[0][:, 0], source_before[:, 0] + 10.0
+    )
 
 
 @pytest.mark.skipif(
