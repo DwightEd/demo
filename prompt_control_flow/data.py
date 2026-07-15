@@ -15,6 +15,10 @@ from utils.step_boundaries import (
     TRACE_SCHEMA_VERSION,
     TokenAlignmentError,
 )
+from .replay_protocols import stable_problem_group_id
+
+
+PROCESS_LABEL_UNAVAILABLE = -2
 
 
 @dataclass
@@ -26,9 +30,13 @@ class ChainRecord:
     problem: str
     steps: List[str]
     response: str
-    gold_error_step: int = -1
+    gold_error_step: int = PROCESS_LABEL_UNAVAILABLE
+    problem_group_id: str = ""
+    process_correct: Optional[int] = None
+    final_answer_correct: Optional[int] = None
     is_correct: Optional[int] = None
     sample_idx: Optional[int] = None
+    # Model that generated the answer text, when ProcessBench exposes it.
     generator: Optional[str] = None
     dataset: Optional[str] = None
     rendered_prompt: Optional[str] = None
@@ -37,6 +45,9 @@ class ChainRecord:
     exact_token_offsets: Optional[List[Tuple[int, int]]] = None
     exact_step_token_ranges: Optional[List[Tuple[int, int]]] = None
     exact_response_start_token: Optional[int] = None
+    exact_question_token_range: Optional[Tuple[int, int]] = None
+    # Observer identity that produced the exact token/state replay artifact.
+    source_model: Optional[str] = None
     source_tokenizer: Optional[str] = None
     source_model_revision: Optional[str] = None
     source_tokenizer_revision: Optional[str] = None
@@ -88,6 +99,18 @@ def _scalar_or_row(array: Any, i: int, default: Any = None) -> Any:
     return value[i]
 
 
+def _row_numeric_id(array: Any, i: int, fallback: int) -> int:
+    """Return a numeric row identifier without treating text groups as IDs."""
+
+    if array is None:
+        return int(fallback)
+    value = _scalar_or_row(array, i, fallback)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(fallback)
+
+
 def is_processbench_full(
     path: str | Path, npz: np.lib.npyio.NpzFile | None = None
 ) -> bool:
@@ -116,6 +139,45 @@ def _problem_id_from_record(raw_id: Any, fallback: int) -> int:
     return int(m.group(1)) if m else int(fallback)
 
 
+def _optional_binary_label(value: Any, *, field: str) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1"}:
+            return 1
+        if normalized in {"false", "0"}:
+            return 0
+        raise ValueError(f"{field} must be binary, got {value!r}")
+    numeric = int(value)
+    if numeric not in {0, 1}:
+        raise ValueError(f"{field} must be binary, got {value!r}")
+    return numeric
+
+
+def _validate_gold_error_step(value: int, n_steps: int, *, context: str) -> int:
+    label = int(value)
+    if label < PROCESS_LABEL_UNAVAILABLE or label >= int(n_steps):
+        raise ValueError(
+            f"{context}: gold_error_step={label} is outside -2, -1, or "
+            f"[0, {n_steps - 1}]"
+        )
+    return label
+
+
+def process_correct_from_gold(gold_error_step: int) -> int:
+    """Map the tri-state first-error label to a tri-state correctness label."""
+
+    label = int(gold_error_step)
+    if label == PROCESS_LABEL_UNAVAILABLE:
+        return -1
+    if label == -1:
+        return 1
+    if label >= 0:
+        return 0
+    raise ValueError(f"unsupported gold_error_step={label}")
+
+
 def _dataset_from_path(path: Path) -> str:
     name = path.stem.lower()
     for suffix in ("_multisample_sv", "_features", "_sv", "_full"):
@@ -137,19 +199,38 @@ def _load_processbench_jsonl(path: Path, max_chains: int = 0) -> List[ChainRecor
                 continue
             rec = json.loads(line)
             steps = _as_list_of_str(rec.get("steps", rec.get("steps_text", [])))
+            if not steps or any(not step.strip() for step in steps):
+                raise ValueError(f"{path}: row {i} contains an empty reasoning step")
             response = str(rec.get("response", "\n\n".join(steps)))
-            gold = int(rec.get("label", rec.get("gold_error_step", -1)))
+            if "label" not in rec and "gold_error_step" not in rec:
+                raise ValueError(
+                    f"{path}: ProcessBench row {i} has no process label"
+                )
+            gold = _validate_gold_error_step(
+                int(rec.get("label", rec.get("gold_error_step"))),
+                len(steps),
+                context=f"{path}: row {i}",
+            )
             final_correct = rec.get("final_answer_correct", None)
-            is_correct = None if final_correct is None else int(bool(final_correct))
+            process_correct = process_correct_from_gold(gold)
+            final_correct_value = _optional_binary_label(
+                final_correct, field="final_answer_correct"
+            )
+            problem = str(rec.get("problem", rec.get("question", "")))
+            if not problem.strip():
+                raise ValueError(f"{path}: ProcessBench row {i} has an empty problem")
             rows.append(
                 ChainRecord(
                     chain_idx=len(rows),
                     problem_id=_problem_id_from_record(rec.get("id", i), i),
-                    problem=str(rec.get("problem", rec.get("question", ""))),
+                    problem=problem,
                     steps=steps,
                     response=response,
                     gold_error_step=gold,
-                    is_correct=is_correct,
+                    problem_group_id=stable_problem_group_id(problem),
+                    process_correct=process_correct,
+                    final_answer_correct=final_correct_value,
+                    is_correct=process_correct,
                     sample_idx=None,
                     generator=rec.get("generator"),
                     dataset=dataset,
@@ -203,30 +284,44 @@ def _load_canonical_processbench(
     subset: str,
     max_chains: int = 0,
 ) -> List[ChainRecord]:
-    """Reproduce the filtering and indexing used by canonical ``full_*.npz``."""
+    """Load canonical ProcessBench rows without mutating its annotated axis."""
 
     rows: List[ChainRecord] = []
     for raw in _iter_processbench_source(path, subset):
-        steps = [str(value).strip() for value in (raw.get("steps") or [])]
-        steps = [value for value in steps if value]
-        if len(steps) < 3:
-            continue
+        steps = [str(value) for value in (raw.get("steps") or [])]
+        if not steps or any(not value.strip() for value in steps):
+            raise ValueError("canonical ProcessBench row contains an empty reasoning step")
         if max_chains and len(rows) >= int(max_chains):
             break
         index = len(rows)
-        gold = int(raw.get("label", raw.get("gold_error_step", -1)))
+        if "label" not in raw and "gold_error_step" not in raw:
+            raise ValueError("canonical ProcessBench row has no process label")
+        gold = _validate_gold_error_step(
+            int(raw.get("label", raw.get("gold_error_step"))),
+            len(steps),
+            context=f"ProcessBench/{subset} row {index}",
+        )
         final_correct = raw.get("final_answer_correct")
-        is_correct = None if final_correct is None else int(bool(final_correct))
-        response = str(raw.get("response") or "\n".join(steps))
+        process_correct = process_correct_from_gold(gold)
+        final_correct_value = _optional_binary_label(
+            final_correct, field="final_answer_correct"
+        )
+        response = str(raw.get("response") or "\n\n".join(steps))
+        problem = str(raw.get("problem", raw.get("question", "")))
+        if not problem.strip():
+            raise ValueError("canonical ProcessBench row has an empty problem")
         rows.append(
             ChainRecord(
                 chain_idx=int(raw.get("chain_idx", index)),
                 problem_id=int(raw.get("problem_id", index)),
-                problem=str(raw.get("problem", raw.get("question", ""))),
+                problem=problem,
                 steps=steps,
                 response=response,
                 gold_error_step=gold,
-                is_correct=is_correct,
+                problem_group_id=stable_problem_group_id(problem),
+                process_correct=process_correct,
+                final_answer_correct=final_correct_value,
+                is_correct=process_correct,
                 sample_idx=None,
                 generator=raw.get("generator"),
                 dataset=str(subset),
@@ -255,10 +350,9 @@ def validate_records_against_reference(
         if "chain_idx" in z.files
         else np.arange(reference_count, dtype=np.int64)
     )
-    problem_ids = (
-        np.asarray(z["problem_ids"], dtype=np.int64)
-        if "problem_ids" in z.files
-        else chain_idx
+    problem_ids = z["problem_ids"] if "problem_ids" in z.files else chain_idx
+    reference_problems = _get_array(
+        z, ["problems", "problem", "questions", "question"], None
     )
     gold = (
         np.asarray(z["gold_error_step"], dtype=np.int64)
@@ -272,10 +366,16 @@ def validate_records_against_reference(
         expected_steps = _as_list_of_str(steps_text[row])
         checks = {
             "chain_idx": int(record.chain_idx) == int(chain_idx[row]),
-            "problem_id": int(record.problem_id) == int(problem_ids[row]),
             "n_steps": len(record.steps) == len(expected_steps),
             "steps_text": list(record.steps) == expected_steps,
         }
+        try:
+            checks["problem_id"] = int(record.problem_id) == int(problem_ids[row])
+        except (TypeError, ValueError):
+            if reference_problems is not None:
+                checks["problem_group_id"] = record.problem_group_id == stable_problem_group_id(
+                    str(reference_problems[row])
+                )
         if gold is not None:
             checks["gold_error_step"] = int(record.gold_error_step) == int(gold[row])
         if responses is not None:
@@ -349,20 +449,39 @@ def load_chain_records(
     problems = _get_array(z, ["problems", "problem", "questions", "question"], None)
     responses = _get_array(z, ["responses", "response"], None)
     prompts = _get_array(z, ["prompts", "rendered_prompts", "rendered_prompt"], None)
-    problem_ids = _get_array(
-        z, ["problem_ids"], np.arange(len(steps_arr), dtype=np.int64)
+    chain_ids = _get_array(
+        z, ["chain_idx"], np.arange(len(steps_arr), dtype=np.int64)
+    )
+    problem_ids = _get_array(z, ["problem_ids", "problem_id"], None)
+    problem_group_ids = _get_array(
+        z, ["problem_group_ids", "problem_group_id"], None
     )
     sample_idx = _get_array(z, ["sample_idx"], None)
-    generators = _get_array(
-        z, ["generator", "generators", "source_model", "model_name"], None
+    generators = _get_array(z, ["generator", "generators"], None)
+    source_models = _get_array(
+        z, ["source_model", "observer_model", "model_name"], None
+    )
+    source_tokenizers = _get_array(
+        z, ["source_tokenizer", "observer_tokenizer", "tokenizer_name"], None
+    )
+    source_model_revisions = _get_array(z, ["source_model_revision"], None)
+    source_tokenizer_revisions = _get_array(
+        z, ["source_tokenizer_revision"], None
     )
     datasets = _get_array(z, ["dataset", "datasets", "subset"], None)
 
     gold = _get_array(z, ["gold_error_step_kept", "gold_error_step", "labels"], None)
-    if gold is None:
-        gold = np.full(len(steps_arr), -1, dtype=np.int64)
+    has_process_labels = gold is not None
+    if not has_process_labels:
+        gold = np.full(
+            len(steps_arr), PROCESS_LABEL_UNAVAILABLE, dtype=np.int64
+        )
 
-    correct = _get_array(z, ["is_correct_strict", "is_correct"], None)
+    process_correct = _get_array(z, ["process_correct"], None)
+    final_answer_correct = _get_array(
+        z, ["final_answer_correct", "is_correct_strict"], None
+    )
+    compatibility_correct = _get_array(z, ["is_correct"], None)
     kept_steps = _get_array(z, ["kept_steps", "time_axis_original_step_indices"], None)
     exact_input_ids = _get_array(z, ["input_ids"], None)
     exact_attention_mask = _get_array(z, ["attention_mask"], None)
@@ -371,6 +490,7 @@ def load_chain_records(
         z, ["step_token_ranges", "time_axis_token_ranges"], None
     )
     response_ranges = _get_array(z, ["response_token_ranges"], None)
+    question_ranges = _get_array(z, ["question_token_ranges"], None)
     prompt_counts = _get_array(z, ["prompt_token_counts"], None)
     sampling_metadata: dict[str, Any] = {}
     if "model_sampling_metadata_json" in z.files:
@@ -443,8 +563,52 @@ def load_chain_records(
                     f"{path}: kept_steps[{i}] cannot index steps_text[{i}]"
                 )
             steps = [all_steps[j] for j in kept]
+        gold_value = int(gold[i])
+        if has_process_labels:
+            gold_value = _validate_gold_error_step(
+                gold_value,
+                len(steps),
+                context=f"{path}: row {i}",
+            )
         response = str(responses[i]) if responses is not None else "\n\n".join(steps)
         problem = str(problems[i]) if problems is not None else ""
+        numeric_problem_id = _row_numeric_id(problem_ids, i, i)
+        raw_group = (
+            str(_scalar_or_row(problem_group_ids, i))
+            if problem_group_ids is not None
+            else (
+                stable_problem_group_id(problem)
+                if problem.strip()
+                else f"problem_id:{numeric_problem_id}"
+            )
+        )
+        process_value = (
+            int(_scalar_or_row(process_correct, i))
+            if process_correct is not None
+            else (
+                process_correct_from_gold(int(gold[i]))
+                if has_process_labels
+                else -1
+            )
+        )
+        final_value = (
+            int(_scalar_or_row(final_answer_correct, i))
+            if final_answer_correct is not None
+            else None
+        )
+        if process_value not in {-1, 0, 1}:
+            raise ValueError(
+                f"{path}: process_correct[{i}]={process_value} is not -1/0/1"
+            )
+        if final_value is not None and final_value not in {-1, 0, 1}:
+            raise ValueError(
+                f"{path}: final_answer_correct[{i}]={final_value} is not -1/0/1"
+            )
+        compatibility_value = (
+            int(_scalar_or_row(compatibility_correct, i))
+            if compatibility_correct is not None
+            else (process_value if process_value >= 0 else None)
+        )
         response_start = None
         if response_ranges is not None:
             response_start = int(np.asarray(response_ranges[i]).reshape(-1)[0])
@@ -460,15 +624,32 @@ def load_chain_records(
                 response_start,
             )
         )
+        exact_ranges_row = (
+            _row_pairs(exact_step_ranges, i) if have_exact_bundle else None
+        )
+        if exact_ranges_row is not None:
+            exact_ranges_row = exact_ranges_row[: len(steps)]
+            if len(exact_ranges_row) != len(steps):
+                raise TokenAlignmentError(
+                    f"{path}: exact step range count {len(exact_ranges_row)} does "
+                    f"not match n_steps={len(steps)} in row {i}"
+                )
+            if any(a < 0 or b < a for a, b in exact_ranges_row):
+                raise TokenAlignmentError(
+                    f"{path}: invalid exact step token range in row {i}"
+                )
         rows.append(
             ChainRecord(
-                chain_idx=i,
-                problem_id=int(problem_ids[i]) if problem_ids is not None else i,
+                chain_idx=_row_numeric_id(chain_ids, i, i),
+                problem_id=numeric_problem_id,
                 problem=problem,
                 steps=steps,
                 response=response,
-                gold_error_step=int(gold[i]) if gold is not None else -1,
-                is_correct=int(correct[i]) if correct is not None else None,
+                gold_error_step=gold_value,
+                problem_group_id=raw_group,
+                process_correct=process_value,
+                final_answer_correct=final_value,
+                is_correct=compatibility_value,
                 sample_idx=int(sample_idx[i]) if sample_idx is not None else None,
                 generator=(
                     str(_scalar_or_row(generators, i))
@@ -491,17 +672,38 @@ def load_chain_records(
                     _row_pairs(exact_token_offsets, i) if have_exact_bundle else None
                 ),
                 exact_step_token_ranges=(
-                    _row_pairs(exact_step_ranges, i) if have_exact_bundle else None
+                    exact_ranges_row
                 ),
                 exact_response_start_token=(
                     response_start if have_exact_bundle else None
                 ),
-                source_tokenizer=str(sampling_metadata.get("tokenizer_name", ""))
+                exact_question_token_range=(
+                    tuple(int(x) for x in np.asarray(question_ranges[i]).reshape(-1)[:2])
+                    if have_exact_bundle and question_ranges is not None
+                    else None
+                ),
+                source_model=(
+                    str(_scalar_or_row(source_models, i))
+                    if source_models is not None
+                    else str(sampling_metadata.get("model_name", ""))
+                )
                 or None,
-                source_model_revision=str(sampling_metadata.get("model_revision", ""))
+                source_tokenizer=(
+                    str(_scalar_or_row(source_tokenizers, i))
+                    if source_tokenizers is not None
+                    else str(sampling_metadata.get("tokenizer_name", ""))
+                )
                 or None,
-                source_tokenizer_revision=str(
-                    sampling_metadata.get("tokenizer_revision", "")
+                source_model_revision=(
+                    str(_scalar_or_row(source_model_revisions, i))
+                    if source_model_revisions is not None
+                    else str(sampling_metadata.get("model_revision", ""))
+                )
+                or None,
+                source_tokenizer_revision=(
+                    str(_scalar_or_row(source_tokenizer_revisions, i))
+                    if source_tokenizer_revisions is not None
+                    else str(sampling_metadata.get("tokenizer_revision", ""))
                 )
                 or None,
             )

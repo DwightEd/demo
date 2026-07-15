@@ -3,15 +3,41 @@ from __future__ import annotations
 import numpy as np
 
 from prompt_control_flow.config import ExtractionConfig, MetricNames
-from prompt_control_flow.data import ChainRecord, load_chain_records
+from prompt_control_flow.data import (
+    ChainRecord,
+    load_chain_records,
+    process_correct_from_gold,
+)
 from prompt_control_flow.evaluate import auprc, evaluate_all, evaluate_response
-from prompt_control_flow.extraction import ChainExtraction, pack_extractions
-from prompt_control_flow.extractors import ICRResidualMismatchExtractor
+from prompt_control_flow.extraction import (
+    ChainExtraction,
+    extract_chain_mechanisms,
+    pack_extractions,
+)
+from prompt_control_flow.extractors import ICRResidualMismatchExtractor, UncertaintyExtractor
 from prompt_control_flow.geometry import orthonormal_basis, projection_energy_fraction
-from prompt_control_flow.metrics import compute_step_prompt_flow_metrics, compute_step_residual_vectors, summarize_step_metrics
+from prompt_control_flow.metrics import (
+    compute_step_boundary_state_vectors,
+    compute_step_prompt_flow_metrics,
+    compute_response_token_layer_states,
+    compute_step_residual_vectors,
+    summarize_step_metrics,
+)
+from prompt_control_flow.replay_protocols import (
+    EXACT_ARTIFACT_REPLAY,
+    PROCESSBENCH_OBSERVER_CHAT_V1,
+    render_processbench_observer_prompt,
+    stable_problem_group_id,
+)
 from prompt_control_flow.representation_geometry import GeometryAuditConfig, append_geometry_audit
 from prompt_control_flow.schema import inspect_npz_schema
 from prompt_control_flow.spectral_chain_dynamics import SpectralChainConfig, append_spectral_chain_dynamics, canonicalize_spectral_input
+from prompt_control_flow.storage import (
+    FixedStateMemmap,
+    ResponseStateShardWriter,
+    StateStorageError,
+    cast_state_array,
+)
 from prompt_control_flow.teacher_forcing import ForwardCache, build_prompt_response
 from prompt_control_flow.visualize import response_error_labels, write_first_error_aligned_csv, write_separability_csv, write_trajectory_csv
 
@@ -34,6 +60,23 @@ def test_build_prompt_response_is_stable_for_processbench_steps() -> None:
     assert response == "1+1=2\n\nAnswer is 2."
 
 
+def test_chat_observer_prompt_records_the_exact_problem_span() -> None:
+    class ChatTokenizer:
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            assert tokenize is False
+            assert add_generation_prompt is True
+            return f"<user>{messages[0]['content']}</user><assistant>"
+
+    rendered = render_processbench_observer_prompt(
+        ChatTokenizer(), "What is 1+1?", protocol=PROCESSBENCH_OBSERVER_CHAT_V1
+    )
+
+    a, b = rendered.question_char_span
+    assert rendered.rendered_prompt[a:b] == "What is 1+1?"
+    assert rendered.protocol == PROCESSBENCH_OBSERVER_CHAT_V1
+    assert rendered.rendered_prompt_sha256
+
+
 def test_processbench_jsonl_loader_preserves_generator_and_dataset(tmp_path) -> None:
     path = tmp_path / "gsm8k.jsonl"
     path.write_text(
@@ -48,6 +91,39 @@ def test_processbench_jsonl_loader_preserves_generator_and_dataset(tmp_path) -> 
     assert rows[0].generator == "Llama-3.1-8B-Instruct"
     assert rows[0].dataset == "gsm8k"
     assert rows[0].is_correct == 0
+    assert rows[0].process_correct == 0
+    assert rows[0].final_answer_correct == 0
+
+
+def test_processbench_duplicate_questions_share_a_stable_group_id(tmp_path) -> None:
+    path = tmp_path / "gsm8k.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                '{"id":"sample-a","problem":"same question","steps":["ok"],"label":-1}',
+                '{"id":"sample-b","problem":"same   question","steps":["wrong"],"label":0}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = load_chain_records(path, input_format="processbench_jsonl")
+
+    assert rows[0].problem_group_id == rows[1].problem_group_id
+    assert rows[0].problem_group_id == stable_problem_group_id("same question")
+    assert [row.process_correct for row in rows] == [1, 0]
+
+
+def test_processbench_loader_rejects_out_of_range_process_label(tmp_path) -> None:
+    path = tmp_path / "gsm8k.jsonl"
+    path.write_text(
+        '{"id":"bad","problem":"q","steps":["only"],"label":1}\n',
+        encoding="utf-8",
+    )
+
+    with np.testing.assert_raises(ValueError):
+        load_chain_records(path, input_format="processbench_jsonl")
 
 
 def test_prompt_flow_detects_prompt_aligned_residual_update() -> None:
@@ -69,9 +145,10 @@ def test_prompt_flow_detects_prompt_aligned_residual_update() -> None:
         [h0, h1],
         logits=None,
         prompt_token_indices=np.asarray([0, 1], dtype=np.int64),
+        question_token_indices=np.asarray([0], dtype=np.int64),
         response_token_start=2,
         step_ranges=[(2, 3), (4, 5)],
-        layers=[0],
+        layers=[1],
         subspace_k=2,
         prefix_k=2,
         rng=np.random.default_rng(0),
@@ -85,6 +162,7 @@ def test_prompt_flow_detects_prompt_aligned_residual_update() -> None:
     assert prompt_frac[1] < 0.01
     assert off_prompt[0] < 0.01
     assert off_prompt[1] > 0.99
+    assert scores[MetricNames.QUESTION_FRAC][0] > 0.49
 
 
 def test_summary_contains_chain_level_prompt_scores() -> None:
@@ -113,16 +191,20 @@ def test_icr_extractor_returns_finite_step_scores_on_synthetic_cache() -> None:
         attn[0, i, : i + 1] = 1.0 / (i + 1)
     cache = ForwardCache(
         input_ids=np.arange(5),
+        attention_mask=np.ones(5, dtype=np.int64),
         offset_mapping=[(0, 1)] * 5,
         prompt_len_tokens=2,
+        prompt_token_range=(0, 2),
+        question_token_range=(0, 2),
         response_start_token=2,
+        response_token_range=(2, 5),
         step_token_ranges=[(2, 3)],
         hidden_states=[h0, h1],
         attentions=[attn],
         logits=None,
         seq_len=5,
     )
-    cfg = ExtractionConfig(layers=(0,))
+    cfg = ExtractionConfig(layers=(1,))
     rec = ChainRecord(chain_idx=0, problem_id=0, problem="q", steps=["s"], response="s")
 
     scores = ICRResidualMismatchExtractor().compute(cache, rec, cfg)
@@ -140,10 +222,259 @@ def test_step_residual_vectors_are_layer_concatenated_means() -> None:
     h2[1] += np.asarray([0.0, 2.0, 0.0], dtype=np.float32)
     h2[2] += np.asarray([0.0, 4.0, 0.0], dtype=np.float32)
 
-    vec = compute_step_residual_vectors([h0, h1, h2], step_ranges=[(2, 3)], layers=[0, 1])
+    vec = compute_step_residual_vectors([h0, h1, h2], step_ranges=[(2, 3)], layers=[1, 2])
 
     assert vec.shape == (1, 6)
     assert np.allclose(vec[0], [2.0, 0.0, 0.0, -2.0, 3.0, 0.0])
+
+
+def test_step_boundary_states_preserve_pre_step_and_step_end() -> None:
+    h0 = np.zeros((5, 2), dtype=np.float32)
+    h1 = np.arange(10, dtype=np.float32).reshape(5, 2)
+
+    pre, end = compute_step_boundary_state_vectors(
+        [h0, h1],
+        step_ranges=[(2, 3), (4, 4)],
+        layers=[1],
+    )
+
+    assert pre.shape == (2, 1, 2)
+    assert np.allclose(pre[:, 0], h1[[1, 3]])
+    assert np.allclose(end[:, 0], h1[[3, 4]])
+
+
+def test_uncertainty_uses_only_causal_prediction_positions() -> None:
+    logits = np.zeros((5, 3), dtype=np.float64)
+    # Token 2 is predicted at position 1 and is highly confident.
+    logits[1] = np.asarray([0.0, 0.0, 10.0])
+    # Position 2 predicts token 3 and is deliberately uniform.
+    logits[2] = np.asarray([0.0, 0.0, 0.0])
+    # Position 3 is after the step and must never affect this one-token step.
+    logits[3] = np.asarray([20.0, -20.0, -20.0])
+    cache = ForwardCache(
+        input_ids=np.asarray([0, 1, 2, 1, 0]),
+        attention_mask=np.ones(5, dtype=np.int64),
+        offset_mapping=[(i, i + 1) for i in range(5)],
+        prompt_len_tokens=2,
+        prompt_token_range=(0, 2),
+        question_token_range=(0, 2),
+        response_start_token=2,
+        response_token_range=(2, 5),
+        step_token_ranges=[(2, 2)],
+        logits=logits,
+        seq_len=5,
+    )
+    cfg = ExtractionConfig(layers=(1,))
+    rec = ChainRecord(chain_idx=0, problem_id=0, problem="q", steps=["s"], response="s")
+
+    scores = UncertaintyExtractor().compute(cache, rec, cfg)
+
+    assert scores[MetricNames.TOKEN_ENTROPY][0] < 0.01
+    assert scores[MetricNames.TOKEN_ENTROPY_FIRST][0] == scores[MetricNames.TOKEN_ENTROPY_LAST][0]
+    assert scores[MetricNames.TOKEN_NLL][0] < 0.01
+
+
+def test_response_token_states_preserve_selected_depths_and_token_axis() -> None:
+    h0 = np.zeros((6, 2), dtype=np.float32)
+    h1 = np.arange(12, dtype=np.float32).reshape(6, 2)
+    h2 = h1 + 100.0
+
+    states = compute_response_token_layer_states(
+        [h0, h1, h2], response_token_range=(2, 6), layers=[1, 2]
+    )
+
+    assert states.shape == (4, 2, 2)
+    assert np.allclose(states[:, 0], h1[2:6])
+    assert np.allclose(states[:, 1], h2[2:6])
+
+
+def test_torch_metric_backend_matches_numpy_semantics_when_available() -> None:
+    import pytest
+
+    torch = pytest.importorskip("torch")
+    h0 = np.zeros((6, 3), dtype=np.float32)
+    h1 = h0.copy()
+    h2 = h0.copy()
+    h1[1:4, 0] = np.asarray([1.0, 2.0, 3.0])
+    h2[1:4, 1] = np.asarray([2.0, 4.0, 6.0])
+    ranges = [(2, 3), (4, 4)]
+    layers = [1, 2]
+
+    expected_residual = compute_step_residual_vectors(
+        [h0, h1, h2], step_ranges=ranges, layers=layers
+    )
+    actual_residual = compute_step_residual_vectors(
+        [torch.from_numpy(h0), torch.from_numpy(h1), torch.from_numpy(h2)],
+        step_ranges=ranges,
+        layers=layers,
+    )
+    expected_pre, expected_end = compute_step_boundary_state_vectors(
+        [h0, h1, h2], step_ranges=ranges, layers=layers
+    )
+    actual_pre, actual_end = compute_step_boundary_state_vectors(
+        [torch.from_numpy(h0), torch.from_numpy(h1), torch.from_numpy(h2)],
+        step_ranges=ranges,
+        layers=layers,
+    )
+
+    assert np.allclose(actual_residual, expected_residual)
+    assert np.allclose(actual_pre, expected_pre, equal_nan=True)
+    assert np.allclose(actual_end, expected_end, equal_nan=True)
+
+
+def test_compact_output_summaries_preserve_causal_token_axis_when_available() -> None:
+    import pytest
+
+    torch = pytest.importorskip("torch")
+    from prompt_control_flow.teacher_forcing import (
+        compute_compact_token_output_summaries,
+    )
+
+    logits = torch.zeros((5, 4), dtype=torch.float32)
+    input_ids = torch.tensor([0, 1, 2, 3, 0], dtype=torch.long)
+    logits[1, 2] = 12.0  # position 1 predicts target token at position 2
+
+    summary = compute_compact_token_output_summaries(
+        logits, input_ids, token_chunk_size=2
+    )
+
+    assert np.isnan(np.asarray(summary["nll"])[0])
+    assert float(np.asarray(summary["nll"])[2]) < 1e-3
+    assert np.shares_memory(
+        np.asarray(summary["topk_mass"]), np.asarray(summary["top10_mass"])
+    )
+
+    top_five = compute_compact_token_output_summaries(
+        logits, input_ids, token_chunk_size=2, top_k=5
+    )
+    assert "topk_mass" in top_five
+    assert "top10_mass" not in top_five
+
+
+def test_chain_extraction_uses_the_frozen_chat_replay_protocol(monkeypatch) -> None:
+    captured = {}
+
+    class ChatTokenizer:
+        name_or_path = "toy-tokenizer"
+        init_kwargs = {}
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            return f"<user>{messages[0]['content']}</user><assistant>"
+
+    class Model:
+        config = type("Config", (), {"_name_or_path": "toy-model", "_commit_hash": None})()
+
+    class ScoreExtractor:
+        name = "score"
+        requires_hidden = False
+        requires_attention = False
+        requires_logits = False
+
+        def compute(self, cache, record, cfg):
+            return {"score": np.asarray([1.0])}
+
+    def fake_forward(_model, _tokenizer, prompt, response, **kwargs):
+        captured.update(prompt=prompt, response=response, kwargs=kwargs)
+        return ForwardCache(
+            input_ids=np.asarray([1, 2, 3]),
+            attention_mask=np.ones(3, dtype=np.int64),
+            offset_mapping=[(0, 1), (1, 2), (2, 3)],
+            prompt_len_tokens=2,
+            prompt_token_range=(0, 2),
+            question_token_range=(0, 1),
+            response_start_token=2,
+            response_token_range=(2, 3),
+            step_token_ranges=[(2, 2)],
+            seq_len=3,
+            replay_kind="single_axis_no_special_fallback",
+            replay_protocol=kwargs["replay_protocol"],
+            prompt_provenance=kwargs["prompt_provenance"],
+            messages_json=kwargs["messages_json"],
+        )
+
+    monkeypatch.setattr("prompt_control_flow.extraction.run_teacher_forcing", fake_forward)
+    record = ChainRecord(
+        chain_idx=1,
+        problem_id=2,
+        problem="What is 1+1?",
+        steps=["2"],
+        response="2",
+    )
+    item = extract_chain_mechanisms(
+        Model(),
+        ChatTokenizer(),
+        record,
+        ExtractionConfig(layers=(1,), replay_protocol=PROCESSBENCH_OBSERVER_CHAT_V1),
+        [ScoreExtractor()],
+    )
+
+    assert item is not None
+    assert "What is 1+1?" in captured["prompt"]
+    assert captured["kwargs"]["question_text"] == "What is 1+1?"
+    assert item.metadata["replay_protocol"] == PROCESSBENCH_OBSERVER_CHAT_V1
+
+
+def test_exact_chain_extraction_never_replaces_the_stored_prompt(monkeypatch) -> None:
+    captured = {}
+
+    class Tokenizer:
+        name_or_path = "toy-tokenizer"
+        init_kwargs = {}
+
+        def apply_chat_template(self, *_args, **_kwargs):
+            raise AssertionError("exact replay must not render a new prompt")
+
+    class Model:
+        config = type("Config", (), {"_name_or_path": "toy-model", "_commit_hash": None})()
+
+    class ScoreExtractor:
+        name = "score"
+        requires_hidden = False
+        requires_attention = False
+        requires_logits = False
+
+        def compute(self, cache, record, cfg):
+            return {"score": np.asarray([1.0])}
+
+    def fake_forward(_model, _tokenizer, prompt, response, **kwargs):
+        captured.update(prompt=prompt, kwargs=kwargs)
+        return ForwardCache(
+            input_ids=np.asarray([1, 2]),
+            attention_mask=np.ones(2, dtype=np.int64),
+            offset_mapping=[(0, 1), (1, 2)],
+            prompt_len_tokens=1,
+            prompt_token_range=(0, 1),
+            question_token_range=(-1, -1),
+            response_start_token=1,
+            response_token_range=(1, 2),
+            step_token_ranges=[(1, 1)],
+            seq_len=2,
+            replay_kind="exact_artifact_ids",
+            replay_protocol=kwargs["replay_protocol"],
+            prompt_provenance=kwargs["prompt_provenance"],
+        )
+
+    monkeypatch.setattr("prompt_control_flow.extraction.run_teacher_forcing", fake_forward)
+    record = ChainRecord(
+        chain_idx=1,
+        problem_id=2,
+        problem="q",
+        steps=["a"],
+        response="a",
+        rendered_prompt="stored prompt",
+        exact_input_ids=[1, 2],
+        exact_attention_mask=[1, 1],
+        exact_token_offsets=[(0, 1), (1, 2)],
+        exact_step_token_ranges=[(1, 1)],
+        exact_response_start_token=1,
+    )
+    item = extract_chain_mechanisms(
+        Model(), Tokenizer(), record, ExtractionConfig(layers=(1,)), [ScoreExtractor()]
+    )
+
+    assert item is not None
+    assert captured["prompt"] == "stored prompt"
+    assert captured["kwargs"]["replay_protocol"] == EXACT_ARTIFACT_REPLAY
 
 
 def test_pack_extractions_can_store_flat_step_vector_bank() -> None:
@@ -156,12 +487,16 @@ def test_pack_extractions_can_store_flat_step_vector_bank() -> None:
                 steps=["a", "b"],
                 response="a\n\nb",
                 gold_error_step=-1,
+                problem_group_id="problem_sha256:abc",
+                process_correct=1,
+                final_answer_correct=0,
                 is_correct=1,
                 sample_idx=0,
             ),
             step_scores={name: np.asarray([0.1, 0.2], dtype=np.float32) for name in [MetricNames.PROMPT_FRAC]},
             chain_scores={f"mean_{MetricNames.PROMPT_FRAC}": 0.15},
             n_steps=2,
+            step_token_ranges=[(2, 2), (3, 3)],
             step_vectors=np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
             step_state_vectors=np.asarray([[5.0, 6.0], [7.0, 8.0]], dtype=np.float32),
             layers=(8,),
@@ -178,6 +513,9 @@ def test_pack_extractions_can_store_flat_step_vector_bank() -> None:
     assert packed["step_state_vector_chain_idx"].tolist() == [5, 5]
     assert packed["step_vector_step_idx"].tolist() == [0, 1]
     assert packed["step_state_vector_step_idx"].tolist() == [0, 1]
+    assert packed["problem_group_id"].tolist() == ["problem_sha256:abc"]
+    assert packed["process_correct"].tolist() == [1]
+    assert packed["final_answer_correct"].tolist() == [0]
     for key in [
         "chain_idx",
         "problem_id",
@@ -195,6 +533,52 @@ def test_pack_extractions_can_store_flat_step_vector_bank() -> None:
         "layers",
     ]:
         assert key in packed
+
+
+def test_state_memmap_and_response_shards_finalize_atomically(tmp_path) -> None:
+    store = FixedStateMemmap(
+        tmp_path / "states.partial.npy",
+        tmp_path / "states.npy",
+        capacity=3,
+        tail_shape=(2, 2),
+        dtype="float32",
+    )
+    store.append(np.ones((2, 2, 2), dtype=np.float32), chain_idx=4)
+    store.finalize()
+    saved = np.load(tmp_path / "states.npy", mmap_mode="r")
+    assert saved.shape == (3, 2, 2)
+    assert store.count == 2
+    assert store.chain_idx == [4, 4]
+
+    shards = ResponseStateShardWriter(
+        tmp_path / "responses.partial",
+        tmp_path / "responses",
+        dtype="float16",
+    )
+    relative = shards.write(np.ones((3, 2, 2), dtype=np.float32), chain_idx=9)
+    shards.finalize()
+    assert relative == "responses/row_00000000_chain_00000009.npy"
+    assert np.load(tmp_path / relative).shape == (3, 2, 2)
+
+
+def test_response_state_shards_do_not_collide_on_duplicate_chain_ids(tmp_path) -> None:
+    shards = ResponseStateShardWriter(
+        tmp_path / "responses.partial",
+        tmp_path / "responses",
+        dtype="float32",
+    )
+    first = shards.write(np.zeros((1, 1, 2), dtype=np.float32), chain_idx=7)
+    second = shards.write(np.ones((1, 1, 2), dtype=np.float32), chain_idx=7)
+
+    assert first != second
+    shards.finalize()
+    assert (tmp_path / first).exists()
+    assert (tmp_path / second).exists()
+
+
+def test_float16_state_storage_fails_instead_of_overflowing() -> None:
+    with np.testing.assert_raises(StateStorageError):
+        cast_state_array(np.asarray([70000.0], dtype=np.float32), "float16")
 
 
 def test_representation_geometry_appends_crossfit_scores() -> None:
@@ -326,8 +710,31 @@ def test_data_loader_preserves_processbench_and_multisample_labels(tmp_path) -> 
     assert len(rows) == 2
     assert rows[0].problem_id == 7
     assert rows[1].sample_idx == 1
-    assert rows[0].gold_error_step == -1
+    assert rows[0].gold_error_step == -2
     assert rows[1].is_correct == 0
+    assert rows[0].process_correct == -1
+    assert rows[1].process_correct == -1
+
+
+def test_process_correct_mapping_never_treats_unavailable_as_correct() -> None:
+    assert process_correct_from_gold(-2) == -1
+    assert process_correct_from_gold(-1) == 1
+    assert process_correct_from_gold(0) == 0
+
+
+def test_npz_loader_never_collapses_missing_problem_text_into_one_group(tmp_path) -> None:
+    path = tmp_path / "legacy_multisample.npz"
+    np.savez(
+        path,
+        problem_ids=np.asarray([7, 8], dtype=np.int64),
+        sample_idx=np.asarray([0, 0], dtype=np.int64),
+        steps_text=np.asarray([["a"], ["b"]], dtype=object),
+        is_correct=np.asarray([1, 0], dtype=np.int64),
+    )
+
+    rows = load_chain_records(path)
+
+    assert [row.problem_group_id for row in rows] == ["problem_id:7", "problem_id:8"]
 
 
 def test_response_eval_prefers_is_correct_when_available() -> None:
@@ -340,6 +747,20 @@ def test_response_eval_prefers_is_correct_when_available() -> None:
 
     out = evaluate_response(metrics)
 
+    assert out["single"]["risk"] == 1.0
+
+
+def test_response_eval_excludes_unknown_labels() -> None:
+    metrics = {
+        "chain_scores": np.asarray([[0.1], [0.9], [100.0]], dtype=np.float64),
+        "chain_score_names": np.asarray(["risk"], dtype=object),
+        "gold_error_step": np.asarray([-1, 0, -2], dtype=np.int64),
+        "is_correct": np.asarray([1, 0, -1], dtype=np.int64),
+    }
+
+    out = evaluate_response(metrics)
+
+    assert out["n"] == 2
     assert out["single"]["risk"] == 1.0
 
 

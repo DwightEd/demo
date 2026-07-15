@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from prompt_control_flow.teacher_forcing import prepare_teacher_forcing_trace
+from prompt_control_flow.teacher_forcing import SparseLayerSequence, prepare_teacher_forcing_trace
 from prompt_control_flow.data import load_chain_records
+from prompt_control_flow.extraction import ChainExtraction, save_extractions
+from prompt_control_flow.data import ChainRecord
 from prompt_control_flow.cli.extract_mechanisms import model_identity_matches
 import numpy as np
 import json
@@ -42,6 +44,33 @@ def test_fallback_alignment_never_introduces_bos_axis_shift() -> None:
     ]
 
 
+def test_sparse_layer_sequence_preserves_absolute_depth_indices() -> None:
+    values = SparseLayerSequence(5, {1: "one", 4: "four"})
+
+    assert len(values) == 5
+    assert values[1] == "one"
+    assert values[4] == "four"
+    assert list(values) == ["one", "four"]
+    with pytest.raises(IndexError, match="was not retained"):
+        _ = values[2]
+
+
+def test_fallback_alignment_tracks_the_exact_question_span() -> None:
+    problem = "What is 1+1?"
+    prompt = f"Instruction\nProblem: {problem}\nAnswer:"
+    trace = prepare_teacher_forcing_trace(
+        BosMockTokenizer(),
+        prompt,
+        "2",
+        steps=["2"],
+        question_text=problem,
+        max_seq_len=100,
+    )
+
+    start = prompt.rfind(problem)
+    assert trace["question_token_range"] == (start, start + len(problem))
+
+
 def test_exact_artifact_axis_is_replayed_without_calling_tokenizer() -> None:
     class ForbiddenTokenizer:
         def __call__(self, *_args, **_kwargs):
@@ -62,6 +91,29 @@ def test_exact_artifact_axis_is_replayed_without_calling_tokenizer() -> None:
     assert trace["input_ids"] == [101, 102, 201, 202, 203, 204]
     assert trace["step_token_ranges"] == [(2, 3), (4, 5)]
     assert trace["response_start_token"] == 2
+
+
+def test_exact_artifact_can_derive_question_span_without_retokenizing() -> None:
+    class ForbiddenTokenizer:
+        def __call__(self, *_args, **_kwargs):
+            raise AssertionError("exact token artifacts must not be re-tokenized")
+
+    prompt = "Q:ab"
+    trace = prepare_teacher_forcing_trace(
+        ForbiddenTokenizer(),
+        prompt,
+        "c",
+        steps=["c"],
+        question_text="ab",
+        max_seq_len=5,
+        exact_input_ids=[10, 11, 12, 13, 14],
+        exact_attention_mask=[1, 1, 1, 1, 1],
+        exact_token_offsets=[(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)],
+        exact_step_token_ranges=[(4, 4)],
+        exact_response_start_token=4,
+    )
+
+    assert trace["question_token_range"] == (2, 4)
 
 
 def test_max_seq_len_cannot_silently_drop_a_reasoning_step() -> None:
@@ -116,7 +168,8 @@ def test_exact_npz_loader_accepts_scalar_model_metadata_and_kept_axis(tmp_path) 
     rows = load_chain_records(path)
     assert len(rows) == 1
     assert rows[0].steps == ["a", "c"]
-    assert rows[0].generator == "model-x"
+    assert rows[0].generator is None
+    assert rows[0].source_model == "model-x"
     assert rows[0].dataset == "internal:toy"
     assert rows[0].exact_input_ids == [10, 11, 12, 13, 14]
     assert rows[0].exact_step_token_ranges == [(2, 2), (4, 4)]
@@ -142,3 +195,60 @@ def test_exact_model_identity_guard_accepts_path_alias_only() -> None:
     assert model_identity_matches("meta-llama/Llama-3.1-8B-Instruct", "D:/models/Llama-3.1-8B-Instruct")
     assert not model_identity_matches("org/model-a", "org/model-b")
     assert not model_identity_matches("org-a/model-x", "org-b/model-x")
+
+
+def test_mechanism_artifact_round_trips_as_an_exact_replay_trace(tmp_path) -> None:
+    item = ChainExtraction(
+        record=ChainRecord(
+            chain_idx=4,
+            problem_id=7,
+            problem_group_id="problem_sha256:group",
+            problem="q",
+            steps=["a", "b"],
+            response="a\n\nb",
+            gold_error_step=1,
+            process_correct=0,
+            final_answer_correct=1,
+            is_correct=0,
+            sample_idx=2,
+            generator="response-generator",
+            source_model="observer-model",
+            source_tokenizer="observer-tokenizer",
+        ),
+        step_scores={"score": np.asarray([0.1, 0.2])},
+        chain_scores={"mean_score": 0.15},
+        n_steps=2,
+        step_token_ranges=[(2, 2), (3, 3)],
+        trace_input_ids=np.asarray([10, 11, 12, 13]),
+        trace_attention_mask=np.asarray([1, 1, 1, 1]),
+        trace_token_offsets=np.asarray([(0, 1), (1, 2), (2, 3), (4, 5)]),
+        prompt_token_range=(0, 2),
+        question_token_range=(0, 1),
+        response_token_range=(2, 4),
+        rendered_prompt="q:",
+        response_text="a b",
+        layers=(1,),
+        metadata={
+            "replay_protocol": "toy",
+            "token_replay_kind": "exact_artifact_ids",
+            "loaded_model": "observer-model",
+            "loaded_tokenizer": "observer-tokenizer",
+        },
+    )
+    path = tmp_path / "mechanisms.npz"
+
+    save_extractions([item], path)
+    rows = load_chain_records(path)
+
+    assert len(rows) == 1
+    assert rows[0].chain_idx == 4
+    assert rows[0].problem_id == 7
+    assert rows[0].problem_group_id == "problem_sha256:group"
+    assert rows[0].process_correct == 0
+    assert rows[0].final_answer_correct == 1
+    assert rows[0].generator == "response-generator"
+    assert rows[0].source_model == "observer-model"
+    assert rows[0].source_tokenizer == "observer-tokenizer"
+    assert rows[0].exact_input_ids == [10, 11, 12, 13]
+    assert rows[0].exact_step_token_ranges == [(2, 2), (3, 3)]
+    assert rows[0].exact_question_token_range == (0, 1)

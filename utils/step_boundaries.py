@@ -610,10 +610,22 @@ def trace_records_to_npz(records: Sequence[Dict[str, Any]]) -> Dict[str, np.ndar
         layer_sets = [tuple(int(x) for x in r["prompt_hidden_layers"]) for r in records]
         if any(x != layer_sets[0] for x in layer_sets[1:]):
             raise TokenAlignmentError("prompt hidden layer sets differ across records")
+        prompt_hidden_arrays = [np.asarray(r["prompt_hidden"]) for r in records]
+        if any(not np.isfinite(value.astype(np.float32, copy=False)).all()
+               for value in prompt_hidden_arrays):
+            raise TokenAlignmentError("prompt hidden states contain non-finite values")
+        prompt_hidden_dtype = np.result_type(
+            *[value.dtype for value in prompt_hidden_arrays]
+        )
+        if prompt_hidden_dtype not in {np.dtype(np.float16), np.dtype(np.float32)}:
+            prompt_hidden_dtype = np.dtype(np.float32)
         payload["prompt_hidden_layers"] = np.asarray(layer_sets[0], dtype=np.int32)
         payload["prompt_hidden"] = _object_vector([
-            np.asarray(r["prompt_hidden"], dtype=np.float16) for r in records
+            np.asarray(value, dtype=prompt_hidden_dtype) for value in prompt_hidden_arrays
         ])
+        payload["prompt_hidden_storage_dtype"] = np.asarray(
+            str(prompt_hidden_dtype)
+        )
     return payload
 
 

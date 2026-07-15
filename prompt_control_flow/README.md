@@ -375,7 +375,7 @@ Interpretation:
 Run teacher-forcing extraction:
 
 ```bash
-python -m prompt_control_flow.cli.extract_prompt_flow \
+python prompt_control_flow/cli/extract_prompt_flow.py \
   --input data/features/full_gsm8k.npz \
   --model /path/to/model \
   --output outputs/prompt_control_flow/full_gsm8k_metrics.npz \
@@ -391,23 +391,49 @@ preferred entry point for new experiments because it can combine hidden-only
 prompt-flow, logit uncertainty, and optional ICR-style attention/residual
 mismatch without saving full attention tensors to disk:
 
+The implementation follows five explicit boundaries:
+
+1. `replay_protocols.py` freezes observer prompts and problem grouping.
+2. `data.py` loads labels/text without inferring unavailable process labels.
+3. `teacher_forcing.py` owns one exact token axis and causal prediction shift.
+4. `extractors.py` computes optional mechanism views from a shared cache.
+5. `storage.py` validates precision and atomically commits state artifacts.
+
+Model forward passes are currently one chain at a time. Within each chain,
+selected-layer geometry and chunked output summaries run on the accelerator;
+the code does not claim ragged multi-chain forward batching. This keeps the
+first exact-trace implementation auditable while leaving length-bucketed model
+batching as a throughput-only extension.
+
 ```bash
-python prompt_control_flow/cli/extract_mechanisms.py \
-  --input data/processbench/gsm8k.jsonl \
-  --input_format processbench_jsonl \
+python extract_mechanisms.py \
+  --input data/hf_datasets/ProcessBench \
+  --input_format processbench_source \
+  --subset gsm8k \
   --model /gz-data/models/Meta-Llama-3.1-8B-Instruct \
   --output outputs/mechanisms/gsm8k_llama31.npz \
   --layers 8,10,12,14,16,18,20,22 \
+  --replay_protocol processbench_observer_chat_v1 \
   --enable_prompt_flow \
   --enable_uncertainty \
   --enable_icr \
-  --store_step_state_vectors
+  --store_step_state_vectors \
+  --store_response_token_states \
+  --state_storage_dtype float16
 ```
 
 The ICR branch is opt-in via `--enable_icr` because it requires
-`output_attentions=True` and forces eager attention.  The output includes
-`step_token_ranges`, `generator`, `dataset`, compact step scores, chain scores,
-and a `profile_summary.json` next to the `.npz`.
+`output_attentions=True` and forces eager attention. It is deliberately limited
+to sequences no longer than `--full_attention_token_threshold` (default 1200).
+There is no model-agnostic exact layerwise-attention implementation yet, so a
+longer ICR sample fails before allocating the quadratic tensor instead of
+silently using an approximate path. The output includes the
+exact replay axis, separate process/final labels, causal pre-step and
+retrospective step-state views, compact scores, and `profile_summary.json`.
+Large response-token states are sharded instead of embedded in the NPZ.
+The current ICR score is explicitly a routing/state-alignment proxy: it compares
+attention-selected source states with the total block update and is not exact
+per-head OV attribution. Artifacts record this limitation in `icr_semantics`.
 
 ### OC-GPI: output-conditioned geometry
 

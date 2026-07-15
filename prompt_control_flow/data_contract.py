@@ -19,7 +19,7 @@ PROCESSBENCH_REQUIRED_FIELDS = {
     "label",
 }
 
-DATA_CONTRACT_VERSION = "reasoning_trace_contract_v1"
+DATA_CONTRACT_VERSION = "reasoning_trace_contract_v2"
 
 
 def _json_scalar(z: np.lib.npyio.NpzFile, key: str) -> dict[str, Any]:
@@ -300,7 +300,8 @@ def inspect_reasoning_npz(path: str | Path) -> dict[str, Any]:
 
     if "process_correct" not in files and has_process_labels:
         warnings.append(
-            "process_correct is implicit; derive it only as gold_error_step < 0"
+            "process_correct is implicit; map -1 to correct, nonnegative to "
+            "error, and -2 to unavailable"
         )
     if "final_answer_correct" not in files and has_final_answer_labels:
         warnings.append(

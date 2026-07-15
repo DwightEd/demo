@@ -45,6 +45,20 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 
 from prompt_control_flow.data_contract import DATA_CONTRACT_VERSION
+from prompt_control_flow.replay_protocols import (
+    PROCESSBENCH_OBSERVER_CHAT_V1,
+    SUPPORTED_OBSERVER_PROTOCOLS,
+    render_processbench_observer_prompt,
+    stable_problem_group_id,
+)
+from prompt_control_flow.teacher_forcing import (
+    compute_compact_token_output_summaries,
+)
+from prompt_control_flow.storage import (
+    StateStorageError,
+    cast_state_array,
+    storage_dtype,
+)
 from utils import (
     step_layer_spectral_summary,
     step_layer_cim_summary,
@@ -86,15 +100,23 @@ def load_processbench_subset(dataset_name, subset, n_correct, n_error, seed=42):
     return [correct[i] for i in correct_idx], [error[i] for i in error_idx]
 
 
-def build_prompt_and_response(example):
+def build_prompt_and_response(
+    example,
+    tokenizer,
+    replay_protocol=PROCESSBENCH_OBSERVER_CHAT_V1,
+):
     """ProcessBench → (prompt, response, steps)."""
     problem = example["problem"]
     steps = example.get("steps", [])
     if not steps:
         return None, None, None
     response = "\n\n".join(steps)
-    prompt = f"Problem: {problem}\n\nSolution:\n\n"
-    return prompt, response, steps
+    rendered = render_processbench_observer_prompt(
+        tokenizer,
+        problem,
+        protocol=replay_protocol,
+    )
+    return rendered.rendered_prompt, response, steps
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +193,7 @@ def extract_spectral_field(
     return_trace: bool = False,
     store_prompt_hidden: bool = False,
     prompt_hidden_layer_indices: tuple | None = None,
+    state_storage_dtype: str = "float16",
 ):
     """Run one forward pass and reduce each (step, layer) token cloud to (D, V, C).
 
@@ -234,7 +257,7 @@ def extract_spectral_field(
 
     trace = truncate_trace_alignment(trace, max_seq_len)
     ranges = list(trace["all_step_token_ranges"])
-    if len(ranges) < 3:
+    if not ranges:
         return empty_result()
 
     # Replay the exact generation token axis. Never re-tokenize prompt+response:
@@ -256,8 +279,8 @@ def extract_spectral_field(
         raise TokenAlignmentError("model input no longer has the exact generation prompt prefix")
 
     # Keep only steps whose token range fits inside the truncated sequence.
-    safe = [(j, a, b) for j, (a, b) in enumerate(ranges) if b < seq_len and b - a + 1 >= 2]
-    if len(safe) < 3:
+    safe = [(j, a, b) for j, (a, b) in enumerate(ranges) if b < seq_len]
+    if not safe:
         return empty_result()
 
     outputs = model(**encoding, output_hidden_states=True)
@@ -284,7 +307,10 @@ def extract_spectral_field(
                 f"prompt hidden layers {bad_layers} are outside 0..{n_layers_total - 1}"
             )
         prompt_hidden = [
-            hidden_states[int(l)][0, :prompt_len].float().cpu().numpy().astype(np.float16)
+            cast_state_array(
+                hidden_states[int(l)][0, :prompt_len].float().cpu().numpy(),
+                state_storage_dtype,
+            )
             for l in prompt_layers
         ]
         trace["prompt_hidden"] = np.stack(prompt_hidden, axis=1)  # (P, L_prompt, d)
@@ -338,7 +364,7 @@ def extract_spectral_field(
         for row, (_, a, b) in enumerate(safe):
             H_jl = H_l[a : b + 1]  # (n_j, d)  -- raw token cloud
             if l in cloud_set:
-                cloud_acc[l].append(H_jl.astype(np.float16))
+                cloud_acc[l].append(cast_state_array(H_jl, state_storage_dtype))
             if V_R is not None:
                 H_jl = project_to_reasoning(H_jl, V_R)  # (n_j, d_R)
             D, V, C = step_layer_spectral_summary(
@@ -386,8 +412,10 @@ def extract_spectral_field(
                         if store_vectors:
                             if sv_vec[m] is None:
                                 sv_vec[m] = np.full((T_eff, L_sub, z.shape[0]),
-                                                    np.nan, dtype=np.float16)
-                            sv_vec[m][row, li] = z.astype(np.float16)
+                                                    np.nan, dtype=storage_dtype(state_storage_dtype))
+                            sv_vec[m][row, li] = cast_state_array(
+                                z, state_storage_dtype
+                            )
                         z_metric = z
                         if wl is not None:
                             mu_l, sg_l = wl
@@ -395,49 +423,55 @@ def extract_spectral_field(
                         sv_pr[m][row, li] = participation_ratio(z_metric)
                         sv_ae[m][row, li] = activation_entropy(z_metric)
 
-    # Per-step output-token entropy (layer-independent): entropy of the model's
-    # next-token distribution at the step's last token position. Tests whether
-    # activation participation correlates with predictive uncertainty.
+    # Per-step output uncertainty on realized tokens. For target token p,
+    # logits[p-1] is the causal prediction. logits[b] predicts the separator or
+    # next step and therefore must not be attributed to the current step.
     if step_vectors and logits is not None:
         import torch
         seq_ids = encoding["input_ids"][0]
         for row, (_, a, b) in enumerate(safe):
-            lg = logits[b].float()                      # (vocab,) predicting token b+1
-            logp = torch.log_softmax(lg, dim=-1)
+            targets = torch.arange(max(int(a), 1), int(b) + 1, device=logits.device)
+            if targets.numel() == 0:
+                continue
+            step_logits = logits.index_select(0, targets - 1).float()
+            logp = torch.log_softmax(step_logits, dim=-1)
             p = logp.exp()
-            out_entropy[row] = float(-(p * logp).sum().item())
-            # committal p(1-p) of the REALIZED next token (the step boundary token)
-            if b + 1 < seq_ids.shape[0]:
-                ptok = float(p[int(seq_ids[b + 1])].item())
-                out_committal[row] = ptok * (1.0 - ptok)
+            out_entropy[row] = float((-(p * logp).sum(-1)).mean().item())
+            realized = seq_ids.index_select(0, targets)
+            realized_p = logp.gather(-1, realized[:, None]).exp().squeeze(-1)
+            out_committal[row] = float(
+                (realized_p * (1.0 - realized_p)).mean().item()
+            )
 
     # Per-TOKEN uncertainty over the response tokens (for uncertainty-trace-profile, 34):
     #   entropy   = H(softmax(logits_{t-1}))            distributional aleatoric
     #   committal = p(1-p), p = prob of the actual token t   committal aleatoric
-    # Computed from the SAME forward pass (no extra memory / no output_logits in generate),
-    # vectorised over the response range -> one (R, V) tensor per chain, freed immediately.
+    # Computed from the same forward pass in token chunks. Only O(sequence)
+    # summaries leave the accelerator; no response-by-vocabulary tensor is
+    # materialized for the whole chain.
     tok_ent = tok_com = tok_chosen_logp = tok_margin = tok_top5_mass = None
     if step_vectors and token_uncertainty and logits is not None and len(safe) > 0:
         import torch
         a0 = max(1, int(safe[0][1])); b1 = int(safe[-1][2])
         if b1 >= a0:
-            pos = torch.arange(a0, b1 + 1, device=logits.device)
-            sub = logits.index_select(0, pos - 1).float()          # (R, V) at predicting positions
-            lp = torch.log_softmax(sub, dim=-1); p = lp.exp()
-            ent = -(p * lp).sum(-1)                                 # (R,)
-            tgt = encoding["input_ids"][0].index_select(0, pos)     # actual next tokens
-            chosen_lp = lp.gather(-1, tgt.view(-1, 1)).squeeze(-1)
-            ptok = chosen_lp.exp()
-            com = ptok * (1 - ptok)
-            top_logits = torch.topk(sub, k=2, dim=-1).values
-            margin = top_logits[:, 0] - top_logits[:, 1]
-            top5_mass = torch.topk(p, k=5, dim=-1).values.sum(dim=-1)
-            tok_ent = ent.detach().cpu().numpy().astype(np.float32)
-            tok_com = com.detach().cpu().numpy().astype(np.float32)
-            tok_chosen_logp = chosen_lp.detach().cpu().numpy().astype(np.float32)
-            tok_margin = margin.detach().cpu().numpy().astype(np.float32)
-            tok_top5_mass = top5_mass.detach().cpu().numpy().astype(np.float32)
-            del sub, lp, p, chosen_lp, top_logits, margin, top5_mass
+            summaries = compute_compact_token_output_summaries(
+                logits,
+                encoding["input_ids"][0],
+                token_chunk_size=128,
+                top_k=5,
+            )
+            sl = slice(a0, b1 + 1)
+            chosen_lp = np.asarray(summaries["chosen_logprob"])[sl]
+            chosen_p = np.exp(chosen_lp)
+            tok_ent = np.asarray(summaries["entropy"])[sl].astype(np.float32)
+            tok_com = (chosen_p * (1.0 - chosen_p)).astype(np.float32)
+            tok_chosen_logp = chosen_lp.astype(np.float32)
+            tok_margin = np.asarray(summaries["top1_top2_margin"])[sl].astype(
+                np.float32
+            )
+            tok_top5_mass = np.asarray(summaries["topk_mass"])[sl].astype(
+                np.float32
+            )
 
     if store_geometry and geom_mu is not None:
         GEOM = {"mu": geom_mu, "eigvals": geom_eigvals, "eigvecs": geom_eigvecs}
@@ -501,6 +535,18 @@ def main():
                              'e.g. "0,8,16,24,30,31". Index 0 = embedding output, '
                              '1..L = transformer block outputs.')
     parser.add_argument("--max_seq_len", type=int, default=4096)
+    parser.add_argument(
+        "--state_storage_dtype",
+        default="float16",
+        choices=["float16", "float32"],
+        help="On-disk hidden-state precision; float16 overflow fails closed.",
+    )
+    parser.add_argument(
+        "--replay_protocol",
+        default=PROCESSBENCH_OBSERVER_CHAT_V1,
+        choices=list(SUPPORTED_OBSERVER_PROTOCOLS),
+        help="Frozen observer prompt protocol; plain mode is a legacy ablation.",
+    )
     parser.add_argument("--output", default="data/spectral_field.npz")
     parser.add_argument("--seed", type=int, default=42)
     # Reasoning-subspace projection options.
@@ -648,12 +694,20 @@ def main():
           f"reasoning_subspace={V_R is not None}, "
           f"rank_mode={rank_mode_str}) ...")
     rows = []
+    skip_rows = []
     skipped = 0
     for ex_set, _tag in [(correct_examples, "correct"), (error_examples, "error")]:
         for ex in tqdm(ex_set, desc=_tag):
-            prompt, response, steps = build_prompt_and_response(ex)
+            prompt, response, steps = build_prompt_and_response(
+                ex,
+                tokenizer,
+                replay_protocol=args.replay_protocol,
+            )
             if prompt is None:
                 skipped += 1
+                skip_rows.append(
+                    {"id": str(ex.get("id", "")), "reason": "empty_steps"}
+                )
                 continue
             try:
                 M_D, M_V, M_C, kept_steps, layers_used, GEOM, CIM, SV, TRACE = extract_spectral_field(
@@ -675,6 +729,7 @@ def main():
                     return_trace=True,
                     store_prompt_hidden=args.store_prompt_hidden,
                     prompt_hidden_layer_indices=prompt_hidden_layers,
+                    state_storage_dtype=args.state_storage_dtype,
                     store_clouds=args.store_clouds,
                     cloud_layer_indices=cloud_layers,
                     token_uncertainty=args.store_token_outputs,
@@ -683,13 +738,26 @@ def main():
                 # Trace corruption is a pipeline invariant violation, not a
                 # recoverable bad sample. Stop before writing mixed token axes.
                 raise
+            except StateStorageError:
+                # Numeric corruption must not create a selectively filtered
+                # artifact. The user must choose an adequate storage dtype.
+                raise
             except Exception as e:
                 print(f"  warn: extraction failed: {e}")
                 skipped += 1
+                skip_rows.append(
+                    {
+                        "id": str(ex.get("id", "")),
+                        "reason": f"{type(e).__name__}: {e}",
+                    }
+                )
                 continue
 
-            if M_D is None or M_D.shape[0] < 3:
+            if M_D is None or M_D.shape[0] == 0:
                 skipped += 1
+                skip_rows.append(
+                    {"id": str(ex.get("id", "")), "reason": "empty_aligned_trace"}
+                )
                 continue
 
             # Map original label (first-error step in ORIGINAL step indexing) to
@@ -703,6 +771,12 @@ def main():
                 # -2 means "had an error but it was dropped by truncation"; skip
                 if mapped_label == -2:
                     skipped += 1
+                    skip_rows.append(
+                        {
+                            "id": str(ex.get("id", "")),
+                            "reason": "gold_error_step_removed_from_time_axis",
+                        }
+                    )
                     continue
 
             rows.append({
@@ -710,8 +784,10 @@ def main():
                 "problem": str(ex.get("problem", "")),
                 "generator": str(ex.get("generator", "")),
                 "label": mapped_label,
-                "final_answer_correct": int(
-                    bool(ex.get("final_answer_correct", False))
+                "final_answer_correct": (
+                    int(bool(ex["final_answer_correct"]))
+                    if "final_answer_correct" in ex
+                    else -1
                 ),
                 "n_steps": int(M_D.shape[0]),
                 "steps_text": np.array([steps[int(k)] for k in kept_steps], dtype=object),
@@ -727,7 +803,12 @@ def main():
             })
 
     if not rows:
+        skip_path = os.path.abspath(f"{args.output}.skip_report.json")
+        os.makedirs(os.path.dirname(skip_path) or ".", exist_ok=True)
+        with open(skip_path, "w", encoding="utf-8") as stream:
+            json.dump(skip_rows, stream, indent=2, ensure_ascii=False)
         print("ERROR: no valid trajectories.")
+        print(f"Skip report -> {skip_path}")
         return
 
     n_layers_sub = rows[0]["M_D"].shape[1]
@@ -737,7 +818,10 @@ def main():
     save_dict = dict(
         ids=np.array([r["id"] for r in rows], dtype=object),
         problems=np.array([r["problem"] for r in rows], dtype=object),
-        problem_ids=np.array([r["problem"] for r in rows], dtype=object),
+        problem_ids=np.arange(len(rows), dtype=np.int64),
+        problem_group_ids=np.array(
+            [stable_problem_group_id(r["problem"]) for r in rows], dtype=object
+        ),
         sample_idx=np.zeros(len(rows), dtype=np.int32),
         labels=np.array([r["label"] for r in rows], dtype=np.int32),
         gold_error_step=np.array([r["label"] for r in rows], dtype=np.int32),
@@ -746,7 +830,24 @@ def main():
             [r["final_answer_correct"] for r in rows], dtype=np.int32
         ),
         is_correct=np.array([r["label"] < 0 for r in rows], dtype=np.int32),
+        generator=np.array([r["generator"] for r in rows], dtype=object),
         source_generators=np.array([r["generator"] for r in rows], dtype=object),
+        source_model=np.array([args.model] * len(rows), dtype=object),
+        source_tokenizer=np.array(
+            [str(getattr(tokenizer, "name_or_path", args.model))] * len(rows),
+            dtype=object,
+        ),
+        source_model_revision=np.array(
+            [str(getattr(model.config, "_commit_hash", "") or "")] * len(rows),
+            dtype=object,
+        ),
+        source_tokenizer_revision=np.array(
+            [
+                str(getattr(tokenizer, "init_kwargs", {}).get("revision", "") or "")
+            ]
+            * len(rows),
+            dtype=object,
+        ),
         n_steps=np.array([r["n_steps"] for r in rows], dtype=np.int32),
         steps_text=np.array([r["steps_text"] for r in rows], dtype=object),
         M_D=np.array([r["M_D"] for r in rows], dtype=object),
@@ -762,11 +863,13 @@ def main():
         rank_energy_threshold=np.array(args.rank_energy_threshold),
         data_contract_version=np.array(DATA_CONTRACT_VERSION),
         trace_semantics=np.array("benchmark_observer_teacher_forcing"),
-        prompt_provenance=np.array("fixed_plain_problem_solution_observer_prompt"),
+        prompt_provenance=np.array(args.replay_protocol),
+        replay_protocol=np.array(args.replay_protocol),
         response_provenance=np.array("processbench_reformatted_steps_double_newline"),
         original_generation_trace_available=np.array(False),
         is_correct_semantics=np.array("process_correct"),
         label_semantics=np.array("gold_error_step_processbench"),
+        state_storage_dtype=np.array(args.state_storage_dtype),
     )
     # Shared exact-generation/teacher-forcing trace schema. This records the
     # actual no-special-token model input, offsets, question/response spans,
@@ -782,7 +885,8 @@ def main():
         "device": str(device),
         "source_mode": "teacher_forced_processbench",
         "trace_semantics": "benchmark_observer_teacher_forcing",
-        "prompt_provenance": "fixed_plain_problem_solution_observer_prompt",
+        "prompt_provenance": args.replay_protocol,
+        "replay_protocol": args.replay_protocol,
         "response_provenance": "processbench_reformatted_steps_double_newline",
         "original_generation_prompt_available": False,
         "original_generation_token_trace_available": False,
@@ -902,9 +1006,25 @@ def main():
     else:
         save_dict["clouds_stored"] = np.array(False)
 
-    np.savez(args.output, **save_dict)
+    output_path = os.path.abspath(args.output)
+    partial_path = f"{output_path}.partial"
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    if os.path.exists(partial_path):
+        os.remove(partial_path)
+    try:
+        with open(partial_path, "wb") as stream:
+            np.savez(stream, **save_dict)
+        os.replace(partial_path, output_path)
+    except Exception:
+        if os.path.exists(partial_path):
+            os.remove(partial_path)
+        raise
+    skip_path = f"{output_path}.skip_report.json"
+    with open(skip_path, "w", encoding="utf-8") as stream:
+        json.dump(skip_rows, stream, indent=2, ensure_ascii=False)
     print(f"Saved -> {args.output}"
           + ("  [with geometry]" if args.store_geometry else ""))
+    print(f"Skip report -> {skip_path}")
 
 
 if __name__ == "__main__":

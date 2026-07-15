@@ -170,14 +170,20 @@ def evaluate_response(metrics: Mapping[str, Any]) -> Dict[str, Any]:
     names = [str(x) for x in metrics["chain_score_names"].tolist()]
     if "is_correct" in metrics:
         correct = np.asarray(metrics["is_correct"], dtype=np.float64)
-        if np.isfinite(correct).any() and np.any(correct >= 0):
-            y = (correct == 0).astype(np.int32)
+        valid = np.isfinite(correct) & np.isin(correct, [0, 1])
+        if np.any(valid):
+            y = (correct[valid] == 0).astype(np.int32)
+            chain_scores = chain_scores[valid]
         else:
             gold = np.asarray(metrics["gold_error_step"], dtype=np.int64)
-            y = (gold >= 0).astype(np.int32)
+            valid = gold >= -1
+            y = (gold[valid] >= 0).astype(np.int32)
+            chain_scores = chain_scores[valid]
     else:
         gold = np.asarray(metrics["gold_error_step"], dtype=np.int64)
-        y = (gold >= 0).astype(np.int32)
+        valid = gold >= -1
+        y = (gold[valid] >= 0).astype(np.int32)
+        chain_scores = chain_scores[valid]
     metric_stats = {
         name: binary_metric_stats(y, chain_scores[:, k])
         for k, name in enumerate(names)

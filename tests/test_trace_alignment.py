@@ -174,6 +174,26 @@ class TraceAlignmentTest(unittest.TestCase):
         self.assertEqual(payload["prompt_hidden"][0].shape,
                          (len(trace["prompt_token_ids"]), 2, 4))
 
+    def test_prompt_hidden_serialization_preserves_float32_range(self):
+        trace = self.build()
+        trace = attach_trace_time_axis(
+            trace, [0, 1], trace["all_step_token_ranges"]
+        )
+        trace["prompt_hidden_layers"] = np.asarray([2], dtype=np.int32)
+        trace["prompt_hidden"] = np.full(
+            (len(trace["prompt_token_ids"]), 1, 2),
+            70_000.0,
+            dtype=np.float32,
+        )
+
+        payload = trace_records_to_npz([trace])
+
+        stored = payload["prompt_hidden"][0]
+        self.assertEqual(stored.dtype, np.float32)
+        self.assertEqual(payload["prompt_hidden_storage_dtype"].item(), "float32")
+        self.assertTrue(np.isfinite(stored).all())
+        self.assertEqual(float(stored.max()), 70_000.0)
+
 
 if __name__ == "__main__":
     unittest.main()

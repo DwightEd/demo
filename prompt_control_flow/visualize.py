@@ -42,10 +42,16 @@ DEFAULT_STEP_METRICS = (
 def response_error_labels(metrics: Mapping[str, Any]) -> np.ndarray:
     if "is_correct" in metrics:
         correct = np.asarray(metrics["is_correct"], dtype=np.float64)
-        if np.isfinite(correct).any() and np.any(correct >= 0):
-            return (correct == 0).astype(np.int32)
+        valid = np.isfinite(correct) & np.isin(correct, [0, 1])
+        if np.any(valid):
+            labels = np.full(correct.shape, -1, dtype=np.int32)
+            labels[valid] = (correct[valid] == 0).astype(np.int32)
+            return labels
     gold = np.asarray(metrics["gold_error_step"], dtype=np.int64)
-    return (gold >= 0).astype(np.int32)
+    labels = np.full(gold.shape, -1, dtype=np.int32)
+    valid = gold >= -1
+    labels[valid] = (gold[valid] >= 0).astype(np.int32)
+    return labels
 
 
 def metric_index(names: Sequence[str], metric_name: str) -> int | None:
@@ -65,11 +71,12 @@ def write_separability_csv(metrics: Mapping[str, Any], out_path: str | Path) -> 
     rows: list[dict[str, Any]] = []
     for k, name in enumerate(chain_names):
         s = chain_scores[:, k]
+        valid = y_chain >= 0
         rows.append(
             {
                 "level": "response",
                 "metric": name,
-                "auroc_error_high": auroc(y_chain, s),
+                "auroc_error_high": auroc(y_chain[valid], s[valid]),
                 "mean_correct": _nanmean(s[y_chain == 0]),
                 "mean_error": _nanmean(s[y_chain == 1]),
                 "diff_error_minus_correct": _nanmean(s[y_chain == 1]) - _nanmean(s[y_chain == 0]),

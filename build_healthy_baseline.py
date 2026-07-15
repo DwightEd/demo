@@ -49,16 +49,28 @@ _ex = _load_local_module("01_extract_spectral_field.py", "extract01")
 
 @torch.no_grad()
 def accumulate_chain(model, tokenizer, prompt, response, steps, device,
-                     layer_indices, V_R, max_seq_len, acc):
+                     layer_indices, V_R, max_seq_len, acc, *, question_text=None):
     """Add one correct solution's step-range token hidden states into `acc`
     (dict: li -> {'sum','sumsq','n'}). acc rows are lazily created per layer."""
-    ranges = _ex.find_step_token_ranges(tokenizer, prompt, response, steps)
-    if len(ranges) < 1:
-        return
-    enc = tokenizer(prompt + response, return_tensors="pt",
-                    truncation=True, max_length=max_seq_len).to(device)
+    trace = _ex.build_exact_trace_alignment(
+        tokenizer,
+        prompt,
+        response,
+        steps,
+        question_text=question_text,
+        fail_on_unmatched=True,
+    )
+    trace = _ex.truncate_trace_alignment(trace, max_seq_len)
+    enc = {
+        "input_ids": torch.tensor([trace["input_ids"]], dtype=torch.long, device=device),
+        "attention_mask": torch.tensor(
+            [trace["attention_mask"]], dtype=torch.long, device=device
+        ),
+    }
     seq_len = enc["input_ids"].shape[1]
-    safe = [(a, b) for (a, b) in ranges if b < seq_len and b - a + 1 >= 2]
+    safe = [
+        (a, b) for (a, b) in trace["all_step_token_ranges"] if b < seq_len
+    ]
     if not safe:
         return
     out = model(**enc, output_hidden_states=True)
@@ -86,6 +98,11 @@ def main():
                     help="number of CORRECT solutions to build the baseline from")
     ap.add_argument("--layers", default="all")
     ap.add_argument("--max_seq_len", type=int, default=4096)
+    ap.add_argument(
+        "--replay_protocol",
+        default=_ex.PROCESSBENCH_OBSERVER_CHAT_V1,
+        choices=list(_ex.SUPPORTED_OBSERVER_PROTOCOLS),
+    )
     # default OFF (full space) to match the clean multisample default
     ap.add_argument("--reasoning_subspace", action="store_true",
                     help="project to HARP subspace (must MATCH the eval setting).")
@@ -132,9 +149,19 @@ def main():
     if layer_indices is None:
         # probe: one forward to count layers
         ex0 = correct[0]
-        p0, r0, s0 = _ex.build_prompt_and_response(ex0)
-        enc0 = tokenizer(p0 + r0, return_tensors="pt", truncation=True,
-                         max_length=args.max_seq_len).to(device)
+        p0, r0, s0 = _ex.build_prompt_and_response(
+            ex0, tokenizer, replay_protocol=args.replay_protocol
+        )
+        trace0 = _ex.build_exact_trace_alignment(tokenizer, p0, r0, s0)
+        trace0 = _ex.truncate_trace_alignment(trace0, args.max_seq_len)
+        enc0 = {
+            "input_ids": torch.tensor(
+                [trace0["input_ids"]], dtype=torch.long, device=device
+            ),
+            "attention_mask": torch.tensor(
+                [trace0["attention_mask"]], dtype=torch.long, device=device
+            ),
+        }
         with torch.no_grad():
             n_layers = len(model(**enc0, output_hidden_states=True).hidden_states)
         layer_indices = list(range(n_layers))
@@ -144,12 +171,15 @@ def main():
     acc = {}
     used = 0
     for ex in tqdm(correct[:n], desc="baseline"):
-        prompt, response, steps = _ex.build_prompt_and_response(ex)
+        prompt, response, steps = _ex.build_prompt_and_response(
+            ex, tokenizer, replay_protocol=args.replay_protocol
+        )
         if prompt is None:
             continue
         try:
             accumulate_chain(model, tokenizer, prompt, response, steps, device,
-                             layer_indices, V_R, args.max_seq_len, acc)
+                             layer_indices, V_R, args.max_seq_len, acc,
+                             question_text=str(ex.get("problem", "")))
             used += 1
         except Exception as e:
             print(f"  warn: skip a chain: {e}")
@@ -176,7 +206,13 @@ def main():
              reasoning_subspace_used=np.array(V_R is not None),
              d=np.array(d),
              n_chains=np.array(used),
-             n_tokens_per_layer=np.array([acc.get(li, {"n": 0})["n"] for li in range(L)]))
+             n_tokens_per_layer=np.array([acc.get(li, {"n": 0})["n"] for li in range(L)]),
+             replay_protocol=np.array(args.replay_protocol),
+             prompt_provenance=np.array(args.replay_protocol),
+             state_semantics=np.array("teacher_forced_token_hidden_state"),
+             layer_index_semantics=np.array(
+                 "hidden_states[0]=embedding; hidden_states[d]=output_after_block_d"
+             ))
     print(f"\nBuilt healthy baseline from {used} correct solutions, "
           f"d={d}, layers={L}.")
     print(f"  median per-dim sigma (layer 0) = {np.nanmedian(sigma[0]):.4f}")
