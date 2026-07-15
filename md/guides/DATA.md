@@ -15,6 +15,10 @@ prompt and refuses each response unless replayed step vectors match stored
 layer-16 vectors above the configured cosine threshold. This is still a
 legacy replay-validated exploratory tier, not confirmatory evidence.
 
+For causal-pullback pilots, `--max_samples` selects only expensive replay
+targets. The full artifact is always loaded to build same-problem correct
+donor supports, and pilot targets are balanced across contrastive problems.
+
 The canonical model path is:
 
 ```text

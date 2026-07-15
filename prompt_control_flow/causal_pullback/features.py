@@ -321,7 +321,14 @@ def build_pullback_features(
     if int(phase_grid) < 2:
         raise ValueError("phase_grid must be at least two")
     if not artifact.items:
-        raise ValueError("causal pullback artifact is empty")
+        reasons: dict[str, int] = {}
+        for row in artifact.skipped:
+            reason = str(row.get("reason", "unknown"))
+            reasons[reason] = reasons.get(reason, 0) + 1
+        raise ValueError(
+            "causal pullback artifact is empty because extraction produced no "
+            f"successful rows; skip reasons={reasons}. Fix extraction before audit."
+        )
     threshold = (
         float(replay_cosine_threshold)
         if replay_cosine_threshold is not None

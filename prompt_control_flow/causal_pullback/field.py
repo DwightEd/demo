@@ -130,6 +130,16 @@ class ConditionalFieldBank:
             )
         return self.transition_cache[index]
 
+    def eligible_target_indices(self) -> np.ndarray:
+        """Return rows with enough same-problem correct reference donors."""
+
+        eligible = []
+        for index, raw_problem in enumerate(self.dataset.problem_ids):
+            support = self.supports[problem_key(raw_problem)]
+            if int(support.donor_count) >= int(self.cfg.min_donors):
+                eligible.append(index)
+        return np.asarray(eligible, dtype=np.int64)
+
     def _donors(self, target_index: int) -> tuple[int, ...]:
         problem = problem_key(self.dataset.problem_ids[int(target_index)])
         support = self.supports[problem]

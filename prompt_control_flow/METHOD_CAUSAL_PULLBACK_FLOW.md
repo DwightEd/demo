@@ -220,8 +220,10 @@ python extract_causal_pullback.py \
   --preflight
 ```
 
-Run a separate replay pilot first. Do not resume this small artifact into the
-full run because donor supports differ after sample truncation:
+Run a separate replay pilot first. The implementation always builds donor
+supports from the complete source artifact; `--max_samples` limits expensive
+replay targets only. Pilot targets are selected as same-problem error/correct
+pairs across problems rather than by file prefix:
 
 ```bash
 python extract_causal_pullback.py \
@@ -236,7 +238,9 @@ python extract_causal_pullback.py \
 ```
 
 If replay cosine and finite-difference diagnostics pass, run the complete
-artifact:
+artifact. A separate output path remains cleaner for reporting, although a
+pilot checkpoint can now be expanded safely with `--resume` because its donor
+reference bank is identical:
 
 ```bash
 python extract_causal_pullback.py \

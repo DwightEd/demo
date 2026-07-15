@@ -134,6 +134,53 @@ def test_resume_retries_skips_and_replaces_stale_failure() -> None:
     assert 3 in accumulator.completed_original_indices
     assert accumulator.skipped == []
 
+    accumulator.add(_synthetic_item(4))
+    accumulator.add_skip(
+        original_index=5,
+        chain_idx=50,
+        problem_id=9,
+        reason="RuntimeError",
+        detail="outside the new cohort",
+    )
+    accumulator.retain_original_indices({4})
+    assert accumulator.completed_original_indices == {4}
+    assert accumulator.skipped == []
+
+
+def test_pilot_target_selection_preserves_same_problem_contrasts() -> None:
+    pytest.importorskip("torch")
+    from prompt_control_flow.causal_pullback.extraction import select_replay_targets
+
+    problem_ids = np.repeat(np.arange(6), 4)
+    y_error = np.tile(np.asarray([1, 0, 0, 0], dtype=np.int8), 6)
+    sample_idx = np.tile(np.arange(4), 6)
+    eligible = np.arange(len(problem_ids), dtype=np.int64)
+    selected = select_replay_targets(
+        problem_ids,
+        y_error,
+        sample_idx,
+        eligible,
+        max_targets=8,
+        seed=19,
+    )
+    assert len(selected) == 8
+    selected_problems = np.unique(problem_ids[selected])
+    assert len(selected_problems) == 4
+    for problem in selected_problems:
+        local = selected[problem_ids[selected] == problem]
+        assert set(y_error[local].tolist()) == {0, 1}
+    np.testing.assert_array_equal(
+        select_replay_targets(
+            problem_ids,
+            y_error,
+            sample_idx,
+            eligible,
+            max_targets=0,
+            seed=19,
+        ),
+        eligible,
+    )
+
 
 def test_torch_step_exp_pool_matches_legacy_numpy_implementation() -> None:
     torch = pytest.importorskip("torch")

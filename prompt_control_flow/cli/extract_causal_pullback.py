@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 from pathlib import Path
 from typing import Sequence
@@ -41,7 +42,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--problem_subset", default="gsm8k")
     parser.add_argument("--prompt_style", default="")
-    parser.add_argument("--max_samples", type=int, default=0)
+    parser.add_argument(
+        "--max_samples",
+        type=int,
+        default=0,
+        help=(
+            "Maximum expensive replay targets. Same-problem donor supports are "
+            "always built from the complete input artifact."
+        ),
+    )
     parser.add_argument("--max_seq_len", type=int, default=4096)
     parser.add_argument("--min_donors", type=int, default=6)
     parser.add_argument("--max_donors", type=int, default=11)
@@ -76,18 +85,47 @@ def main(argv: Sequence[str] | None = None) -> None:
         run_causal_pullback_extraction,
         source_preflight,
     )
+    from prompt_control_flow.causal_pullback.field import ConditionalFieldBank
 
     source = load_pullback_source(
         args.input,
         vector_key=args.vector_key,
         layer=args.layer,
         label_policy=args.label_policy,
-        max_samples=args.max_samples,
+        # The complete source is required to build same-problem donor supports.
+        # ``--max_samples`` limits replay targets only.
+        max_samples=0,
     )
     if args.prompt_style:
         source.prompt_style = str(args.prompt_style)
+    cfg = CausalPullbackConfig(
+        layer=args.layer,
+        min_donors=args.min_donors,
+        max_donors=args.max_donors,
+        epsilon_fraction=args.epsilon_fraction,
+        variant_batch_size=args.variant_batch_size,
+        logit_token_chunk=args.logit_token_chunk,
+        replay_cosine_threshold=args.replay_cosine_threshold,
+    )
+    cfg.validate()
+    donor_bank = ConditionalFieldBank.build(source.dataset, cfg)
+    eligible = donor_bank.eligible_target_indices()
     preflight = source_preflight(source)
+    preflight.update(
+        {
+            "donor_eligible_samples": int(eligible.size),
+            "donor_eligible_fraction": float(
+                eligible.size / max(source.dataset.n_samples, 1)
+            ),
+            "requested_replay_targets": int(args.max_samples),
+        }
+    )
     print(json.dumps(preflight, indent=2, ensure_ascii=False))
+    if eligible.size == 0:
+        raise SystemExit(
+            "No sample has enough same-problem correct donors under the selected "
+            "label policy and --min_donors."
+        )
     if args.preflight:
         return
     if source.model_name and not _identity_matches(source.model_name, args.model):
@@ -141,20 +179,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     model = AutoModelForCausalLM.from_pretrained(args.model, **model_kwargs).to(device)
     model.eval()
 
-    cfg = CausalPullbackConfig(
-        layer=args.layer,
-        min_donors=args.min_donors,
-        max_donors=args.max_donors,
-        epsilon_fraction=args.epsilon_fraction,
-        variant_batch_size=args.variant_batch_size,
-        logit_token_chunk=args.logit_token_chunk,
-        replay_cosine_threshold=args.replay_cosine_threshold,
-    )
     profiler = MechanismProfiler()
-    total = source.dataset.n_samples
+    total = args.max_samples if args.max_samples > 0 else source.dataset.n_samples
     progress = tqdm(total=total, desc="causal pullback replay")
 
     def update(current: int, _total: int) -> None:
+        if int(progress.total or 0) != int(_total):
+            progress.total = int(_total)
         progress.n = int(current)
         progress.refresh()
 
@@ -169,6 +200,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             ordered_questions=ordered_questions,
             max_seq_len=args.max_seq_len,
             checkpoint_every=args.checkpoint_every,
+            max_targets=args.max_samples,
             resume=args.resume,
             profiler=profiler,
             progress=update,
@@ -182,11 +214,21 @@ def main(argv: Sequence[str] | None = None) -> None:
         json.dumps(artifact.skipped, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    success = artifact.n_items / max(source.dataset.n_samples, 1)
+    target_count = int(artifact.metadata.get("target_count", total))
+    success = artifact.n_items / max(target_count, 1)
     print(
-        f"saved {artifact.n_items}/{source.dataset.n_samples} responses to {output} "
+        f"saved {artifact.n_items}/{target_count} selected responses to {output} "
         f"(coverage={success:.3f})"
     )
+    if artifact.skipped:
+        counts = Counter(str(row.get("reason", "unknown")) for row in artifact.skipped)
+        print(f"skip reasons: {dict(counts.most_common())}")
+        for row in artifact.skipped[:3]:
+            print(
+                "  skip "
+                f"original={row.get('original_index')} reason={row.get('reason')}: "
+                f"{row.get('detail')}"
+            )
     if success < args.min_success_fraction:
         raise SystemExit(
             f"Extraction coverage {success:.3f} is below required "
