@@ -9,7 +9,13 @@ import numpy as np
 PROMPT_TEXT_KEYS = ("prompts", "questions", "problem_text", "problems", "problem")
 RESPONSE_KEYS = ("responses", "response")
 STEP_VECTOR_PREFIXES = ("sv_vec_",)
-PROMPT_HIDDEN_KEYS = ("prompt_hidden", "prompt_states", "prompt_hidden_states")
+PROMPT_HIDDEN_KEYS = (
+    "prompt_hidden",
+    "prompt_states",
+    "prompt_hidden_states",
+    "prompt_token_state_files",
+)
+RESPONSE_HIDDEN_SHARD_KEYS = ("response_token_state_files",)
 
 
 def inspect_npz_schema(path: str | Path) -> Dict[str, Any]:
@@ -33,9 +39,13 @@ def inspect_npz_schema(path: str | Path) -> Dict[str, Any]:
     has_stepvec = "stepvec" in files or any(k.startswith(STEP_VECTOR_PREFIXES) for k in files)
     has_qvec = "qvec" in files
     has_prompt_hidden = any(k in files for k in PROMPT_HIDDEN_KEYS)
-    has_hidden_shards = ("hidden_files" in files or "hidden_ids" in files) and (
+    has_legacy_hidden_shards = ("hidden_files" in files or "hidden_ids" in files) and (
         "hidden_dir" in files or "hidden_layers" in files or "layers_used" in files
     )
+    has_response_hidden_shards = any(
+        key in files for key in RESPONSE_HIDDEN_SHARD_KEYS
+    )
+    has_hidden_shards = bool(has_legacy_hidden_shards or has_response_hidden_shards)
     has_prompt_flow_metrics = "step_score_names" in files and "step_scores" in files and _contains_name(z, "step_score_names", "prompt_frac")
     has_layer_tensor = "step_layer_state_vectors" in files
     has_layer_memmap = "step_layer_state_memmap_path" in files
@@ -144,7 +154,11 @@ def inspect_npz_schema(path: str | Path) -> Dict[str, Any]:
     exact_trace_complete = bool(exact_trace_declared and exact_required.issubset(files))
 
     can_reconstruct_prompt_text = has_prompt_text
-    can_compute_prompt_svd_without_reextract = bool(has_prompt_hidden or has_hidden_shards)
+    # Legacy full-sequence hidden shards may contain the prompt axis. New
+    # response-only shards explicitly do not, so they cannot satisfy this gate.
+    can_compute_prompt_svd_without_reextract = bool(
+        has_prompt_hidden or has_legacy_hidden_shards
+    )
     needs_teacher_forcing_reextract = not (has_prompt_flow_metrics or can_compute_prompt_svd_without_reextract)
 
     return {
@@ -159,6 +173,8 @@ def inspect_npz_schema(path: str | Path) -> Dict[str, Any]:
         "has_qvec_anchor": bool(has_qvec),
         "has_prompt_hidden": bool(has_prompt_hidden),
         "has_hidden_shards": bool(has_hidden_shards),
+        "has_response_hidden_shards": bool(has_response_hidden_shards),
+        "has_legacy_hidden_shards": bool(has_legacy_hidden_shards),
         "has_prompt_flow_metrics": bool(has_prompt_flow_metrics),
         "can_reconstruct_prompt_text": bool(can_reconstruct_prompt_text),
         "can_compute_prompt_svd_without_reextract": bool(can_compute_prompt_svd_without_reextract),

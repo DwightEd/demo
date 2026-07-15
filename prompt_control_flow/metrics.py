@@ -394,6 +394,21 @@ def compute_response_token_layer_states(
     return out
 
 
+def compute_prompt_token_layer_states(
+    hidden_states: Sequence[np.ndarray],
+    *,
+    prompt_token_range: Tuple[int, int],
+    layers: Sequence[int],
+) -> np.ndarray:
+    """Return selected-depth states on the exact rendered-prompt token axis."""
+
+    return compute_response_token_layer_states(
+        hidden_states,
+        response_token_range=prompt_token_range,
+        layers=layers,
+    )
+
+
 def _uses_torch_backend(hidden_states: Sequence[object]) -> bool:
     return any(
         hasattr(value, "detach") and hasattr(value, "device")

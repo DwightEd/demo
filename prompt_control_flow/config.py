@@ -23,6 +23,7 @@ class ExtractionConfig:
     store_step_vectors: bool = False
     store_step_state_vectors: bool = False
     store_flat_step_state_vectors: bool = True
+    store_prompt_token_states: bool = False
     store_response_token_states: bool = False
     dtype: str = "auto"
     device: str = "auto"

@@ -123,7 +123,11 @@ class FixedStateMemmap:
 
 @dataclass
 class ResponseStateShardWriter:
-    """Write per-response token states without accumulating them in RAM."""
+    """Write per-chain token states without accumulating them in RAM.
+
+    The historical class name is retained for compatibility; callers may use
+    the writer for either prompt-token or response-token state shards.
+    """
 
     partial_dir: Path
     final_dir: Path
@@ -142,7 +146,7 @@ class ResponseStateShardWriter:
         values = cast_state_array(array, self.dtype)
         if values.ndim != 3:
             raise StateStorageError(
-                f"response token states must be [token, layer, hidden], got {values.shape}"
+                f"token states must be [token, layer, hidden], got {values.shape}"
             )
         # chain_idx is metadata, not a guaranteed primary key. Same-problem
         # artifacts may reuse it, so include the writer row to avoid overwrite.

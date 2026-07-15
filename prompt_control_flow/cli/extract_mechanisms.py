@@ -99,6 +99,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--store_step_vectors", action="store_true")
     ap.add_argument("--store_step_state_vectors", action="store_true", help="Store pooled per-step hidden states for representation-geometry audits.")
     ap.add_argument(
+        "--store_prompt_token_states",
+        action="store_true",
+        help="Store selected-depth prompt-token states as per-chain NPY shards.",
+    )
+    ap.add_argument(
         "--store_response_token_states",
         action="store_true",
         help="Store selected-depth response-token states as per-chain NPY shards.",
@@ -119,8 +124,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     required_coverage = float(args.min_success_fraction)
     if not 0.0 <= required_coverage <= 1.0:
         raise SystemExit("--min_success_fraction must be in [0, 1]")
-    if args.geometry_only and (args.enable_icr or args.store_step_vectors):
-        raise SystemExit("--geometry_only cannot be combined with --enable_icr or --store_step_vectors")
+    if args.geometry_only and (
+        args.enable_icr
+        or args.store_step_vectors
+        or args.store_prompt_token_states
+        or args.store_response_token_states
+    ):
+        raise SystemExit(
+            "--geometry_only cannot be combined with ICR, residual step vectors, "
+            "or prompt/response token-state shards"
+        )
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -136,6 +149,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         store_step_vectors=False if args.geometry_only else bool(args.store_step_vectors),
         store_step_state_vectors=bool(args.store_step_state_vectors or args.geometry_only),
         store_flat_step_state_vectors=not bool(args.geometry_only),
+        store_prompt_token_states=bool(args.store_prompt_token_states),
         store_response_token_states=bool(args.store_response_token_states),
         full_attention_token_threshold=int(args.full_attention_token_threshold),
         icr_top_k=int(args.icr_top_k),
@@ -148,7 +162,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         uncertainty=uncertainty,
         icr=False if args.geometry_only else bool(args.enable_icr),
     )
-    if not extractors and not cfg.store_step_state_vectors:
+    if not extractors and not any(
+        (
+            cfg.store_step_vectors,
+            cfg.store_step_state_vectors,
+            cfg.store_prompt_token_states,
+            cfg.store_response_token_states,
+        )
+    ):
         raise SystemExit("No extractors enabled and no state tensor requested.")
 
     device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else ("cpu" if args.device == "auto" else args.device))
@@ -249,6 +270,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     state_stores: dict[str, FixedStateMemmap] = {}
     manifest_partial_path = out_path.with_suffix(".partial.npz")
     manifest_partial_path.unlink(missing_ok=True)
+    prompt_writer = None
+    if args.store_prompt_token_states:
+        prompt_writer = ResponseStateShardWriter(
+            out_path.parent / f"{out_path.stem}.prompt_states.{state_run_id}.partial",
+            out_path.parent / f"{out_path.stem}.prompt_states.{state_run_id}",
+            dtype=str(args.state_storage_dtype),
+        )
     response_writer = None
     if args.store_response_token_states:
         response_writer = ResponseStateShardWriter(
@@ -271,6 +299,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             # Exact-token corruption invalidates the run, not just one row.
             for store in state_stores.values():
                 store.abort()
+            if prompt_writer is not None:
+                prompt_writer.abort()
             if response_writer is not None:
                 response_writer.abort()
             raise
@@ -285,6 +315,21 @@ def main(argv: Sequence[str] | None = None) -> None:
         profiler.record_success()
         profiler.record_seq_len(item.metadata.get("seq_len"))
         try:
+            if prompt_writer is not None:
+                tensor = item.prompt_token_layer_states
+                if tensor is None:
+                    raise RuntimeError(
+                        "--store_prompt_token_states requested but extraction "
+                        "returned no token states"
+                    )
+                item.metadata["prompt_token_state_file"] = prompt_writer.write(
+                    tensor, chain_idx=int(item.record.chain_idx)
+                )
+                item.metadata["prompt_token_state_count"] = int(tensor.shape[0])
+                item.metadata["prompt_token_state_dtype"] = str(
+                    args.state_storage_dtype
+                )
+                item.prompt_token_layer_states = None
             if response_writer is not None:
                 tensor = item.response_token_layer_states
                 if tensor is None:
@@ -341,6 +386,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         except Exception:
             for store in state_stores.values():
                 store.abort()
+            if prompt_writer is not None:
+                prompt_writer.abort()
             if response_writer is not None:
                 response_writer.abort()
             raise
@@ -352,6 +399,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     if not extractions:
         for store in state_stores.values():
             store.abort()
+        if prompt_writer is not None:
+            prompt_writer.abort()
         if response_writer is not None:
             response_writer.abort()
         raise SystemExit("No chains were successfully extracted.")
@@ -367,6 +416,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     if min(chain_coverage, problem_coverage) < required_coverage:
         for store in state_stores.values():
             store.abort()
+        if prompt_writer is not None:
+            prompt_writer.abort()
         if response_writer is not None:
             response_writer.abort()
         raise SystemExit(
@@ -415,6 +466,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 np.savez_compressed(stream, **packed)
         else:
             save_extractions(extractions, manifest_partial_path)
+        if prompt_writer is not None:
+            prompt_writer.finalize()
         if response_writer is not None:
             response_writer.finalize()
         manifest_partial_path.replace(out_path)
@@ -422,6 +475,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         manifest_partial_path.unlink(missing_ok=True)
         for store in state_stores.values():
             store.rollback()
+        if prompt_writer is not None:
+            prompt_writer.rollback()
         if response_writer is not None:
             response_writer.rollback()
         raise

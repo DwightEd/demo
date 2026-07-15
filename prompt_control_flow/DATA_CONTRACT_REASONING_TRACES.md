@@ -314,6 +314,7 @@ python extract_mechanisms.py \
   --replay_protocol processbench_observer_chat_v1 \
   --layers 8,10,12,14,16,18,20,22 \
   --store_step_state_vectors \
+  --store_prompt_token_states \
   --store_response_token_states \
   --state_storage_dtype float16
 ```

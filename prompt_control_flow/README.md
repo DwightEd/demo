@@ -418,6 +418,7 @@ python extract_mechanisms.py \
   --enable_uncertainty \
   --enable_icr \
   --store_step_state_vectors \
+  --store_prompt_token_states \
   --store_response_token_states \
   --state_storage_dtype float16
 ```

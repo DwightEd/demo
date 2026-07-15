@@ -17,6 +17,7 @@ from .extractors import (
     UncertaintyExtractor,
 )
 from .metrics import (
+    compute_prompt_token_layer_states,
     compute_response_token_layer_states,
     compute_step_boundary_state_vectors,
     compute_step_layer_state_vectors,
@@ -52,6 +53,7 @@ class MechanismExtraction:
     step_layer_state_vectors: np.ndarray | None = None
     step_pre_state_vectors: np.ndarray | None = None
     step_end_state_vectors: np.ndarray | None = None
+    prompt_token_layer_states: np.ndarray | None = None
     response_token_layer_states: np.ndarray | None = None
     trace_input_ids: np.ndarray | None = None
     trace_attention_mask: np.ndarray | None = None
@@ -78,8 +80,15 @@ def extract_chain_mechanisms(
 ) -> MechanismExtraction | None:
     """Teacher-force one chain and compute requested mechanism scores."""
 
-    if not extractors and not cfg.store_step_state_vectors:
-        raise ValueError("at least one extractor or store_step_state_vectors=True is required")
+    if not extractors and not any(
+        (
+            cfg.store_step_vectors,
+            cfg.store_step_state_vectors,
+            cfg.store_prompt_token_states,
+            cfg.store_response_token_states,
+        )
+    ):
+        raise ValueError("at least one extractor or state-storage target is required")
     response = (
         record.response
         if record.response
@@ -110,7 +119,13 @@ def extract_chain_mechanisms(
     if not prompt.strip() or not response.strip():
         return None
 
-    need_hidden = any(e.requires_hidden for e in extractors) or bool(cfg.store_step_vectors) or bool(cfg.store_step_state_vectors)
+    need_hidden = (
+        any(e.requires_hidden for e in extractors)
+        or bool(cfg.store_step_vectors)
+        or bool(cfg.store_step_state_vectors)
+        or bool(cfg.store_prompt_token_states)
+        or bool(cfg.store_response_token_states)
+    )
     need_attention = any(e.requires_attention for e in extractors)
     need_logits = any(e.requires_logits for e in extractors)
     requested_depths = tuple(int(x) for x in cfg.layers)
@@ -214,6 +229,14 @@ def extract_chain_mechanisms(
         if cfg.store_flat_step_state_vectors:
             step_state_vectors = step_layer_state_vectors.reshape(step_layer_state_vectors.shape[0], -1)
 
+    prompt_token_layer_states = None
+    if cfg.store_prompt_token_states and cache.hidden_states is not None:
+        prompt_token_layer_states = compute_prompt_token_layer_states(
+            cache.hidden_states,
+            prompt_token_range=cache.prompt_token_range,
+            layers=active_cfg.layers,
+        )
+
     response_token_layer_states = None
     if cfg.store_response_token_states and cache.hidden_states is not None:
         response_token_layer_states = compute_response_token_layer_states(
@@ -235,6 +258,7 @@ def extract_chain_mechanisms(
         step_layer_state_vectors=step_layer_state_vectors,
         step_pre_state_vectors=step_pre_state_vectors,
         step_end_state_vectors=step_end_state_vectors,
+        prompt_token_layer_states=prompt_token_layer_states,
         response_token_layer_states=response_token_layer_states,
         trace_input_ids=np.asarray(cache.input_ids, dtype=np.int64),
         trace_attention_mask=np.asarray(cache.attention_mask, dtype=np.int8),
@@ -650,6 +674,21 @@ def pack_extractions(extractions: Sequence[MechanismExtraction]) -> Dict[str, np
             extractions[0].layers, dtype=np.int64
         )
         packed["response_token_state_storage_kind"] = np.asarray(
+            "per_chain_npy_shards_v1", dtype=object
+        )
+    if any("prompt_token_state_file" in e.metadata for e in extractions):
+        packed["prompt_token_state_files"] = np.asarray(
+            [str(e.metadata.get("prompt_token_state_file", "")) for e in extractions],
+            dtype=object,
+        )
+        packed["prompt_token_state_counts"] = np.asarray(
+            [int(e.metadata.get("prompt_token_state_count", 0)) for e in extractions],
+            dtype=np.int64,
+        )
+        packed["prompt_token_state_layers"] = np.asarray(
+            extractions[0].layers, dtype=np.int64
+        )
+        packed["prompt_token_state_storage_kind"] = np.asarray(
             "per_chain_npy_shards_v1", dtype=object
         )
     return packed

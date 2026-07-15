@@ -17,6 +17,7 @@ from prompt_control_flow.extraction import (
 from prompt_control_flow.extractors import ICRResidualMismatchExtractor, UncertaintyExtractor
 from prompt_control_flow.geometry import orthonormal_basis, projection_energy_fraction
 from prompt_control_flow.metrics import (
+    compute_prompt_token_layer_states,
     compute_step_boundary_state_vectors,
     compute_step_prompt_flow_metrics,
     compute_response_token_layer_states,
@@ -288,6 +289,82 @@ def test_response_token_states_preserve_selected_depths_and_token_axis() -> None
     assert np.allclose(states[:, 1], h2[2:6])
 
 
+def test_prompt_token_states_preserve_selected_depths_and_token_axis() -> None:
+    h0 = np.zeros((6, 2), dtype=np.float32)
+    h1 = np.arange(12, dtype=np.float32).reshape(6, 2)
+    h2 = h1 + 100.0
+
+    states = compute_prompt_token_layer_states(
+        [h0, h1, h2], prompt_token_range=(0, 2), layers=[1, 2]
+    )
+
+    assert states.shape == (2, 2, 2)
+    assert np.allclose(states[:, 0], h1[:2])
+    assert np.allclose(states[:, 1], h2[:2])
+
+
+def test_prompt_state_only_extraction_requests_hidden_states(monkeypatch) -> None:
+    captured = {}
+
+    class Tokenizer:
+        name_or_path = "toy-tokenizer"
+        init_kwargs = {}
+
+    class Model:
+        config = type("Config", (), {"_name_or_path": "toy-model", "_commit_hash": None})()
+
+    def fake_forward(_model, _tokenizer, prompt, response, **kwargs):
+        captured.update(kwargs)
+        return ForwardCache(
+            input_ids=np.asarray([1, 2, 3]),
+            attention_mask=np.ones(3, dtype=np.int64),
+            offset_mapping=[(0, 1), (1, 2), (2, 3)],
+            prompt_len_tokens=2,
+            prompt_token_range=(0, 2),
+            question_token_range=(0, 1),
+            response_start_token=2,
+            response_token_range=(2, 3),
+            step_token_ranges=[(2, 2)],
+            hidden_states=[
+                np.zeros((3, 2), dtype=np.float32),
+                np.ones((3, 2), dtype=np.float32),
+            ],
+            seq_len=3,
+            replay_kind="exact_artifact_ids",
+            replay_protocol=kwargs["replay_protocol"],
+            prompt_provenance=kwargs["prompt_provenance"],
+        )
+
+    monkeypatch.setattr("prompt_control_flow.extraction.run_teacher_forcing", fake_forward)
+    record = ChainRecord(
+        chain_idx=0,
+        problem_id=0,
+        problem="q",
+        steps=["a"],
+        response="a",
+        rendered_prompt="prompt",
+        exact_input_ids=[1, 2, 3],
+        exact_attention_mask=[1, 1, 1],
+        exact_token_offsets=[(0, 1), (1, 2), (2, 3)],
+        exact_step_token_ranges=[(2, 2)],
+        exact_response_start_token=2,
+        exact_question_token_range=(0, 1),
+    )
+
+    item = extract_chain_mechanisms(
+        Model(),
+        Tokenizer(),
+        record,
+        ExtractionConfig(layers=(1,), store_prompt_token_states=True),
+        [],
+    )
+
+    assert item is not None
+    assert captured["output_hidden_states"] is True
+    assert item.prompt_token_layer_states is not None
+    assert item.prompt_token_layer_states.shape == (2, 1, 2)
+
+
 def test_torch_metric_backend_matches_numpy_semantics_when_available() -> None:
     import pytest
 
@@ -500,6 +577,12 @@ def test_pack_extractions_can_store_flat_step_vector_bank() -> None:
             step_vectors=np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
             step_state_vectors=np.asarray([[5.0, 6.0], [7.0, 8.0]], dtype=np.float32),
             layers=(8,),
+            metadata={
+                "prompt_token_state_file": "prompt_states/row_0.npy",
+                "prompt_token_state_count": 2,
+                "response_token_state_file": "response_states/row_0.npy",
+                "response_token_state_count": 2,
+            },
         )
     ]
 
@@ -516,6 +599,13 @@ def test_pack_extractions_can_store_flat_step_vector_bank() -> None:
     assert packed["problem_group_id"].tolist() == ["problem_sha256:abc"]
     assert packed["process_correct"].tolist() == [1]
     assert packed["final_answer_correct"].tolist() == [0]
+    assert packed["prompt_token_state_files"].tolist() == [
+        "prompt_states/row_0.npy"
+    ]
+    assert packed["prompt_token_state_counts"].tolist() == [2]
+    assert packed["response_token_state_files"].tolist() == [
+        "response_states/row_0.npy"
+    ]
     for key in [
         "chain_idx",
         "problem_id",
@@ -845,6 +935,34 @@ def test_schema_inspection_distinguishes_text_from_prompt_hidden(tmp_path) -> No
     assert info["has_step_vectors"] is True
     assert info["can_compute_prompt_svd_without_reextract"] is False
     assert info["needs_teacher_forcing_reextract"] is True
+
+
+def test_schema_inspection_recognizes_prompt_and_response_state_shards(tmp_path) -> None:
+    response_only = tmp_path / "response_only.npz"
+    np.savez(
+        response_only,
+        problems=np.asarray(["q"], dtype=object),
+        steps_text=np.asarray([["s"]], dtype=object),
+        response_token_state_files=np.asarray(["responses/row.npy"], dtype=object),
+    )
+    response_info = inspect_npz_schema(response_only)
+
+    assert response_info["has_response_hidden_shards"] is True
+    assert response_info["has_prompt_hidden"] is False
+    assert response_info["can_compute_prompt_svd_without_reextract"] is False
+
+    prompt_and_response = tmp_path / "prompt_and_response.npz"
+    np.savez(
+        prompt_and_response,
+        problems=np.asarray(["q"], dtype=object),
+        steps_text=np.asarray([["s"]], dtype=object),
+        prompt_token_state_files=np.asarray(["prompts/row.npy"], dtype=object),
+        response_token_state_files=np.asarray(["responses/row.npy"], dtype=object),
+    )
+    combined_info = inspect_npz_schema(prompt_and_response)
+
+    assert combined_info["has_prompt_hidden"] is True
+    assert combined_info["can_compute_prompt_svd_without_reextract"] is True
 
 
 def test_visualization_csv_writers_show_response_and_step_splits(tmp_path) -> None:
