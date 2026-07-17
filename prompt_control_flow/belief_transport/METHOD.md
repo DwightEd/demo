@@ -49,6 +49,13 @@ This gives actual belief targets and legal transitions. ProcessBench does not
 provide either object directly, which is why mechanism existence is tested here
 first.
 
+Requested chain lengths are assigned approximately uniformly over
+`[min_steps, max_steps]`. For each target length, generation searches the
+finite constraint-mask graph for exactly that many strict reductions and
+permits a singleton support only at the final step. Wind-tunnel schema v2
+therefore rejects the earlier fixed-length generator rather than silently
+reusing a degenerate artifact.
+
 ## 3. Frozen-Model Observation
 
 For every problem prefix, the extractor renders the observer model's own chat

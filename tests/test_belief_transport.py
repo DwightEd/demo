@@ -114,6 +114,26 @@ def test_generated_worlds_have_monotone_exact_posteriors_and_unique_endpoints() 
         assert prefixes[-1].feasible_mask[target_index]
 
 
+def test_wind_tunnel_uses_the_requested_step_range() -> None:
+    cfg = WindTunnelConfig(
+        domain_size=8,
+        min_steps=3,
+        max_steps=6,
+        template_families=3,
+        seed=17,
+    )
+
+    worlds = generate_worlds(256, cfg)
+    observed = {len(world.conditions) for world in worlds}
+
+    assert observed == set(range(cfg.min_steps, cfg.max_steps + 1))
+
+
+def test_wind_tunnel_rejects_more_steps_than_strict_reductions() -> None:
+    with pytest.raises(ValueError, match="strict reductions"):
+        WindTunnelConfig(domain_size=4, min_steps=2, max_steps=16).validate()
+
+
 def test_wind_tunnel_jsonl_roundtrip_preserves_semantics(tmp_path) -> None:
     cfg = WindTunnelConfig(domain_size=5, min_steps=3, max_steps=6, seed=7)
     worlds = generate_worlds(4, cfg)
@@ -125,7 +145,7 @@ def test_wind_tunnel_jsonl_roundtrip_preserves_semantics(tmp_path) -> None:
     assert loaded_cfg == cfg
     assert loaded == worlds
     first = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
-    assert first["schema_version"] == "constraint_belief_wind_tunnel_v1"
+    assert first["schema_version"] == "constraint_belief_wind_tunnel_v2"
     assert "conditions" in first
 
 

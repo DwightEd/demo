@@ -8,7 +8,7 @@ from typing import Iterable, Sequence
 import numpy as np
 
 
-SCHEMA_VERSION = "constraint_belief_wind_tunnel_v1"
+SCHEMA_VERSION = "constraint_belief_wind_tunnel_v2"
 
 
 @dataclass(frozen=True)
@@ -24,8 +24,10 @@ class WindTunnelConfig:
             raise ValueError("domain_size must be at least 4")
         if self.min_steps < 2:
             raise ValueError("min_steps must be at least 2")
-        if self.max_steps < self.min_steps + 1:
-            raise ValueError("max_steps must leave room for a non-trivial endpoint")
+        if self.max_steps < self.min_steps:
+            raise ValueError("max_steps must be at least min_steps")
+        if self.max_steps >= self.domain_size ** 2:
+            raise ValueError("max_steps exceeds the number of possible strict reductions")
         if not 1 <= self.template_families <= 3:
             raise ValueError("template_families must lie in [1, 3]")
         if self.seed < 0:
@@ -233,10 +235,66 @@ def _deduplicate_by_mask(
     return list(unique.values())
 
 
+def _find_exact_length_path(
+    hypotheses: np.ndarray,
+    candidates: Sequence[ConstraintSpec],
+    target_steps: int,
+    rng: np.random.Generator,
+) -> tuple[ConstraintSpec, ...] | None:
+    """Find exactly ``target_steps`` strict reductions ending at one hypothesis."""
+
+    masks = [constraint_mask(candidate, hypotheses) for candidate in candidates]
+    failed: set[tuple[bytes, int]] = set()
+
+    def search(feasible: np.ndarray, remaining: int) -> list[ConstraintSpec] | None:
+        count_before = int(feasible.sum())
+        if remaining == 0:
+            return [] if count_before == 1 else None
+        key = (np.packbits(feasible).tobytes(), int(remaining))
+        if key in failed:
+            return None
+
+        # After this update, at least ``remaining`` hypotheses are needed to
+        # support the remaining-1 strict integer reductions down to one.
+        minimum_after = int(remaining)
+        desired_after = max(
+            minimum_after,
+            int(round(count_before ** ((remaining - 1) / remaining))),
+        )
+        options: dict[bytes, tuple[float, ConstraintSpec, np.ndarray]] = {}
+        for candidate, mask in zip(candidates, masks):
+            updated = feasible & mask
+            count_after = int(updated.sum())
+            if not minimum_after <= count_after < count_before:
+                continue
+            if remaining == 1 and count_after != 1:
+                continue
+            if remaining > 1 and count_after == 1:
+                continue
+            support_key = np.packbits(updated).tobytes()
+            score = abs(np.log(count_after) - np.log(desired_after))
+            score += float(rng.random()) * 0.025
+            previous = options.get(support_key)
+            if previous is None or score < previous[0]:
+                options[support_key] = (score, candidate, updated)
+
+        for _score, candidate, updated in sorted(options.values(), key=lambda item: item[0]):
+            suffix = search(updated, remaining - 1)
+            if suffix is not None:
+                return [candidate, *suffix]
+        failed.add(key)
+        return None
+
+    start = np.ones(len(hypotheses), dtype=bool)
+    path = search(start, int(target_steps))
+    return None if path is None else tuple(path)
+
+
 def _generate_one_world(
     problem_id: int,
     cfg: WindTunnelConfig,
     rng: np.random.Generator,
+    target_steps: int,
 ) -> ConstraintWorld | None:
     hypotheses = build_hypothesis_grid(cfg.domain_size)
     target = (
@@ -246,69 +304,19 @@ def _generate_one_world(
     candidates = _deduplicate_by_mask(
         _candidate_constraints(target, cfg.domain_size), hypotheses
     )
-    feasible = np.ones(len(hypotheses), dtype=bool)
-    selected: list[ConstraintSpec] = []
-
-    weak_target_steps = cfg.min_steps - 1
-    while len(selected) < weak_target_steps:
-        options: list[tuple[float, ConstraintSpec, np.ndarray]] = []
-        desired = max(2, int(round(float(feasible.sum()) * 0.55)))
-        for candidate in candidates:
-            if candidate.kind in {"x_eq", "y_eq"}:
-                continue
-            updated = feasible & constraint_mask(candidate, hypotheses)
-            count = int(updated.sum())
-            if 2 <= count < int(feasible.sum()):
-                score = abs(np.log(count) - np.log(desired)) + float(rng.random()) * 0.05
-                options.append((score, candidate, updated))
-        if not options:
-            return None
-        _, chosen, feasible = min(options, key=lambda item: item[0])
-        selected.append(chosen)
-        candidates.remove(chosen)
-
-    # Exact unary constraints are reserved for the endpoint. They guarantee a
-    # unique solution without allowing the weak prefix to collapse immediately.
-    endpoint_order = [
-        ConstraintSpec(kind="x_eq", value=target[0]),
-        ConstraintSpec(kind="y_eq", value=target[1]),
-    ]
-    if bool(rng.integers(0, 2)):
-        endpoint_order.reverse()
-    for candidate in endpoint_order:
-        if int(feasible.sum()) == 1:
-            break
-        updated = feasible & constraint_mask(candidate, hypotheses)
-        if 0 < int(updated.sum()) < int(feasible.sum()):
-            selected.append(candidate)
-            feasible = updated
-        if len(selected) >= cfg.max_steps:
-            break
-
-    if int(feasible.sum()) != 1:
-        remaining = []
-        for candidate in candidates:
-            updated = feasible & constraint_mask(candidate, hypotheses)
-            if 0 < int(updated.sum()) < int(feasible.sum()):
-                remaining.append((int(updated.sum()), candidate, updated))
-        while remaining and int(feasible.sum()) > 1 and len(selected) < cfg.max_steps:
-            _, chosen, updated = min(remaining, key=lambda item: item[0])
-            selected.append(chosen)
-            feasible = updated
-            remaining = [
-                (int((feasible & constraint_mask(candidate, hypotheses)).sum()), candidate,
-                 feasible & constraint_mask(candidate, hypotheses))
-                for _, candidate, _ in remaining
-                if 0 < int((feasible & constraint_mask(candidate, hypotheses)).sum())
-                < int(feasible.sum())
-            ]
-    if int(feasible.sum()) != 1 or not cfg.min_steps <= len(selected) <= cfg.max_steps:
+    selected = _find_exact_length_path(
+        hypotheses,
+        candidates,
+        int(target_steps),
+        rng,
+    )
+    if selected is None:
         return None
     return ConstraintWorld(
         problem_id=int(problem_id),
         target=target,
         template_family=int(rng.integers(0, cfg.template_families)),
-        conditions=tuple(selected),
+        conditions=selected,
         domain_size=cfg.domain_size,
     )
 
@@ -318,11 +326,19 @@ def generate_worlds(num_problems: int, cfg: WindTunnelConfig) -> list[Constraint
     if int(num_problems) < 1:
         raise ValueError("num_problems must be positive")
     rng = np.random.default_rng(cfg.seed)
+    step_options = np.arange(cfg.min_steps, cfg.max_steps + 1, dtype=np.int64)
+    target_steps = np.resize(step_options, int(num_problems))
+    rng.shuffle(target_steps)
     worlds: list[ConstraintWorld] = []
-    for problem_id in range(int(num_problems)):
+    for problem_id, desired_steps in enumerate(target_steps.tolist()):
         world = None
         for _ in range(100):
-            world = _generate_one_world(problem_id, cfg, rng)
+            world = _generate_one_world(
+                problem_id,
+                cfg,
+                rng,
+                int(desired_steps),
+            )
             if world is not None:
                 break
         if world is None:

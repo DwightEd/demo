@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from pathlib import Path
 from typing import Sequence
 
@@ -38,11 +39,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     output = Path(args.output)
     write_worlds_jsonl(output, worlds, cfg)
     step_counts = [len(world.conditions) for world in worlds]
+    histogram = Counter(step_counts)
     print(f"saved {len(worlds)} exact constraint worlds to {output}")
     print(
         f"hypotheses={cfg.domain_size ** 2} | steps="
         f"{min(step_counts)}/{sum(step_counts) / len(step_counts):.2f}/{max(step_counts)} "
         "(min/mean/max)"
+    )
+    print(
+        "step histogram: "
+        + ", ".join(f"{steps}:{histogram[steps]}" for steps in sorted(histogram))
     )
 
 
