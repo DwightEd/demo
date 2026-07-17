@@ -231,7 +231,7 @@ tokenizer identity, hypothesis universe, layer set, or state semantics differ.
 
 ```bash
 python build_belief_wind_tunnel.py \
-  --output data/belief_transport/wind_tunnel_v1.jsonl \
+  --output data/belief_transport/wind_tunnel_v2.jsonl \
   --num_problems 2000 \
   --domain_size 8 \
   --min_steps 3 \
@@ -251,7 +251,7 @@ Terminal 1:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python extract_belief_transport.py \
-  --input data/belief_transport/wind_tunnel_v1.jsonl \
+  --input data/belief_transport/wind_tunnel_v2.jsonl \
   --model /share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct \
   --output data/belief_transport/trace_shard0.npz \
   --layers 8,12,16,20,24,28,32 \
