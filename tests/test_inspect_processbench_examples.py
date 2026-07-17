@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 
 import pytest
@@ -8,6 +10,8 @@ from prompt_control_flow.cli.inspect_processbench_examples import (
     DEFAULT_SUBSETS,
     collect_examples,
     main,
+    render_csv,
+    render_html,
     render_text,
 )
 
@@ -31,9 +35,7 @@ def _write_fixture(data_dir) -> None:
             _row(subset, label=1, suffix="error"),
         ]
         if position % 2 == 0:
-            (data_dir / f"{subset}.json").write_text(
-                json.dumps(rows), encoding="utf-8"
-            )
+            (data_dir / f"{subset}.json").write_text(json.dumps(rows), encoding="utf-8")
         else:
             (data_dir / f"{subset}.jsonl").write_text(
                 "".join(json.dumps(row) + "\n" for row in rows),
@@ -94,6 +96,74 @@ def test_cli_can_emit_machine_readable_json(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["selection"] == {"kind": "any", "index": 0}
     assert [row["dataset"] for row in payload["examples"]] == ["gsm8k", "math"]
+
+
+def test_csv_expands_each_reasoning_step_and_marks_first_error(tmp_path):
+    data_dir = tmp_path / "ProcessBench"
+    _write_fixture(data_dir)
+    payload = collect_examples(data_dir, ("gsm8k",), kind="error", index=0)
+
+    rows = list(csv.DictReader(io.StringIO(render_csv(payload))))
+
+    assert len(rows) == 2
+    assert rows[0]["dataset"] == "gsm8k"
+    assert rows[0]["step_index"] == "0"
+    assert rows[0]["is_first_error"] == "False"
+    assert rows[1]["step_index"] == "1"
+    assert rows[1]["is_first_error"] == "True"
+    assert rows[1]["step_text"] == "gsm8k step 1"
+
+
+def test_html_is_self_contained_escaped_and_highlights_first_error(tmp_path):
+    data_dir = tmp_path / "ProcessBench"
+    _write_fixture(data_dir)
+    payload = collect_examples(data_dir, ("gsm8k",), kind="error", index=0)
+    payload["examples"][0]["problem"] = "Find <x> & verify it."
+
+    rendered = render_html(payload)
+
+    assert "<!doctype html>" in rendered.lower()
+    assert "Find &lt;x&gt; &amp; verify it." in rendered
+    assert "Find <x> & verify it." not in rendered
+    assert 'class="first-error"' in rendered
+    assert "First error" in rendered
+
+
+def test_cli_output_dir_writes_json_csv_and_html_bundle(tmp_path, capsys):
+    data_dir = tmp_path / "ProcessBench"
+    _write_fixture(data_dir)
+    output_dir = tmp_path / "report"
+
+    main(
+        [
+            "--data_dir",
+            str(data_dir),
+            "--subsets",
+            "gsm8k",
+            "--kind",
+            "error",
+            "--output_dir",
+            str(output_dir),
+        ]
+    )
+
+    stdout = capsys.readouterr().out
+    basename = "processbench_examples_error_0000"
+    json_path = output_dir / f"{basename}.json"
+    csv_path = output_dir / f"{basename}.csv"
+    html_path = output_dir / f"{basename}.html"
+    assert json_path.is_file()
+    assert csv_path.is_file()
+    assert html_path.is_file()
+    assert str(json_path) in stdout
+    assert str(csv_path) in stdout
+    assert str(html_path) in stdout
+    assert (
+        json.loads(json_path.read_text(encoding="utf-8"))["examples"][0]["dataset"]
+        == "gsm8k"
+    )
+    assert "gsm8k step 1" in csv_path.read_text(encoding="utf-8-sig")
+    assert "ProcessBench Example Report" in html_path.read_text(encoding="utf-8")
 
 
 def test_filtered_index_reports_available_count(tmp_path):

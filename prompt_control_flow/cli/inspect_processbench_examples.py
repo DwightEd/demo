@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import os
+from html import escape
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -17,12 +20,63 @@ SUBSET_TITLES = {
     "omnimath": "Omni-MATH",
 }
 
+CSV_FIELDS = (
+    "dataset",
+    "selected_index",
+    "chain_idx",
+    "problem_id",
+    "generator",
+    "process_correct",
+    "final_answer_correct",
+    "gold_error_step",
+    "n_steps",
+    "problem",
+    "step_index",
+    "is_first_error",
+    "step_text",
+)
+
+HTML_STYLE = """
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  color: #18202a;
+  background: #eef1f4;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #eef1f4; }
+main { width: min(1180px, calc(100% - 32px)); margin: 28px auto 56px; }
+header { border-top: 5px solid #1f6f78; padding: 24px 0 18px; }
+h1 { margin: 0 0 8px; font-size: 30px; line-height: 1.2; }
+h2 { margin: 0; font-size: 21px; line-height: 1.3; }
+p { line-height: 1.58; }
+.subtitle { margin: 0; color: #536170; }
+.example { margin-top: 22px; background: #fff; border: 1px solid #d6dce2; border-radius: 6px; overflow: hidden; }
+.example-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px; border-bottom: 1px solid #d6dce2; background: #f8fafb; }
+.badge { display: inline-block; padding: 4px 8px; border-radius: 4px; background: #dceef0; color: #15515a; font-size: 13px; font-weight: 700; }
+.badge.error { background: #f9dfdf; color: #8a2020; }
+.content { padding: 18px; }
+.problem { margin: 8px 0 18px; padding: 14px 16px; border-left: 4px solid #d69b2d; background: #fffaf0; white-space: pre-wrap; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th, td { padding: 10px 12px; border: 1px solid #dfe4e8; text-align: left; vertical-align: top; line-height: 1.48; }
+th { background: #f3f5f7; color: #36414d; font-size: 13px; }
+.metadata th { width: 180px; }
+.steps th:first-child, .steps td:first-child { width: 86px; text-align: center; }
+.steps td:last-child { white-space: pre-wrap; overflow-wrap: anywhere; }
+.steps tr.first-error td { background: #fff0f0; border-color: #e7b9b9; }
+.error-label { color: #9b2525; font-weight: 700; }
+@media (max-width: 720px) {
+  main { width: min(100% - 20px, 1180px); margin-top: 12px; }
+  .example-heading { align-items: flex-start; flex-direction: column; }
+  .metadata th { width: 128px; }
+  th, td { padding: 8px; }
+}
+""".strip()
+
 
 def _contains_subset(path: Path, subset: str) -> bool:
-    return any(
-        (path / f"{subset}{suffix}").is_file()
-        for suffix in (".json", ".jsonl")
-    )
+    return any((path / f"{subset}{suffix}").is_file() for suffix in (".json", ".jsonl"))
 
 
 def resolve_data_dir(
@@ -195,6 +249,153 @@ def render_text(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_json(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def _step_rows(payload: dict[str, Any]):
+    for example in payload["examples"]:
+        common = {
+            "dataset": example["dataset"],
+            "selected_index": example["selected_index"],
+            "chain_idx": example["chain_idx"],
+            "problem_id": example["problem_id"],
+            "generator": example["generator"] or "",
+            "process_correct": example["process_correct"],
+            "final_answer_correct": example["final_answer_correct"],
+            "gold_error_step": example["gold_error_step"],
+            "n_steps": example["n_steps"],
+            "problem": example["problem"],
+        }
+        for step in example["steps"]:
+            yield {
+                **common,
+                "step_index": step["index"],
+                "is_first_error": step["is_first_error"],
+                "step_text": step["text"],
+            }
+
+
+def render_csv(payload: dict[str, Any]) -> str:
+    """Render one row per reasoning step for spreadsheet inspection."""
+
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=CSV_FIELDS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(_step_rows(payload))
+    return stream.getvalue()
+
+
+def _html_value(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value)
+
+
+def render_html(payload: dict[str, Any]) -> str:
+    """Render a self-contained report with first-error rows highlighted."""
+
+    selection = payload["selection"]
+    sections: list[str] = []
+    for example in payload["examples"]:
+        title = SUBSET_TITLES.get(example["dataset"], example["dataset"])
+        is_error = example["gold_error_step"] >= 0
+        badge_class = "badge error" if is_error else "badge"
+        badge_text = (
+            "First error: step " + str(example["gold_error_step"])
+            if is_error
+            else "All steps correct"
+        )
+        metadata = (
+            ("Generator", example["generator"] or "unknown"),
+            ("Chain index", example["chain_idx"]),
+            ("Problem ID", example["problem_id"]),
+            ("Process correct", _html_value(example["process_correct"])),
+            ("Final answer correct", _html_value(example["final_answer_correct"])),
+            ("Number of steps", example["n_steps"]),
+        )
+        metadata_rows = "".join(
+            f"<tr><th>{escape(str(label))}</th><td>{escape(str(value))}</td></tr>"
+            for label, value in metadata
+        )
+        step_rows: list[str] = []
+        for step in example["steps"]:
+            row_class = ' class="first-error"' if step["is_first_error"] else ""
+            step_label = (
+                f'<span class="error-label">{step["index"]}<br>First error</span>'
+                if step["is_first_error"]
+                else str(step["index"])
+            )
+            step_rows.append(
+                f"<tr{row_class}><td>{step_label}</td>"
+                f"<td>{escape(str(step['text']))}</td></tr>"
+            )
+        sections.append(
+            '<section class="example">'
+            '<div class="example-heading">'
+            f"<h2>{escape(str(title))}</h2>"
+            f'<span class="{badge_class}">{escape(badge_text)}</span>'
+            '</div><div class="content">'
+            f'<table class="metadata"><tbody>{metadata_rows}</tbody></table>'
+            "<h3>Problem</h3>"
+            f"<div class=\"problem\">{escape(str(example['problem']))}</div>"
+            "<h3>Reasoning steps</h3>"
+            '<table class="steps"><thead><tr><th>Step</th><th>Text</th>'
+            f"</tr></thead><tbody>{''.join(step_rows)}</tbody></table>"
+            "</div></section>"
+        )
+
+    data_dir = escape(str(payload["data_dir"]))
+    return (
+        '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>ProcessBench Example Report</title>"
+        f"<style>{HTML_STYLE}</style></head><body><main>"
+        "<header><h1>ProcessBench Example Report</h1>"
+        f"<p class=\"subtitle\">Selection: {escape(str(selection['kind']))}, "
+        f"index {selection['index']} | Source: {data_dir}</p></header>"
+        f"{''.join(sections)}</main></body></html>\n"
+    )
+
+
+def render_payload(payload: dict[str, Any], output_format: str) -> str:
+    renderers = {
+        "text": render_text,
+        "json": render_json,
+        "csv": render_csv,
+        "html": render_html,
+    }
+    try:
+        renderer = renderers[output_format]
+    except KeyError as exc:
+        raise ValueError(f"unsupported output format {output_format!r}") from exc
+    return renderer(payload)
+
+
+def _write_rendered(path: Path, content: str, output_format: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoding = "utf-8-sig" if output_format == "csv" else "utf-8"
+    path.write_text(content, encoding=encoding)
+
+
+def write_report_bundle(
+    payload: dict[str, Any], output_dir: str | Path
+) -> dict[str, Path]:
+    directory = Path(output_dir)
+    selection = payload["selection"]
+    basename = (
+        f"processbench_examples_{selection['kind']}_{int(selection['index']):04d}"
+    )
+    paths: dict[str, Path] = {}
+    for output_format in ("json", "csv", "html"):
+        path = directory / f"{basename}.{output_format}"
+        _write_rendered(path, render_payload(payload, output_format), output_format)
+        paths[output_format] = path
+    return paths
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -232,7 +433,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--format",
         dest="output_format",
-        choices=("text", "json"),
+        choices=("text", "json", "csv", "html"),
         default="text",
         help="Output format (default: text).",
     )
@@ -240,6 +441,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--output",
         default="",
         help="Optional output file; the same content is also printed to stdout.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        default="",
+        help="Optional report directory; writes JSON, CSV, and HTML together.",
     )
     return parser
 
@@ -252,15 +458,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         kind=args.kind,
         index=args.index,
     )
-    if args.output_format == "json":
-        rendered = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    rendered = render_payload(payload, args.output_format)
+    bundle_paths: dict[str, Path] = {}
+    if args.output_dir:
+        bundle_paths = write_report_bundle(payload, args.output_dir)
+        for output_format, path in bundle_paths.items():
+            print(f"saved {output_format}: {path}")
     else:
-        rendered = render_text(payload)
-    print(rendered, end="")
+        print(rendered, end="")
     if args.output:
         output = Path(args.output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(rendered, encoding="utf-8")
+        _write_rendered(output, rendered, args.output_format)
 
 
 if __name__ == "__main__":
