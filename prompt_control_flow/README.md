@@ -1,5 +1,9 @@
 # Prompt-Controlled Residual Flow
 
+The exact finite-world mechanism gate is documented in
+[`belief_transport/METHOD.md`](belief_transport/METHOD.md). It must pass before
+belief-transport scores are transferred to ProcessBench error detection.
+
 Data provenance, label semantics, teacher-forcing alignment, and the distinction
 between observer traces and generation-matched self traces are defined in
 [DATA_CONTRACT_REASONING_TRACES.md](DATA_CONTRACT_REASONING_TRACES.md). Run
