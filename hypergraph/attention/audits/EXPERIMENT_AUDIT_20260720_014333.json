@@ -1,0 +1,44 @@
+{
+  "audit_skill": "experiment-audit",
+  "verdict": "WARN",
+  "reason_code": "real_gpu_pilot_unverified",
+  "summary": "Code-integrity checks pass; the user's Llama-3.1-8B checkpoint and two-GPU wrapper still require a real-server pilot.",
+  "audited_input_hashes": {
+    "hypergraph/attention/construction.py": "sha256:f9e001e0e9cabf283433de7c14ed6960211f78e5fdf2aff981129b5357666b45",
+    "hypergraph/attention/extract.py": "sha256:99e489da4503da2c84e9563d3e4eec55c5722c0b2dbf4288f7623bdc056cedf0",
+    "hypergraph/attention/model.py": "sha256:9444f4a6ba4745a16ba4b1f8087df861126f3820a3ce72d2e66b213358f61a57",
+    "hypergraph/attention/shards.py": "sha256:b1fac0d6a22e9f041d83a77c47fedb8c00efaa6cebce979409e51c2ef5bd7daf",
+    "hypergraph/attention/train.py": "sha256:a7b0a06696888d99798fd161ce758a1b8970a3eeb6fe1e2148482d240e7e6405",
+    "tests/test_attention_hypergraph.py": "sha256:ae5cc849b42557e9867ba7321e7d0506e95fe1ad586c8a67387f52c9dd5fc438"
+  },
+  "trace_path": ".aris/traces/experiment-audit/2026-07-20_run01/",
+  "agent_id": "/root/final_experiment_audit",
+  "verdict_id": "/root/final_experiment_audit:2026-07-20-final",
+  "executor_model": "codex-gpt-5.6-sol",
+  "executor_family": "openai",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_family": "openai",
+  "reviewer_reasoning": "ultra",
+  "review_independence": "same-family",
+  "acceptance_status": "provisional",
+  "generated_at": "2026-07-20T01:43:33+08:00",
+  "date": "2026-07-20",
+  "auditor": "gpt-5.6-sol-ultra",
+  "overall_verdict": "warn",
+  "integrity_status": "warn",
+  "checks": {
+    "gt_provenance": {"status": "pass", "details": "Dataset labels are required and cross-granularity conflicts fail closed."},
+    "score_normalization": {"status": "pass", "details": "No prediction-self-normalized evaluation; non-finite scores fail."},
+    "result_existence": {"status": "pass", "details": "No real-result or improvement claim is present."},
+    "dead_code": {"status": "pass", "details": "Manifest, selector, shard, provenance, and training gates are executed and tested."},
+    "scope": {"status": "warn", "details": "CPU/Torch tests pass; real 8B two-GPU pilot has not run."},
+    "eval_type": "real_gt_planned_with_simulation_only_contract_tests"
+  },
+  "claims": [
+    {"id": "C1", "impact": "supported_provisionally"},
+    {"id": "C2", "impact": "needs_real_gpu_pilot"},
+    {"id": "C3", "impact": "needs_real_gpu_pilot"},
+    {"id": "C4", "impact": "unsupported_before_experiments"},
+    {"id": "C5", "impact": "unsupported"}
+  ]
+}
