@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATA_ROOT="${1:-/share/home/tm902089733300000/a903202310/lys/research/demo/data/exact/processbench_observer_llama31}"
+DATA_ROOT="${1:-/share/home/tm902089733300000/a903202310/lys/research/demo/data/exact/processbench_observer_llama31_full}"
 OUTPUT_ROOT="${2:-outputs/token_residual_dispersion_legacy_selected_pilot}"
 MAX_TRACES="${MAX_TRACES:-0}"
 

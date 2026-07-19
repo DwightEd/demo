@@ -47,11 +47,12 @@ depth-interval delta，不会被命名为单 block residual write。
 ```bash
 cd /share/home/tm902089733300000/a903202310/lys/research/demo
 MAX_TRACES=20 bash token_residual_dispersion/run_existing_selected_pilot.sh \
-  data/exact/processbench_observer_llama31 \
+  data/exact/processbench_observer_llama31_pilot \
   outputs/token_residual_dispersion_sparse_pilot20
 ```
 
 确认四个 `audit_summary.json` 后，去掉 `MAX_TRACES=20` 并使用新的输出目录运行全量。
+全量数据根目录是 `data/exact/processbench_observer_llama31_full`。
 脚本以逐链流式方式读取 shard；`--rank-stride 4` 只降低 effective-rank 的时间采样密度，
 pair dispersion 仍在每个 token、每个深度区间、每个窗口上计算。
 

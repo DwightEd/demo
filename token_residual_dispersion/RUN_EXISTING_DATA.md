@@ -8,7 +8,7 @@
 ```bash
 cd /share/home/tm902089733300000/a903202310/lys/research/demo
 
-DATA_ROOT=data/exact/processbench_observer_llama31
+DATA_ROOT=data/exact/processbench_observer_llama31_pilot
 find "$DATA_ROOT" -path '*/selected/trace.npz' -print
 du -sh "$DATA_ROOT"/*/selected
 ```
@@ -25,7 +25,7 @@ python -m token_residual_dispersion.cli \
   --preflight
 ```
 
-## 3. 20 条链 smoke test
+## 3. 使用现成的 20 条链数据做 smoke test
 
 ```bash
 MAX_TRACES=20 bash token_residual_dispersion/run_existing_selected_pilot.sh \
@@ -58,6 +58,8 @@ sparse_multi_block_depth_interval_delta_pilot
 使用新的输出目录，避免与 smoke test 混合：
 
 ```bash
+DATA_ROOT=data/exact/processbench_observer_llama31_full
+
 bash token_residual_dispersion/run_existing_selected_pilot.sh \
   "$DATA_ROOT" \
   outputs/token_residual_dispersion_sparse_full
