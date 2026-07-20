@@ -255,6 +255,45 @@ LIMIT=4 MODE=model_parallel QUERY_CHUNK_SIZE=64 GPU_MEMORY=22GiB CPU_MEMORY=64Gi
   bash hypergraph/attention/scripts/extract_dual_gpu.sh
 ```
 
+## 严格单层 response 检测：全流程入口
+
+`scripts/run_single_layer_response_pipeline.sh` 串联单层 attention 抽取、互补 shard
+审计、构图预检、按题目隔离的五折训练和 held-out response 指标汇总。它固定以下任务语义：
+
+- prompt 与 response token 都作为节点；
+- 只有 response token 作为超边 receiver；
+- 默认 `SOURCE_SCOPE=all_past`，因此 prompt 和更早的 response token 都可作为 source；
+- 使用 `response_bce`，对 response token logits 做 mean pooling 后判断整条回答是否错误；
+- 抽取和训练同时限定同一个零基 Transformer block，因此是真正的单层输入，而不只是筛选构图层。
+
+直接运行第 14 层：
+
+```bash
+cd /gz-data/research/demo
+bash hypergraph/attention/scripts/run_single_layer_response_pipeline.sh \
+  --layer 14 \
+  --dataset omnimath
+```
+
+测试第 11 层只需改为 `--layer 11`。先跑 4 条 pilot 时增加 `--limit 4`；多随机种子可写成
+`--seeds 17,29,41`。默认读取
+`data/hf_datasets/ProcessBench/<dataset>.json` 和
+`/gz-data/models/Meta-Llama-3.1-8B-Instruct`；用 `--input`、`--model` 可覆盖。所有可配置项及
+默认值通过下面的命令查看：
+
+```bash
+bash hypergraph/attention/scripts/run_single_layer_response_pipeline.sh --help
+```
+
+默认输出分别位于
+`outputs/attention_traces/<dataset>_llama31_layer<layer>` 与
+`outputs/attention_hypergraph/<dataset>_response_layer<layer>`；最终五折/多种子汇总为
+`aggregate_results.json`。已完成且通过 manifest 门禁的抽取和训练会被复用；不完整目录默认
+fail closed，避免新旧配置静默混合。默认 symmetric propagation 与 per-graph z-score 对应
+**整条回答生成完成后的离线 response 检测**，脚本会显式传入许可并写入结果配置；若要做
+prefix-causal 版本，运行前设置
+`PROPAGATION_MODE=receiver PREPROCESSING=none`。
+
 这里仍保留完整 dense trace，所以节省的是 GPU 峰值而不是最终的 (O(LHN^2)) CPU/磁盘量。
 Llama-3.1-8B 的 32 层 × 32 头、2048 token、float32 trace 下界约为 16 GiB/样本；“完整数据”
 命令只有在 pilot 的真实长度分布、主机 RAM 与 scratch 磁盘预算都通过后才能运行。
