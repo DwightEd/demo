@@ -494,9 +494,12 @@ for seed in "${SEED_VALUES[@]}"; do
     TRAIN_DEVICE="${TRAIN_GPU_VALUES[$((training_job_index % ${#TRAIN_GPU_VALUES[@]}))]}"
     printf '\nTraining fold=%s seed=%s on physical GPU %s -> %s\n' \
       "${fold}" "${seed}" "${TRAIN_DEVICE}" "${RUN_DIR}"
-    CUDA_VISIBLE_DEVICES="${TRAIN_DEVICE}" "${PYTHON_BIN}" \
-      -m hypergraph.attention.train "${TRAIN_ARGS[@]}" \
-      >"${LOG_FILE}" 2>&1 &
+    (
+      set -o pipefail
+      PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES="${TRAIN_DEVICE}" "${PYTHON_BIN}" \
+        -m hypergraph.attention.train "${TRAIN_ARGS[@]}" \
+        2>&1 | tee "${LOG_FILE}"
+    ) &
     train_pids+=("$!")
     train_labels+=("fold=${fold} seed=${seed} gpu=${TRAIN_DEVICE}")
     train_logs+=("${LOG_FILE}")

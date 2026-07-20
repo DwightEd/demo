@@ -612,6 +612,23 @@ def _write_extraction_manifest(
     os.replace(temporary, destination)
 
 
+def _print_extraction_progress(
+    *, processed: int, total: int, shard_index: int, num_shards: int
+) -> None:
+    """Emit a log-friendly progress bar after each atomic checkpoint."""
+
+    width = 28
+    ratio = 1.0 if total <= 0 else min(max(float(processed) / float(total), 0.0), 1.0)
+    filled = int(round(width * ratio))
+    bar = "#" * filled + "-" * (width - filled)
+    percent = 100.0 * ratio
+    print(
+        f"[extract shard {int(shard_index) + 1}/{int(num_shards)}] "
+        f"[{bar}] {int(processed)}/{int(total)} ({percent:5.1f}%)",
+        flush=True,
+    )
+
+
 def _safe_stem(value: str, index: int) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("._")
     return f"{index:06d}_{cleaned[:80] or 'sample'}"
@@ -1778,6 +1795,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 extraction_scope_fingerprint=extraction_scope_fingerprint,
                 traces=manifest,
             )
+            _print_extraction_progress(
+                processed=len(manifest),
+                total=len(indexed_rows),
+                shard_index=int(args.shard_index),
+                num_shards=int(args.num_shards),
+            )
             del trace
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -1795,6 +1818,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 extraction_fingerprint=extraction_fingerprint,
                 extraction_scope_fingerprint=extraction_scope_fingerprint,
                 traces=manifest,
+            )
+            _print_extraction_progress(
+                processed=len(manifest),
+                total=len(indexed_rows),
+                shard_index=int(args.shard_index),
+                num_shards=int(args.num_shards),
             )
             if not args.skip_invalid:
                 raise

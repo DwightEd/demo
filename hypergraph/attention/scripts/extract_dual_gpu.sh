@@ -95,20 +95,28 @@ case "${MODE}" in
     }
     trap cleanup INT TERM
 
-    CUDA_VISIBLE_DEVICES="${GPU0}" "${PYTHON_BIN}" -m hypergraph.attention.extract \
-      "${common_args[@]}" \
-      "$@" \
-      --output_dir "${OUTPUT_ROOT}/shard0" \
-      --device cuda:0 --num-shards 2 --shard-index 0 \
-      >"${OUTPUT_ROOT}/logs/shard0.log" 2>&1 &
+    (
+      set -o pipefail
+      PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES="${GPU0}" \
+        "${PYTHON_BIN}" -m hypergraph.attention.extract \
+        "${common_args[@]}" \
+        "$@" \
+        --output_dir "${OUTPUT_ROOT}/shard0" \
+        --device cuda:0 --num-shards 2 --shard-index 0 \
+        2>&1 | tee "${OUTPUT_ROOT}/logs/shard0.log"
+    ) &
     pids+=("$!")
 
-    CUDA_VISIBLE_DEVICES="${GPU1}" "${PYTHON_BIN}" -m hypergraph.attention.extract \
-      "${common_args[@]}" \
-      "$@" \
-      --output_dir "${OUTPUT_ROOT}/shard1" \
-      --device cuda:0 --num-shards 2 --shard-index 1 \
-      >"${OUTPUT_ROOT}/logs/shard1.log" 2>&1 &
+    (
+      set -o pipefail
+      PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES="${GPU1}" \
+        "${PYTHON_BIN}" -m hypergraph.attention.extract \
+        "${common_args[@]}" \
+        "$@" \
+        --output_dir "${OUTPUT_ROOT}/shard1" \
+        --device cuda:0 --num-shards 2 --shard-index 1 \
+        2>&1 | tee "${OUTPUT_ROOT}/logs/shard1.log"
+    ) &
     pids+=("$!")
 
     status=0
@@ -130,7 +138,7 @@ case "${MODE}" in
     ;;
 
   model_parallel)
-    CUDA_VISIBLE_DEVICES="${GPU0},${GPU1}" "${PYTHON_BIN}" \
+    PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES="${GPU0},${GPU1}" "${PYTHON_BIN}" \
       -m hypergraph.attention.extract \
       "${common_args[@]}" \
       "$@" \
