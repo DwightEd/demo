@@ -10,7 +10,7 @@ usage() {
   cat <<'EOF'
 Usage:
   bash hypergraph/attention/scripts/run_single_layer_response_pipeline.sh \
-    [--layer 14] [--dataset omnimath] [--folds 5] [--seeds 17]
+    [--layer 14] [--dataset omnimath] [--folds 5] [--seeds 17] [--extract-only]
 
 The pipeline performs:
   1. strict one-layer, all-head prompt+response attention extraction;
@@ -29,6 +29,7 @@ High-level options:
   --seeds LIST       comma/space-separated seeds (default: 17)
   --limit N          pilot extraction limit; output gets a _pilotN suffix
   --mode MODE        data_parallel or model_parallel (default: data_parallel)
+  --extract-only     stop after strict manifest validation and shard audit
   --help             show this message
 
 Method environment variables and defaults:
@@ -44,7 +45,7 @@ Method environment variables and defaults:
   DROPOUT=0.25                   MONITOR=aupr
 
 Runtime environment variables:
-  PYTHON_BIN=python              GPU0=0 GPU1=1 TRAIN_GPU=0
+  PYTHON_BIN=python              GPU0=0 GPU1=1 TRAIN_GPUS=0,1
   QUERY_CHUNK_SIZE=64            STORAGE_DTYPE=float32
   REPLAY_MODE=observer           PROMPT_STYLE=plain
   REUSE_TRACES=1                 REUSE_RUNS=1 OVERWRITE_RUNS=0
@@ -124,6 +125,7 @@ FOLDS="${FOLDS:-5}"
 SEEDS="${SEEDS:-17}"
 LIMIT="${LIMIT:-}"
 MODE="${MODE:-data_parallel}"
+EXTRACT_ONLY="${EXTRACT_ONLY:-0}"
 
 while (($#)); do
   case "$1" in
@@ -135,6 +137,7 @@ while (($#)); do
     --seeds) SEEDS="${2:?--seeds requires a list}"; shift 2 ;;
     --limit) LIMIT="${2:?--limit requires an integer}"; shift 2 ;;
     --mode) MODE="${2:?--mode requires a value}"; shift 2 ;;
+    --extract-only) EXTRACT_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1 (run with --help)" ;;
   esac
@@ -160,7 +163,7 @@ command -v "${PYTHON_BIN}" >/dev/null 2>&1 || die "Python executable not found: 
 
 GPU0="${GPU0:-0}"
 GPU1="${GPU1:-1}"
-TRAIN_GPU="${TRAIN_GPU:-0}"
+TRAIN_GPUS="${TRAIN_GPUS:-${TRAIN_GPU:-${GPU0},${GPU1}}}"
 QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-64}"
 STORAGE_DTYPE="${STORAGE_DTYPE:-float32}"
 DTYPE="${DTYPE:-auto}"
@@ -194,6 +197,16 @@ REUSE_TRACES="${REUSE_TRACES:-1}"
 REUSE_RUNS="${REUSE_RUNS:-1}"
 OVERWRITE_RUNS="${OVERWRITE_RUNS:-0}"
 ALLOW_RESPLIT_OFFICIAL_DATA="${ALLOW_RESPLIT_OFFICIAL_DATA:-0}"
+
+read -r -a TRAIN_GPU_VALUES <<< "${TRAIN_GPUS//,/ }"
+((${#TRAIN_GPU_VALUES[@]})) || die "TRAIN_GPUS resolved to an empty list"
+for index in "${!TRAIN_GPU_VALUES[@]}"; do
+  [[ -n "${TRAIN_GPU_VALUES[$index]}" ]] || die "TRAIN_GPUS contains an empty device"
+  for ((previous = 0; previous < index; previous++)); do
+    [[ "${TRAIN_GPU_VALUES[$index]}" != "${TRAIN_GPU_VALUES[$previous]}" ]] || \
+      die "TRAIN_GPUS contains duplicate device: ${TRAIN_GPU_VALUES[$index]}"
+  done
+done
 
 [[ "${SOURCE_SELECTION}" == "threshold" ]] || \
   die "this audited entrypoint supports SOURCE_SELECTION=threshold only"
@@ -240,6 +253,12 @@ import torch
 import transformers
 print("runtime:", "torch", torch.__version__, "transformers", transformers.__version__)
 print("cuda:", torch.cuda.is_available(), "gpus:", torch.cuda.device_count())
+if not torch.cuda.is_available():
+    raise SystemExit(
+        "CUDA is unavailable to PyTorch; install a wheel compatible with the host driver"
+    )
+if torch.cuda.device_count() < 2:
+    raise SystemExit("the dual-GPU pipeline requires at least two visible CUDA devices")
 PY
 
 printf '\n===== Single-layer response pipeline =====\n'
@@ -334,6 +353,13 @@ for directory in map(Path, sys.argv[2:]):
 print("strict single-layer manifest gate passed:", expected)
 PY
 
+if is_true "${EXTRACT_ONLY}"; then
+  [[ -f "${TRACE_ROOT}/shard_audit.json" ]] || \
+    die "extraction completed without shard audit: ${TRACE_ROOT}/shard_audit.json"
+  printf '\nExtraction-only pipeline complete. Audited traces: %s\n' "${TRACE_ROOT}"
+  exit 0
+fi
+
 RUN_CONFIG_PATH="${RUN_ROOT}/pipeline_request.json"
 guard_config "${RUN_CONFIG_PATH}" \
   "trace_root=${TRACE_ROOT}" \
@@ -387,6 +413,38 @@ GRAPH_ARGS=(
 
 read -r -a SEED_VALUES <<< "${SEEDS//,/ }"
 ((${#SEED_VALUES[@]})) || die "--seeds resolved to an empty list"
+train_pids=()
+train_labels=()
+train_logs=()
+training_job_index=0
+
+cleanup_training_jobs() {
+  local pid
+  for pid in "${train_pids[@]:-}"; do
+    kill "${pid}" 2>/dev/null || true
+  done
+}
+trap cleanup_training_jobs INT TERM EXIT
+
+wait_for_training_wave() {
+  local status=0
+  local index
+  for index in "${!train_pids[@]}"; do
+    if wait "${train_pids[$index]}"; then
+      printf 'Completed %s\n' "${train_labels[$index]}"
+    else
+      printf 'FAILED %s; tail of %s:\n' \
+        "${train_labels[$index]}" "${train_logs[$index]}" >&2
+      tail -n 40 "${train_logs[$index]}" >&2 || true
+      status=1
+    fi
+  done
+  train_pids=()
+  train_labels=()
+  train_logs=()
+  [[ "${status}" -eq 0 ]] || die "at least one parallel fold training job failed"
+}
+
 for seed in "${SEED_VALUES[@]}"; do
   [[ "${seed}" =~ ^[0-9]+$ ]] || die "seed must be a non-negative integer: ${seed}"
   for ((fold = 0; fold < FOLDS; fold++)); do
@@ -433,12 +491,25 @@ for seed in "${SEED_VALUES[@]}"; do
     elif [[ -d "${RUN_DIR}" ]] && find "${RUN_DIR}" -mindepth 1 -print -quit | grep -q .; then
       die "partial run directory exists; set OVERWRITE_RUNS=1 or remove it: ${RUN_DIR}"
     fi
-    printf '\nTraining fold=%s seed=%s -> %s\n' "${fold}" "${seed}" "${RUN_DIR}"
-    CUDA_VISIBLE_DEVICES="${TRAIN_GPU}" "${PYTHON_BIN}" \
+    TRAIN_DEVICE="${TRAIN_GPU_VALUES[$((training_job_index % ${#TRAIN_GPU_VALUES[@]}))]}"
+    printf '\nTraining fold=%s seed=%s on physical GPU %s -> %s\n' \
+      "${fold}" "${seed}" "${TRAIN_DEVICE}" "${RUN_DIR}"
+    CUDA_VISIBLE_DEVICES="${TRAIN_DEVICE}" "${PYTHON_BIN}" \
       -m hypergraph.attention.train "${TRAIN_ARGS[@]}" \
-      2>&1 | tee "${LOG_FILE}"
+      >"${LOG_FILE}" 2>&1 &
+    train_pids+=("$!")
+    train_labels+=("fold=${fold} seed=${seed} gpu=${TRAIN_DEVICE}")
+    train_logs+=("${LOG_FILE}")
+    ((training_job_index += 1))
+    if ((${#train_pids[@]} >= ${#TRAIN_GPU_VALUES[@]})); then
+      wait_for_training_wave
+    fi
   done
 done
+if ((${#train_pids[@]})); then
+  wait_for_training_wave
+fi
+trap - INT TERM EXIT
 
 "${PYTHON_BIN}" - "${RUN_ROOT}" <<'PY'
 import json
