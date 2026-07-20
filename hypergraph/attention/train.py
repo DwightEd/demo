@@ -29,7 +29,8 @@ import platform
 import random
 import subprocess
 import sys
-from dataclasses import asdict, dataclass, fields, is_dataclass, replace
+from collections import Counter
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -50,7 +51,9 @@ from .data import (
     model_identity_matches,
     safe_trace_stem,
     trace_method_provenance,
-    trace_provenance_fingerprint,
+    trace_representation_fingerprint,
+    trace_representation_provenance,
+    trace_source_provenance,
     trace_summary,
 )
 from .schema import AttentionHypergraph, AttentionHypergraphConfig
@@ -70,6 +73,7 @@ class _TraceMeta:
     gold_step: Optional[int]
     num_steps: int
     num_response_tokens: int
+    generator_model: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -77,6 +81,34 @@ class _ReplayProvenanceAudit:
     complete: bool
     observer: bool
     unverified_weights: bool
+
+
+@dataclass
+class _TraceCohortAuditState:
+    representation_fingerprints: List[str] = field(default_factory=list)
+    missing_provenance: List[str] = field(default_factory=list)
+    representation_provenance_records: List[Dict[str, Any]] = field(
+        default_factory=list
+    )
+    extraction_scope_fingerprints: set[str] = field(default_factory=set)
+    extraction_scope_records: List[Dict[str, Any]] = field(default_factory=list)
+    observer_traces: List[str] = field(default_factory=list)
+    unverified_weight_traces: List[str] = field(default_factory=list)
+    unverified_chunk_topology_traces: List[str] = field(default_factory=list)
+    axis_contracts: set[Tuple[Any, ...]] = field(default_factory=set)
+    generator_model_counts: Counter[str] = field(default_factory=Counter)
+    generator_commit_counts: Counter[str] = field(default_factory=Counter)
+
+
+@dataclass
+class _LoadedGraphCohort:
+    trace_metadata: List[_TraceMeta]
+    graphs: List[AttentionHypergraph]
+    trace_rows: List[Dict[str, Any]]
+    graph_rows: List[Dict[str, Any]]
+    missing_supervision: int
+    provenance_info: Dict[str, Any]
+    selection_info: Dict[str, Any]
 
 
 def _finite_json(value: Any) -> Any:
@@ -180,6 +212,7 @@ def _input_scope(args: argparse.Namespace) -> Dict[str, Any]:
         "input_specs": [str(value) for value in args.inputs],
         "recursive": not bool(args.no_recursive),
         "trace_limit": None if args.limit is None else int(args.limit),
+        "generator_models": list(_parse_generator_models(args.generator_model)),
         "candidate_files": [
             {
                 "path": str(path),
@@ -211,6 +244,38 @@ def _parse_activation_layers(raw: Any) -> Optional[Tuple[int, ...]]:
     if isinstance(raw, str) and raw.strip().lower() == "last":
         return (-1,)
     return _parse_indices(raw, allow_all=False)
+
+
+def _parse_generator_models(raw: Any) -> Tuple[str, ...]:
+    """Parse exact dataset generator tags; no model-name aliasing is inferred."""
+
+    if raw is None:
+        return ()
+    if not isinstance(raw, str):
+        raise ValueError("generator model filter must be a comma-separated string")
+    text = raw.strip()
+    if not text:
+        return ()
+    values = tuple(part.strip() for part in text.split(","))
+    if any(not value for value in values):
+        raise ValueError("generator model filter contains an empty tag")
+    normalized = [value.casefold() for value in values]
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("generator model filter contains duplicate tags")
+    return values
+
+
+def _trace_matches_generator_filter(
+    trace: AttentionTrace, args: argparse.Namespace
+) -> bool:
+    wanted = _parse_generator_models(args.generator_model)
+    if not wanted:
+        return True
+    observed = trace.metadata.get("generator_model")
+    if observed in (None, ""):
+        return False
+    observed_key = str(observed).strip().casefold()
+    return observed_key in {value.casefold() for value in wanted}
 
 
 def _command_actions(
@@ -395,20 +460,56 @@ def _graph_config_from_args(args: argparse.Namespace) -> AttentionHypergraphConf
     )
 
 
-def _iter_input_traces(args: argparse.Namespace) -> Iterable[AttentionTrace]:
+def _validate_limit_input_order(
+    args: argparse.Namespace, trace: Optional[AttentionTrace] = None
+) -> None:
+    """Reject limits whose selected rows could depend on physical shard traversal."""
+
+    if args.limit is None:
+        return
+    if len(args.inputs) > 1:
+        raise SystemExit(
+            "--limit across multiple trace inputs is storage-order dependent; "
+            "materialize the limited cohort before sharding, or omit --limit"
+        )
+    if trace is None:
+        return
+    scope_json = trace.metadata.get("extraction_scope_json")
+    if scope_json in (None, ""):
+        return
+    try:
+        scope = json.loads(str(scope_json))
+    except json.JSONDecodeError:
+        return  # The strict extraction-scope audit reports the malformed record.
+    if isinstance(scope, Mapping) and int(scope.get("num_shards", 1)) > 1:
+        raise SystemExit(
+            "--limit over a sharded extraction scope is storage-order dependent even "
+            "through one parent directory/glob; materialize the limited cohort first"
+        )
+
+
+def _iter_input_traces(
+    args: argparse.Namespace, *, apply_selection: bool = True
+) -> Iterable[AttentionTrace]:
     """Stream traces so quadratic dense attention is freed after construction."""
 
+    if apply_selection:
+        _validate_limit_input_order(args)
     config = _load_config_from_args(args)
     seen: set[str] = set()
     count = 0
     for trace in iter_traces(args.inputs, config=config, recursive=not args.no_recursive):
+        if apply_selection:
+            _validate_limit_input_order(args, trace)
         if trace.trace_id in seen:
             raise SystemExit(f"trace_id values must be unique; duplicate {trace.trace_id!r}")
         seen.add(trace.trace_id)
+        if apply_selection and not _trace_matches_generator_filter(trace, args):
+            continue
+        if apply_selection and args.limit is not None and count >= int(args.limit):
+            break
         yield trace
         count += 1
-        if args.limit is not None and count >= int(args.limit):
-            break
 
 
 def _build_graph(
@@ -468,6 +569,10 @@ def _aggregate_inspection(
     edges_per_receiver = values(graph_rows, "mean_edges_per_response_token")
     member_counts = values(graph_rows, "mean_members_per_edge")
     response_labels = values(trace_rows, "response_y")
+    generator_counts = Counter(
+        str(row.get("source_provenance", {}).get("generator_model", "<missing>"))
+        for row in trace_rows
+    )
     position_bins = []
     for bin_index in range(5):
         bin_values = np.asarray(
@@ -492,6 +597,7 @@ def _aggregate_inspection(
         "response_positive_rate": (
             None if not len(response_labels) else float(response_labels.mean())
         ),
+        "generator_model_counts": dict(sorted(generator_counts.items())),
         "tokens": _distribution(lengths),
         "response_tokens": _distribution(response_lengths),
         "hyperedges": _distribution(edges),
@@ -567,18 +673,39 @@ def _graph_summary(graph: AttentionHypergraph, trace: AttentionTrace) -> Dict[st
 def command_inspect(args: argparse.Namespace) -> Dict[str, Any]:
     graph_config = _graph_config_from_args(args)
     input_scope = _input_scope(args)
-    trace_rows, graph_rows = [], []
-    for trace in _iter_input_traces(args):
-        graph = _build_graph(trace, graph_config)
-        trace_rows.append(trace_summary(trace))
-        graph_rows.append(_graph_summary(graph, trace))
+    cohort_audit = None
+    selection = None
+    if args.objective is not None:
+        cohort = _load_audited_graph_cohort(
+            args,
+            graph_config,
+            objective=str(args.objective),
+            preprocessing=None,
+        )
+        trace_rows = cohort.trace_rows
+        graph_rows = cohort.graph_rows
+        cohort_audit = cohort.provenance_info
+        selection = cohort.selection_info
+    else:
+        trace_rows, graph_rows = [], []
+        for trace in _iter_input_traces(args):
+            graph = _build_graph(trace, graph_config)
+            trace_rows.append(trace_summary(trace))
+            graph_rows.append(_graph_summary(graph, trace))
     if not trace_rows:
         raise SystemExit("no usable attention traces were loaded")
     result = {
         "command": "inspect",
+        "inspection_mode": (
+            "supervised_cohort_gate" if args.objective is not None else "structural_only"
+        ),
+        "cohort_gate_passed": bool(args.objective is not None),
+        "objective": args.objective,
         "loader_config": asdict(_load_config_from_args(args)),
         "input_scope": input_scope,
         "graph_config": asdict(graph_config),
+        "selection": selection,
+        "cohort_audit": cohort_audit,
         "use_activation": graph_config.node_feature_mode != "attention_diagonal",
         "summary": _aggregate_inspection(trace_rows, graph_rows),
         "traces": trace_rows if args.verbose_records else trace_rows[: min(10, len(trace_rows))],
@@ -702,6 +829,11 @@ def _trace_meta(trace: AttentionTrace) -> _TraceMeta:
         gold_step=trace.gold_step,
         num_steps=0 if trace.step_ranges is None else int(len(trace.step_ranges)),
         num_response_tokens=int(trace.num_response_tokens),
+        generator_model=(
+            None
+            if trace.metadata.get("generator_model") in (None, "")
+            else str(trace.metadata["generator_model"])
+        ),
     )
 
 
@@ -1162,163 +1294,325 @@ def _audit_replay_provenance(
     )
 
 
-def _load_training_graphs(
-    args: argparse.Namespace, graph_config: AttentionHypergraphConfig
-) -> Tuple[List[_TraceMeta], List[AttentionHypergraph], int, Dict[str, Any]]:
-    """Construct while streaming and retain only compact graphs/metadata."""
-
-    trace_metadata: List[_TraceMeta] = []
-    graphs: List[AttentionHypergraph] = []
-    provenance_fingerprints: List[str] = []
-    missing_provenance: List[str] = []
-    method_provenance_records: List[Dict[str, Any]] = []
-    extraction_scope_fingerprints: set[str] = set()
-    extraction_scope_records: List[Dict[str, Any]] = []
-    observer_traces: List[str] = []
-    unverified_weight_traces: List[str] = []
-    unverified_chunk_topology_traces: List[str] = []
-    axis_contracts: set[Tuple[Any, ...]] = set()
-    missing = 0
-    for trace in _iter_input_traces(args):
-        scope_json = trace.metadata.get("extraction_scope_json")
-        parsed_scope = None
-        if scope_json not in (None, ""):
-            try:
-                parsed_scope = json.loads(str(scope_json))
-            except json.JSONDecodeError as exc:
-                raise SystemExit(
-                    f"trace {trace.trace_id!r} has invalid extraction_scope_json"
-                ) from exc
-        extraction_scope_records.append(
-            {
-                "trace_id": trace.trace_id,
-                "scope": parsed_scope,
-                "source_input_sha256": trace.metadata.get("source_input_sha256"),
-                "source_row_index": trace.metadata.get("source_row_index"),
-                "extraction_scope_fingerprint": trace.metadata.get(
-                    "extraction_scope_fingerprint"
-                ),
-                "status": "ok",
-            }
-        )
-        if not _objective_available(trace, args.objective):
-            missing += 1
-            if not args.skip_unlabeled:
-                raise SystemExit(
-                    f"trace {trace.trace_id!r} lacks {args.objective} supervision; "
-                    "use the matching objective or pass --skip-unlabeled explicitly"
-                )
-            continue
-        graph = _build_graph(trace, graph_config)
-        fingerprint = trace_provenance_fingerprint(trace)
-        method_provenance = trace_method_provenance(trace)
-        scope_fingerprint = trace.metadata.get("extraction_scope_fingerprint")
-        if scope_fingerprint not in (None, ""):
-            extraction_scope_fingerprints.add(str(scope_fingerprint))
+def _record_extraction_scope(
+    state: _TraceCohortAuditState, trace: AttentionTrace
+) -> None:
+    scope_json = trace.metadata.get("extraction_scope_json")
+    parsed_scope = None
+    if scope_json not in (None, ""):
         try:
-            replay_audit = _audit_replay_provenance(method_provenance, trace.metadata)
-            _validate_trace_axes_against_method(trace)
-            if _validate_chunk_graph_contract(
-                trace,
-                graph_config,
-                allow_unverified=bool(args.allow_unverified_chunk_topology),
-            ):
-                unverified_chunk_topology_traces.append(trace.trace_id)
-        except ValueError as exc:
+            parsed_scope = json.loads(str(scope_json))
+        except json.JSONDecodeError as exc:
             raise SystemExit(
-                f"trace {trace.trace_id!r} has invalid replay provenance: {exc}"
+                f"trace {trace.trace_id!r} has invalid extraction_scope_json"
             ) from exc
-        complete_provenance = replay_audit.complete
-        if replay_audit.observer:
-            observer_traces.append(trace.trace_id)
-        if replay_audit.unverified_weights:
-            unverified_weight_traces.append(trace.trace_id)
-        axis_contracts.add(
-            (
-                tuple(np.asarray(trace.attention_layer_ids, dtype=int).tolist()),
-                tuple(np.asarray(trace.attention_head_ids, dtype=int).tolist()),
-                int(trace.num_model_layers),
-                int(trace.num_model_heads),
-            )
+    scope_fingerprint = trace.metadata.get("extraction_scope_fingerprint")
+    if scope_fingerprint not in (None, ""):
+        state.extraction_scope_fingerprints.add(str(scope_fingerprint))
+    state.extraction_scope_records.append(
+        {
+            "trace_id": trace.trace_id,
+            "scope": parsed_scope,
+            "source_input_sha256": trace.metadata.get("source_input_sha256"),
+            "source_row_index": trace.metadata.get("source_row_index"),
+            "extraction_scope_fingerprint": scope_fingerprint,
+            "status": "ok",
+        }
+    )
+
+
+def _record_representation_compatibility(
+    state: _TraceCohortAuditState,
+    trace: AttentionTrace,
+    graph_config: AttentionHypergraphConfig,
+    args: argparse.Namespace,
+) -> None:
+    fingerprint = trace_representation_fingerprint(trace)
+    representation_provenance = trace_representation_provenance(trace)
+    method_provenance = trace_method_provenance(trace)
+    source_provenance = trace_source_provenance(trace)
+    generator = str(source_provenance.get("generator_model", "<missing>"))
+    generator_commit = str(
+        source_provenance.get("generator_model_commit", "<missing>")
+    )
+    state.generator_model_counts[generator] += 1
+    state.generator_commit_counts[generator_commit] += 1
+    try:
+        replay_audit = _audit_replay_provenance(method_provenance, trace.metadata)
+        _validate_trace_axes_against_method(trace)
+        if _validate_chunk_graph_contract(
+            trace,
+            graph_config,
+            allow_unverified=bool(args.allow_unverified_chunk_topology),
+        ):
+            state.unverified_chunk_topology_traces.append(trace.trace_id)
+    except ValueError as exc:
+        raise SystemExit(
+            f"trace {trace.trace_id!r} has invalid replay provenance: {exc}"
+        ) from exc
+    if replay_audit.observer:
+        state.observer_traces.append(trace.trace_id)
+    if replay_audit.unverified_weights:
+        state.unverified_weight_traces.append(trace.trace_id)
+    state.axis_contracts.add(
+        (
+            tuple(np.asarray(trace.attention_layer_ids, dtype=int).tolist()),
+            tuple(np.asarray(trace.attention_head_ids, dtype=int).tolist()),
+            int(trace.num_model_layers),
+            int(trace.num_model_heads),
         )
-        if fingerprint is None or not complete_provenance:
-            missing_provenance.append(trace.trace_id)
-        else:
-            provenance_fingerprints.append(fingerprint)
-            method_provenance_records.append(method_provenance)
-        graphs.append(_preprocess_training_graph(graph, str(args.preprocessing)))
-        trace_metadata.append(_trace_meta(trace))
+    )
+    if fingerprint is None or not replay_audit.complete:
+        state.missing_provenance.append(trace.trace_id)
+    else:
+        state.representation_fingerprints.append(fingerprint)
+        state.representation_provenance_records.append(representation_provenance)
+
+
+def _finalize_trace_cohort_audit(
+    state: _TraceCohortAuditState, args: argparse.Namespace
+) -> Dict[str, Any]:
     try:
         extraction_scope_audit = audit_scope_records(
-            extraction_scope_records,
+            state.extraction_scope_records,
             allow_incomplete=bool(args.allow_incomplete_extraction_scope),
             allow_multiple_inputs=bool(args.allow_multiple_input_datasets),
         )
     except ValueError as exc:
         raise SystemExit(f"extraction shard audit failed: {exc}") from exc
-    if not graphs:
-        raise SystemExit(f"no traces carry supervision for {args.objective}")
-    unique_fingerprints = sorted(set(provenance_fingerprints))
-    if len(axis_contracts) > 1:
+
+    unique_fingerprints = sorted(set(state.representation_fingerprints))
+    if len(state.axis_contracts) > 1:
         raise SystemExit(
             "attention traces use different layer/head axes or model layer/head totals; "
             "refusing same-dimensional but semantically incompatible node features"
         )
     if len(unique_fingerprints) > 1:
         raise SystemExit(
-            "attention traces have different model/template/layer extraction fingerprints; "
-            "refusing to silently mix incompatible representations in one run"
+            "attention traces have different observer/template/layer representation "
+            "fingerprints; refusing to silently mix incompatible representations in one run"
         )
-    if missing_provenance and not args.allow_missing_provenance:
+    if state.missing_provenance and not args.allow_missing_provenance:
         raise SystemExit(
-            f"{len(missing_provenance)} supervised traces lack model/template extraction "
-            "provenance. Re-extract with attention.extract, or explicitly pass "
+            f"{len(state.missing_provenance)} supervised traces lack model/template "
+            "extraction provenance. Re-extract with attention.extract, or explicitly pass "
             "--allow-missing-provenance for a legacy diagnostic run."
         )
-    if observer_traces and not args.allow_observer_traces:
+    if state.observer_traces and not args.allow_observer_traces:
         raise SystemExit(
-            f"{len(observer_traces)} supervised traces are counterfactual observer replays. "
-            "They are not original-generation mechanism traces; pass --allow-observer-traces "
-            "only for a separately named observer experiment."
+            f"{len(state.observer_traces)} supervised traces are counterfactual observer "
+            "replays. They are not original-generation mechanism traces; pass "
+            "--allow-observer-traces only for a separately named observer experiment."
         )
-    if unverified_weight_traces and not args.allow_unverified_generator_weights:
+    if (
+        state.unverified_weight_traces
+        and not args.allow_unverified_generator_weights
+    ):
         raise SystemExit(
-            f"{len(unverified_weight_traces)} traces have an exact token axis but unverified "
-            "generator weights. Pass --allow-unverified-generator-weights only for a "
-            "separately named diagnostic run."
+            f"{len(state.unverified_weight_traces)} traces have an exact token axis but "
+            "unverified generator weights. Pass --allow-unverified-generator-weights "
+            "only for a separately named diagnostic run."
         )
-    provenance_info = {
+
+    axis_contract = None
+    if state.axis_contracts:
+        layer_ids, head_ids, num_layers, num_heads = next(iter(state.axis_contracts))
+        axis_contract = {
+            "layer_ids": list(layer_ids),
+            "head_ids": list(head_ids),
+            "num_model_layers": int(num_layers),
+            "num_model_heads": int(num_heads),
+        }
+    representation_provenance = (
+        state.representation_provenance_records[0]
+        if state.representation_provenance_records
+        else None
+    )
+    return {
         "fingerprint": unique_fingerprints[0] if len(unique_fingerprints) == 1 else None,
-        "num_missing": len(missing_provenance),
+        "representation_fingerprint": (
+            unique_fingerprints[0] if len(unique_fingerprints) == 1 else None
+        ),
+        "representation_provenance": representation_provenance,
+        # Backward-compatible key.  Unlike the old value, this no longer
+        # misrepresents the first sample's generator as cohort-wide method state.
+        "method_provenance": representation_provenance,
+        "source_provenance": {
+            "generator_model_counts": dict(
+                sorted(state.generator_model_counts.items())
+            ),
+            "generator_model_commit_counts": dict(
+                sorted(state.generator_commit_counts.items())
+            ),
+        },
+        "num_missing": len(state.missing_provenance),
         "missing_explicitly_allowed": bool(
-            missing_provenance and args.allow_missing_provenance
+            state.missing_provenance and args.allow_missing_provenance
         ),
-        "method_provenance": (
-            method_provenance_records[0] if method_provenance_records else None
+        "extraction_scope_fingerprints": sorted(
+            state.extraction_scope_fingerprints
         ),
-        "extraction_scope_fingerprints": sorted(extraction_scope_fingerprints),
         "extraction_scope_audit": extraction_scope_audit,
-        "num_observer_traces": len(observer_traces),
-        "observer_explicitly_allowed": bool(observer_traces and args.allow_observer_traces),
-        "num_unverified_weight_traces": len(unverified_weight_traces),
+        "num_observer_traces": len(state.observer_traces),
+        "observer_explicitly_allowed": bool(
+            state.observer_traces and args.allow_observer_traces
+        ),
+        "num_unverified_weight_traces": len(state.unverified_weight_traces),
         "unverified_weights_explicitly_allowed": bool(
-            unverified_weight_traces and args.allow_unverified_generator_weights
+            state.unverified_weight_traces
+            and args.allow_unverified_generator_weights
         ),
         "num_unverified_chunk_topology_traces": len(
-            unverified_chunk_topology_traces
+            state.unverified_chunk_topology_traces
         ),
         "unverified_chunk_topology_explicitly_allowed": bool(
-            unverified_chunk_topology_traces
+            state.unverified_chunk_topology_traces
             and args.allow_unverified_chunk_topology
         ),
-        "attention_axis_contract": {
-            "layer_ids": list(next(iter(axis_contracts))[0]),
-            "head_ids": list(next(iter(axis_contracts))[1]),
-            "num_model_layers": int(next(iter(axis_contracts))[2]),
-            "num_model_heads": int(next(iter(axis_contracts))[3]),
+        "attention_axis_contract": axis_contract,
+    }
+
+
+def _load_audited_graph_cohort(
+    args: argparse.Namespace,
+    graph_config: AttentionHypergraphConfig,
+    *,
+    objective: str,
+    preprocessing: Optional[str],
+) -> _LoadedGraphCohort:
+    """Audit the full extraction scope, then construct only the selected cohort."""
+
+    _validate_limit_input_order(args)
+    trace_metadata: List[_TraceMeta] = []
+    graphs: List[AttentionHypergraph] = []
+    trace_rows: List[Dict[str, Any]] = []
+    graph_rows: List[Dict[str, Any]] = []
+    state = _TraceCohortAuditState()
+    wanted_generators = _parse_generator_models(args.generator_model)
+    input_generator_counts: Counter[str] = Counter()
+    selected_generator_counts: Counter[str] = Counter()
+    num_input = 0
+    num_matched_before_limit = 0
+    num_selected = 0
+    num_excluded_generator = 0
+    num_excluded_limit = 0
+    missing_generator_count = 0
+    label_counts: Counter[str] = Counter()
+    generator_label_counts: Dict[str, Counter[str]] = {}
+    missing_supervision = 0
+
+    for trace in _iter_input_traces(args, apply_selection=False):
+        num_input += 1
+        _record_extraction_scope(state, trace)
+        _validate_limit_input_order(args, trace)
+        generator_value = trace.metadata.get("generator_model")
+        generator = (
+            "<missing>"
+            if generator_value in (None, "")
+            else str(generator_value)
+        )
+        input_generator_counts[generator] += 1
+        if generator == "<missing>":
+            missing_generator_count += 1
+        if not _trace_matches_generator_filter(trace, args):
+            num_excluded_generator += 1
+            continue
+        num_matched_before_limit += 1
+        if args.limit is not None and num_selected >= int(args.limit):
+            num_excluded_limit += 1
+            continue
+        num_selected += 1
+        selected_generator_counts[generator] += 1
+        if trace.response_y is None:
+            label_key = "unlabeled"
+        elif float(trace.response_y) >= 0.5:
+            label_key = "positive"
+        else:
+            label_key = "negative"
+        label_counts[label_key] += 1
+        generator_label_counts.setdefault(generator, Counter())[label_key] += 1
+        if not _objective_available(trace, objective):
+            missing_supervision += 1
+            if not args.skip_unlabeled:
+                raise SystemExit(
+                    f"trace {trace.trace_id!r} lacks {objective} supervision; "
+                    "use the matching objective or pass --skip-unlabeled explicitly"
+                )
+            continue
+
+        raw_graph = _build_graph(trace, graph_config)
+        _record_representation_compatibility(state, trace, graph_config, args)
+        graph = (
+            raw_graph
+            if preprocessing is None
+            else _preprocess_training_graph(raw_graph, preprocessing)
+        )
+        graphs.append(graph)
+        trace_metadata.append(_trace_meta(trace))
+        trace_rows.append(trace_summary(trace))
+        graph_rows.append(_graph_summary(raw_graph, trace))
+
+    if not graphs:
+        selector = ",".join(wanted_generators) if wanted_generators else "<all>"
+        raise SystemExit(
+            f"no traces carry supervision for {objective} after generator selector {selector!r}"
+        )
+    provenance_info = _finalize_trace_cohort_audit(state, args)
+    selection_info = {
+        "generator_models": list(wanted_generators),
+        "match_policy": "exact_case_insensitive_dataset_tag",
+        "num_input_traces": num_input,
+        "num_matched_before_limit": num_matched_before_limit,
+        "num_selected": num_selected,
+        "num_usable": len(graphs),
+        "num_excluded_generator": num_excluded_generator,
+        "num_excluded_limit": num_excluded_limit,
+        "missing_generator_count": missing_generator_count,
+        "generator_distribution_input": dict(sorted(input_generator_counts.items())),
+        "generator_distribution_selected": dict(
+            sorted(selected_generator_counts.items())
+        ),
+        "response_label_counts_selected": {
+            key: int(label_counts.get(key, 0))
+            for key in ("negative", "positive", "unlabeled")
+        },
+        "generator_response_label_counts_selected": {
+            generator: {
+                key: int(counts.get(key, 0))
+                for key in ("negative", "positive", "unlabeled")
+            }
+            for generator, counts in sorted(generator_label_counts.items())
         },
     }
-    return trace_metadata, graphs, missing, provenance_info
+    return _LoadedGraphCohort(
+        trace_metadata=trace_metadata,
+        graphs=graphs,
+        trace_rows=trace_rows,
+        graph_rows=graph_rows,
+        missing_supervision=missing_supervision,
+        provenance_info=provenance_info,
+        selection_info=selection_info,
+    )
+
+
+def _load_training_graphs(
+    args: argparse.Namespace, graph_config: AttentionHypergraphConfig
+) -> Tuple[List[_TraceMeta], List[AttentionHypergraph], int, Dict[str, Any]]:
+    """Construct while streaming and retain only compact graphs/metadata."""
+
+    cohort = _load_audited_graph_cohort(
+        args,
+        graph_config,
+        objective=str(args.objective),
+        preprocessing=str(args.preprocessing),
+    )
+    cohort.provenance_info["selection"] = cohort.selection_info
+    return (
+        cohort.trace_metadata,
+        cohort.graphs,
+        cohort.missing_supervision,
+        cohort.provenance_info,
+    )
 
 
 def _explicit_split(
@@ -1633,6 +1927,30 @@ def _binary_metrics(labels: Sequence[float], scores: Sequence[float]) -> Dict[st
     return result
 
 
+def _trace_metrics_by_generator(
+    rows: Sequence[Mapping[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Compute trace-level detection metrics without pooling generators together."""
+
+    grouped: Dict[str, Dict[str, List[float]]] = {}
+    for row in rows:
+        generator_value = row.get("generator_model")
+        generator = (
+            "<missing>"
+            if generator_value in (None, "")
+            else str(generator_value)
+        )
+        if row.get("label") is None or row.get("score") is None:
+            raise ValueError("trace prediction rows require label and score")
+        bucket = grouped.setdefault(generator, {"labels": [], "scores": []})
+        bucket["labels"].append(float(row["label"]))
+        bucket["scores"].append(float(row["score"]))
+    return {
+        generator: _binary_metrics(values["labels"], values["scores"])
+        for generator, values in sorted(grouped.items())
+    }
+
+
 def _tie_aware_localization_rank(
     scores: Sequence[float], gold_step: int, valid_mask: Sequence[bool]
 ) -> Tuple[float, float]:
@@ -1810,6 +2128,7 @@ def _evaluate(
             row_context = {
                 "trace_id": trace.trace_id,
                 "group_id": trace.group_id,
+                "generator_model": trace.generator_model,
                 "response_tokens": int(trace.num_response_tokens),
                 "num_steps": int(trace.num_steps),
                 "gold_relative_position": (
@@ -2209,6 +2528,11 @@ def command_train(args: argparse.Namespace) -> Dict[str, Any]:
         model, graphs, traces, test_idx, args.objective,
         pooling=args.pooling, temperature=float(args.pooling_temperature)
     )
+    trace_detection_by_generator = {
+        "train": _trace_metrics_by_generator(train_rows),
+        "val": _trace_metrics_by_generator(val_rows),
+        "test": _trace_metrics_by_generator(test_rows),
+    }
     first_crossing_threshold = None
     if args.objective == "step_bce":
         first_crossing_threshold, val_operating_metrics = _select_first_crossing_threshold(
@@ -2326,6 +2650,7 @@ def command_train(args: argparse.Namespace) -> Dict[str, Any]:
         },
         "num_skipped_unlabeled": int(missing_supervision),
         "metrics": {"train": train_metrics, "val": val_metrics, "test": test_metrics},
+        "trace_detection_by_generator": trace_detection_by_generator,
         "output": str(output),
         "configuration": configuration,
         "resolved": resolved,
@@ -2338,7 +2663,21 @@ def command_train(args: argparse.Namespace) -> Dict[str, Any]:
 def _add_common_data_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("inputs", nargs="+", help="attention .npz/.pt files, directories, or globs")
     parser.add_argument("--config", help="optional JSON defaults; explicit CLI flags take precedence")
-    parser.add_argument("--limit", type=int, help="load at most this many traces")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help=(
+            "load at most this many traces after generator filtering; with multiple "
+            "trace roots, materialize the limited cohort before sharding"
+        ),
+    )
+    parser.add_argument(
+        "--generator-model",
+        help=(
+            "exact dataset generator tag, or comma-separated tags; filtering occurs "
+            "before --limit and never guesses aliases from the observer model path"
+        ),
+    )
     parser.add_argument("--no-recursive", action="store_true", help="do not recurse into input directories")
     parser.add_argument("--step-end", choices=("exclusive", "inclusive"), default="exclusive")
     parser.add_argument("--step-axis", choices=("auto", "full", "response"), default="auto")
@@ -2350,6 +2689,42 @@ def _add_common_data_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--require-causal", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--causal-tolerance", type=float, default=1e-5)
+
+
+def _add_cohort_audit_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--allow-missing-provenance",
+        action="store_true",
+        help="unsafe legacy diagnostic: permit traces without model/template fingerprint",
+    )
+    parser.add_argument(
+        "--allow-incomplete-extraction-scope",
+        action="store_true",
+        help="diagnostic only: permit missing shards/rows or skipped extraction records",
+    )
+    parser.add_argument(
+        "--allow-multiple-input-datasets",
+        action="store_true",
+        help="explicitly permit more than one source dataset SHA256 in a combined run",
+    )
+    parser.add_argument(
+        "--allow-observer-traces",
+        action="store_true",
+        help="permit counterfactual observer traces in a separately reported diagnostic run",
+    )
+    parser.add_argument(
+        "--allow-unverified-generator-weights",
+        action="store_true",
+        help="unsafe diagnostic: permit token-exact traces whose weight revision is unverified",
+    )
+    parser.add_argument(
+        "--allow-unverified-chunk-topology",
+        action="store_true",
+        help=(
+            "diagnostic only: use cached traces with a selector/threshold not covered "
+            "by their prefix equivalence gate"
+        ),
+    )
 
 
 def _add_graph_arguments(parser: argparse.ArgumentParser) -> None:
@@ -2411,6 +2786,13 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser = subparsers.add_parser("inspect", help="validate raw traces and construct graph summaries")
     _add_common_data_arguments(inspect_parser)
     _add_graph_arguments(inspect_parser)
+    _add_cohort_audit_arguments(inspect_parser)
+    inspect_parser.add_argument(
+        "--objective",
+        choices=OBJECTIVES,
+        help="enable the same strict supervised cohort gate used by train",
+    )
+    inspect_parser.add_argument("--skip-unlabeled", action="store_true")
     inspect_parser.add_argument("--output", help="optional JSON report path")
     inspect_parser.add_argument("--verbose-records", action="store_true")
     inspect_parser.set_defaults(handler=command_inspect)
@@ -2425,43 +2807,11 @@ def build_parser() -> argparse.ArgumentParser:
     train = subparsers.add_parser("train", help="train/evaluate with explicit or group-aware splits")
     _add_common_data_arguments(train)
     _add_graph_arguments(train)
+    _add_cohort_audit_arguments(train)
     train.add_argument("--output", required=True, help="run output directory")
     train.add_argument("--overwrite", action="store_true")
     train.add_argument("--objective", choices=OBJECTIVES, required=True)
     train.add_argument("--skip-unlabeled", action="store_true")
-    train.add_argument(
-        "--allow-missing-provenance",
-        action="store_true",
-        help="unsafe legacy diagnostic: permit traces without model/template fingerprint",
-    )
-    train.add_argument(
-        "--allow-incomplete-extraction-scope",
-        action="store_true",
-        help="diagnostic only: permit missing shards/rows or skipped extraction records",
-    )
-    train.add_argument(
-        "--allow-multiple-input-datasets",
-        action="store_true",
-        help="explicitly permit more than one source dataset SHA256 in a combined run",
-    )
-    train.add_argument(
-        "--allow-observer-traces",
-        action="store_true",
-        help="permit counterfactual observer traces in a separately reported diagnostic run",
-    )
-    train.add_argument(
-        "--allow-unverified-generator-weights",
-        action="store_true",
-        help="unsafe diagnostic: permit token-exact traces whose weight revision is unverified",
-    )
-    train.add_argument(
-        "--allow-unverified-chunk-topology",
-        action="store_true",
-        help=(
-            "diagnostic only: use cached traces with a selector/threshold not covered "
-            "by their prefix equivalence gate"
-        ),
-    )
     train.add_argument(
         "--allow-offline-full-context",
         "--allow-offline-symmetric-step",

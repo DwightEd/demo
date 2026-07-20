@@ -10,7 +10,8 @@ usage() {
   cat <<'EOF'
 Usage:
   bash hypergraph/attention/scripts/run_single_layer_response_pipeline.sh \
-    [--layer 14] [--dataset omnimath] [--folds 5] [--seeds 17] [--extract-only]
+    [--layer 14] [--dataset omnimath] [--folds 5] [--seeds 17] \
+    [--generator-model Llama-3.1-8B-Instruct] [--extract-only]
 
 The pipeline performs:
   1. strict one-layer, all-head prompt+response attention extraction;
@@ -27,6 +28,9 @@ High-level options:
   --dataset NAME     output tag (default: omnimath)
   --folds N          group-CV folds (default: 5)
   --seeds LIST       comma/space-separated seeds (default: 17)
+  --generator-model TAG
+                     exact ProcessBench generator tag selected before training;
+                     a complete cache is reused, otherwise only matches are forwarded
   --limit N          pilot extraction limit; output gets a _pilotN suffix
   --mode MODE        model_parallel or data_parallel (default: model_parallel)
   --extract-only     stop after strict manifest validation and shard audit
@@ -48,6 +52,8 @@ Runtime environment variables:
   PYTHON_BIN=python              GPU0=0 GPU1=1 TRAIN_GPUS=0,1
   QUERY_CHUNK_SIZE=0             STORAGE_DTYPE=float32
   REPLAY_MODE=observer           PROMPT_STYLE=plain
+  GENERATOR_MODEL=             empty selects the all-generator observer cohort
+  TRACE_EXTRACTION_LIMIT=      override extraction-side limit for explicit caches
   REUSE_TRACES=1                 REUSE_RUNS=1 OVERWRITE_RUNS=0
   TRACE_ROOT=/custom/path        RUN_ROOT=/custom/path
 
@@ -79,6 +85,7 @@ guard_config() {
   shift
   "${PYTHON_BIN}" - "${config_path}" "$@" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -104,15 +111,18 @@ if path.is_file():
         )
     print("configuration gate passed:", path)
 else:
-    if path.parent.exists() and any(path.parent.iterdir()):
+    existing = [] if not path.parent.exists() else list(path.parent.iterdir())
+    unexpected = [item for item in existing if item.name != "preflight.json"]
+    if unexpected:
         raise SystemExit(
-            f"non-empty output directory has no configuration gate: {path.parent}"
+            f"output directory has no configuration gate and contains unexpected "
+            f"artifacts: {[item.name for item in unexpected[:10]]}"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(request, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    rendered = json.dumps(request, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(rendered, encoding="utf-8")
+    os.replace(temporary, path)
     print("wrote configuration gate:", path)
 PY
 }
@@ -126,6 +136,7 @@ SEEDS="${SEEDS:-17}"
 LIMIT="${LIMIT:-}"
 MODE="${MODE:-model_parallel}"
 EXTRACT_ONLY="${EXTRACT_ONLY:-0}"
+GENERATOR_MODEL="${GENERATOR_MODEL:-}"
 
 while (($#)); do
   case "$1" in
@@ -135,6 +146,7 @@ while (($#)); do
     --dataset) DATASET_TAG="${2:?--dataset requires a name}"; shift 2 ;;
     --folds) FOLDS="${2:?--folds requires an integer}"; shift 2 ;;
     --seeds) SEEDS="${2:?--seeds requires a list}"; shift 2 ;;
+    --generator-model) GENERATOR_MODEL="${2:?--generator-model requires a tag}"; shift 2 ;;
     --limit) LIMIT="${2:?--limit requires an integer}"; shift 2 ;;
     --mode) MODE="${2:?--mode requires a value}"; shift 2 ;;
     --extract-only) EXTRACT_ONLY=1; shift ;;
@@ -149,6 +161,8 @@ INPUT="${INPUT:-${REPO_ROOT}/data/hf_datasets/ProcessBench/${DATASET_TAG}.json}"
   die "--folds must be an integer >= 3"
 [[ -z "${LIMIT}" || "${LIMIT}" =~ ^[1-9][0-9]*$ ]] || die "--limit must be positive"
 [[ "${DATASET_TAG}" =~ ^[A-Za-z0-9._-]+$ ]] || die "--dataset contains unsafe characters"
+[[ -z "${GENERATOR_MODEL}" || "${GENERATOR_MODEL}" =~ ^[A-Za-z0-9._-]+$ ]] || \
+  die "--generator-model contains unsafe characters"
 [[ "${MODE}" == "data_parallel" || "${MODE}" == "model_parallel" ]] || \
   die "--mode must be data_parallel or model_parallel"
 
@@ -157,6 +171,7 @@ command -v realpath >/dev/null 2>&1 || die "realpath is required"
 [[ -d "${MODEL}" ]] || die "model directory does not exist: ${MODEL}"
 INPUT="$(realpath "${INPUT}")"
 MODEL="$(realpath "${MODEL}")"
+SOURCE_INPUT="${INPUT}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 command -v "${PYTHON_BIN}" >/dev/null 2>&1 || die "Python executable not found: ${PYTHON_BIN}"
@@ -172,6 +187,8 @@ MAX_SEQ_LEN="${MAX_SEQ_LEN:-2048}"
 MAX_ATTENTION_GIB="${MAX_ATTENTION_GIB:-24}"
 REPLAY_MODE="${REPLAY_MODE:-observer}"
 PROMPT_STYLE="${PROMPT_STYLE:-plain}"
+[[ "${REPLAY_MODE}" == "observer" ]] || \
+  die "this audited pipeline supports REPLAY_MODE=observer only"
 
 THRESHOLD="${THRESHOLD:-0.01}"
 SOURCE_SELECTION="${SOURCE_SELECTION:-threshold}"
@@ -207,6 +224,17 @@ for index in "${!TRAIN_GPU_VALUES[@]}"; do
       die "TRAIN_GPUS contains duplicate device: ${TRAIN_GPU_VALUES[$index]}"
   done
 done
+read -r -a SEED_VALUES <<< "${SEEDS//,/ }"
+((${#SEED_VALUES[@]})) || die "--seeds resolved to an empty list"
+for index in "${!SEED_VALUES[@]}"; do
+  seed="${SEED_VALUES[$index]}"
+  [[ "${seed}" =~ ^(0|[1-9][0-9]*)$ ]] || \
+    die "seed must be a canonical non-negative integer: ${seed}"
+  for ((previous = 0; previous < index; previous++)); do
+    [[ "${seed}" != "${SEED_VALUES[$previous]}" ]] || \
+      die "--seeds contains a duplicate value: ${seed}"
+  done
+done
 
 [[ "${SOURCE_SELECTION}" == "threshold" ]] || \
   die "this audited entrypoint supports SOURCE_SELECTION=threshold only"
@@ -217,41 +245,135 @@ done
 [[ "${QUERY_CHUNK_SIZE}" == "0" ]] || \
   die "the strict pipeline requires QUERY_CHUNK_SIZE=0; cached chunks changed the real-model threshold topology"
 
+cd "${REPO_ROOT}"
+if [[ -n "${GENERATOR_MODEL}" ]]; then
+  "${PYTHON_BIN}" - "${GENERATOR_MODEL}" "${MODEL}" <<'PY'
+import sys
+
+from hypergraph.attention.pipeline_guard import dataset_generator_matches_observer
+
+if not dataset_generator_matches_observer(sys.argv[1], sys.argv[2]):
+    raise SystemExit(
+        "--generator-model does not identify the observer checkpoint; "
+        "use the all-generator observer run or invoke train.py manually for a source-specific analysis"
+    )
+PY
+fi
 LIMIT_SUFFIX=""
 if [[ -n "${LIMIT}" ]]; then
   LIMIT_SUFFIX="_pilot${LIMIT}"
 fi
-TRACE_ROOT="${TRACE_ROOT:-${REPO_ROOT}/outputs/attention_traces/${DATASET_TAG}_llama31_layer${LAYER}${LIMIT_SUFFIX}}"
-RUN_ROOT="${RUN_ROOT:-${REPO_ROOT}/outputs/attention_hypergraph/${DATASET_TAG}_response_layer${LAYER}${LIMIT_SUFFIX}}"
+COHORT_SUFFIX="_observer_all"
+if [[ -n "${GENERATOR_MODEL}" ]]; then
+  GENERATOR_SLUG="${GENERATOR_MODEL//\//-}"
+  COHORT_SUFFIX="_matched_${GENERATOR_SLUG}"
+fi
+FULL_DATASET_TRACE_ROOT="${REPO_ROOT}/outputs/attention_traces/${DATASET_TAG}_llama31_layer${LAYER}"
+DEFAULT_TRACE_ROOT="${FULL_DATASET_TRACE_ROOT}${LIMIT_SUFFIX}"
+TRACE_EXTRACTION_LIMIT="${TRACE_EXTRACTION_LIMIT-${LIMIT}}"
+[[ -z "${TRACE_EXTRACTION_LIMIT}" || "${TRACE_EXTRACTION_LIMIT}" =~ ^[1-9][0-9]*$ ]] || \
+  die "TRACE_EXTRACTION_LIMIT must be empty or a positive integer"
+if [[ -z "${TRACE_ROOT:-}" && "${TRACE_EXTRACTION_LIMIT}" != "${LIMIT}" ]]; then
+  die "TRACE_EXTRACTION_LIMIT may differ from --limit only with an explicit TRACE_ROOT"
+fi
+TRACE_INPUT_MODE="full_dataset_cache"
+COHORT_REPORT_PATH=""
+if [[ -n "${TRACE_ROOT:-}" ]]; then
+  if [[ "${MODE}" == "data_parallel" && -n "${GENERATOR_MODEL}" && -n "${LIMIT}" ]]; then
+    die "explicit data_parallel traces cannot prove global generator-before-limit order; use model_parallel or omit --limit"
+  fi
+  TRACE_INPUT_MODE="explicit_trace_root"
+elif [[ -n "${GENERATOR_MODEL}" ]]; then
+  if [[ -f "${FULL_DATASET_TRACE_ROOT}/shard_audit.json" ]] \
+      && [[ "${MODE}" != "data_parallel" || -z "${LIMIT}" ]]; then
+    TRACE_ROOT="${FULL_DATASET_TRACE_ROOT}"
+    TRACE_EXTRACTION_LIMIT=""
+  else
+    COHORT_ROOT="${COHORT_ROOT:-${REPO_ROOT}/outputs/attention_cohorts}"
+    COHORT_INPUT="${COHORT_ROOT}/${DATASET_TAG}_matched_${GENERATOR_SLUG}.json"
+    COHORT_REPORT_PATH="${COHORT_INPUT}.report.json"
+    "${PYTHON_BIN}" -m hypergraph.attention.cohort \
+      --input "${SOURCE_INPUT}" \
+      --output "${COHORT_INPUT}" \
+      --report "${COHORT_REPORT_PATH}" \
+      --generator-model "${GENERATOR_MODEL}" >/dev/null
+    INPUT="$(realpath "${COHORT_INPUT}")"
+    TRACE_ROOT="${REPO_ROOT}/outputs/attention_traces/${DATASET_TAG}_llama31_layer${LAYER}${LIMIT_SUFFIX}${COHORT_SUFFIX}"
+    TRACE_INPUT_MODE="materialized_matched_generator"
+  fi
+else
+  TRACE_ROOT="${DEFAULT_TRACE_ROOT}"
+fi
+RUN_ROOT="${RUN_ROOT:-${REPO_ROOT}/outputs/attention_hypergraph/${DATASET_TAG}_response_layer${LAYER}${LIMIT_SUFFIX}${COHORT_SUFFIX}}"
 
-cd "${REPO_ROOT}"
-read -r INPUT_SHA256 METHOD_CODE_SHA256 < <("${PYTHON_BIN}" - "${INPUT}" <<'PY'
+read -r SOURCE_INPUT_SHA256 INPUT_SHA256 EXTRACTION_CODE_SHA256 TRAINING_CODE_SHA256 < <("${PYTHON_BIN}" - "${SOURCE_INPUT}" "${INPUT}" <<'PY'
 import hashlib
 import sys
 from pathlib import Path
 
-input_path = Path(sys.argv[1])
+source_input_path = Path(sys.argv[1])
+input_path = Path(sys.argv[2])
 
 def digest(paths):
     value = hashlib.sha256()
     for path in paths:
         path = Path(path)
+        if not path.is_file():
+            raise SystemExit(f"required pipeline source is missing: {path}")
         value.update(str(path).encode("utf-8"))
         value.update(path.read_bytes())
     return value.hexdigest()
 
-input_hash = hashlib.sha256(input_path.read_bytes()).hexdigest()
-method_paths = sorted(Path("hypergraph/attention").glob("*.py"))
-method_paths.extend(
-    [
-        Path("hypergraph/attention/scripts/extract_dual_gpu.sh"),
-        Path("hypergraph/attention/scripts/run_single_layer_response_pipeline.sh"),
-    ]
+input_digest = hashlib.sha256()
+with input_path.open("rb") as stream:
+    for block in iter(lambda: stream.read(1024 * 1024), b""):
+        input_digest.update(block)
+extraction_paths = [
+    Path("hypergraph/attention/extract.py"),
+    Path("hypergraph/attention/trace_contract.py"),
+    Path("utils/step_boundaries.py"),
+    Path("hypergraph/attention/scripts/extract_dual_gpu.sh"),
+]
+training_paths = [
+    Path("hypergraph/attention/trace_contract.py"),
+    Path("hypergraph/attention/data.py"),
+    Path("hypergraph/attention/schema.py"),
+    Path("hypergraph/attention/construction.py"),
+    Path("hypergraph/attention/model.py"),
+    Path("hypergraph/attention/objectives.py"),
+    Path("hypergraph/attention/shards.py"),
+    Path("hypergraph/attention/train.py"),
+    Path("hypergraph/attention/pipeline_guard.py"),
+    Path("hypergraph/attention/scripts/run_single_layer_response_pipeline.sh"),
+]
+source_digest = input_digest if source_input_path == input_path else hashlib.sha256()
+if source_input_path != input_path:
+    with source_input_path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            source_digest.update(block)
+print(
+    source_digest.hexdigest(),
+    input_digest.hexdigest(),
+    digest(extraction_paths),
+    digest(training_paths),
 )
-method_hash = digest(method_paths)
-print(input_hash, method_hash)
 PY
 )
+COHORT_REPORT_SHA256=""
+if [[ -n "${COHORT_REPORT_PATH}" ]]; then
+  COHORT_REPORT_SHA256="$("${PYTHON_BIN}" - "${COHORT_REPORT_PATH}" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+digest = hashlib.sha256()
+with Path(sys.argv[1]).open("rb") as stream:
+    for block in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(block)
+print(digest.hexdigest())
+PY
+)"
+fi
 "${PYTHON_BIN}" - <<'PY'
 import torch
 import transformers
@@ -267,11 +389,13 @@ PY
 
 printf '\n===== Single-layer response pipeline =====\n'
 printf 'repo:                    %s\n' "${REPO_ROOT}"
-printf 'input:                   %s\n' "${INPUT}"
+printf 'source input:            %s\n' "${SOURCE_INPUT}"
+printf 'trace input:             %s (%s)\n' "${INPUT}" "${TRACE_INPUT_MODE}"
 printf 'model:                   %s\n' "${MODEL}"
 printf 'dataset/layer:           %s / %s (zero-based block id)\n' "${DATASET_TAG}" "${LAYER}"
 printf 'trace root:              %s\n' "${TRACE_ROOT}"
 printf 'run root:                %s\n' "${RUN_ROOT}"
+printf 'generator cohort:        %s\n' "${GENERATOR_MODEL:-all generators}"
 printf 'source/receiver:         %s / response-only receivers\n' "${SOURCE_SCOPE}"
 printf 'objective/pooling:       response_bce / %s\n' "${POOLING}"
 printf 'topology:                %s, threshold=%s, min_sources=%s\n' \
@@ -285,13 +409,26 @@ if [[ "${PROPAGATION_MODE}" == "symmetric" || "${PREPROCESSING}" == "per_graph_z
 fi
 
 TRACE_CONFIG_PATH="${TRACE_ROOT}/pipeline_request.json"
-guard_config "${TRACE_CONFIG_PATH}" \
+TRACE_SOURCE_ARGS=()
+if [[ -n "${COHORT_REPORT_PATH}" ]]; then
+  TRACE_SOURCE_ARGS+=(
+    "source_input=${SOURCE_INPUT}"
+    "source_input_sha256=${SOURCE_INPUT_SHA256}"
+    "cohort_report=${COHORT_REPORT_PATH}"
+    "cohort_report_sha256=${COHORT_REPORT_SHA256}"
+    "generator_model=${GENERATOR_MODEL}"
+  )
+fi
+read -r TRACE_GATE_MODE TRACE_REQUEST_SHA256 LEGACY_METHOD_CODE_SHA256 < <(
+  "${PYTHON_BIN}" -m hypergraph.attention.pipeline_guard \
+  --path "${TRACE_CONFIG_PATH}" \
+  --extraction-code-sha256 "${EXTRACTION_CODE_SHA256}" \
+  --shell \
   "input=${INPUT}" \
   "input_sha256=${INPUT_SHA256}" \
   "model=${MODEL}" \
-  "method_code_sha256=${METHOD_CODE_SHA256}" \
   "layer=${LAYER}" \
-  "limit=${LIMIT}" \
+  "limit=${TRACE_EXTRACTION_LIMIT}" \
   "mode=${MODE}" \
   "query_chunk_size=${QUERY_CHUNK_SIZE}" \
   "storage_dtype=${STORAGE_DTYPE}" \
@@ -300,7 +437,11 @@ guard_config "${TRACE_CONFIG_PATH}" \
   "max_seq_len=${MAX_SEQ_LEN}" \
   "replay_mode=${REPLAY_MODE}" \
   "prompt_style=${PROMPT_STYLE}" \
-  "chunk_equivalence_threshold=${THRESHOLD}"
+  "chunk_equivalence_threshold=${THRESHOLD}" \
+  "${TRACE_SOURCE_ARGS[@]}"
+)
+printf 'trace request gate:       %s (%s)\n' \
+  "${TRACE_GATE_MODE}" "${TRACE_REQUEST_SHA256}"
 
 if [[ -f "${TRACE_ROOT}/shard_audit.json" ]] && is_true "${REUSE_TRACES}"; then
   printf 'Reusing audited traces: %s\n' "${TRACE_ROOT}"
@@ -322,7 +463,7 @@ else
   PROMPT_STYLE="${PROMPT_STYLE}" \
   GPU0="${GPU0}" GPU1="${GPU1}" \
   PYTHON_BIN="${PYTHON_BIN}" \
-  LIMIT="${LIMIT}" \
+  LIMIT="${TRACE_EXTRACTION_LIMIT}" \
     bash "${SCRIPT_DIR}/extract_dual_gpu.sh" \
       --attention_layers "${LAYER}" \
       --attention_heads all \
@@ -337,6 +478,18 @@ fi
 for trace_input in "${TRACE_INPUTS[@]}"; do
   [[ -d "${trace_input}" ]] || die "missing extracted trace directory: ${trace_input}"
 done
+APPLY_TRAIN_SELECTION_LIMIT=1
+if [[ "${MODE}" == "data_parallel" && -n "${LIMIT}" ]]; then
+  [[ "${TRACE_EXTRACTION_LIMIT}" == "${LIMIT}" ]] || \
+    die "data_parallel --limit must be enforced during extraction; set TRACE_EXTRACTION_LIMIT equal to --limit"
+  # Extraction applied LIMIT globally before the rows were sharded. Reapplying
+  # it while traversing shard0 then shard1 would make the cohort storage-order dependent.
+  APPLY_TRAIN_SELECTION_LIMIT=0
+fi
+
+printf 'Re-auditing extraction manifests before cache use...\n'
+"${PYTHON_BIN}" -m hypergraph.attention.shards "${TRACE_INPUTS[@]}" >/dev/null
+printf 'fresh shard/manifest audit passed\n'
 
 "${PYTHON_BIN}" - "${LAYER}" "${TRACE_INPUTS[@]}" <<'PY'
 import json
@@ -364,12 +517,83 @@ if is_true "${EXTRACT_ONLY}"; then
   exit 0
 fi
 
+GRAPH_ARGS=(
+  --selected-layers "${LAYER}"
+  --selected-heads all
+  --threshold "${THRESHOLD}"
+  --source-selection "${SOURCE_SELECTION}"
+  --source-scope "${SOURCE_SCOPE}"
+  --min-sources "${MIN_SOURCES}"
+  --include-center
+  --propagation-mode "${PROPAGATION_MODE}"
+  --incidence-weight-mode "${INCIDENCE_WEIGHT_MODE}"
+  --edge-attr-mode "${EDGE_ATTR_MODE}"
+  --node-feature-mode "${NODE_FEATURE_MODE}"
+)
+
+COHORT_ARGS=()
+if [[ -n "${GENERATOR_MODEL}" ]]; then
+  COHORT_ARGS+=(--generator-model "${GENERATOR_MODEL}")
+fi
+if [[ -n "${LIMIT}" ]] && is_true "${APPLY_TRAIN_SELECTION_LIMIT}"; then
+  COHORT_ARGS+=(--limit "${LIMIT}")
+fi
+AUDIT_ARGS=()
+if [[ "${REPLAY_MODE}" == "observer" ]]; then
+  AUDIT_ARGS+=(--allow-observer-traces)
+fi
+
+RUN_PARENT="$(dirname "${RUN_ROOT}")"
+mkdir -p "${RUN_PARENT}"
+PREFLIGHT_CANDIDATE="$(mktemp "${RUN_PARENT}/.attention-preflight.XXXXXX")"
+cleanup_preflight_candidate() {
+  if [[ -n "${PREFLIGHT_CANDIDATE:-}" && -f "${PREFLIGHT_CANDIDATE}" ]]; then
+    rm -f -- "${PREFLIGHT_CANDIDATE}"
+  fi
+}
+trap cleanup_preflight_candidate INT TERM EXIT
+
+"${PYTHON_BIN}" -m hypergraph.attention.train inspect \
+  "${TRACE_INPUTS[@]}" \
+  "${GRAPH_ARGS[@]}" \
+  "${COHORT_ARGS[@]}" \
+  "${AUDIT_ARGS[@]}" \
+  --objective response_bce \
+  --output "${PREFLIGHT_CANDIDATE}"
+
+PREFLIGHT_SHA256="$("${PYTHON_BIN}" - "${PREFLIGHT_CANDIDATE}" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+case "${TRACE_GATE_MODE}" in
+  initialized_v2|validated_v2) TRACE_REQUEST_KIND="v2" ;;
+  validated_legacy_without_rewrite) TRACE_REQUEST_KIND="legacy" ;;
+  *) die "unknown trace request gate mode: ${TRACE_GATE_MODE}" ;;
+esac
 RUN_CONFIG_PATH="${RUN_ROOT}/pipeline_request.json"
 guard_config "${RUN_CONFIG_PATH}" \
   "trace_root=${TRACE_ROOT}" \
+  "trace_input_mode=${TRACE_INPUT_MODE}" \
+  "source_input=${SOURCE_INPUT}" \
+  "source_input_sha256=${SOURCE_INPUT_SHA256}" \
+  "cohort_report=${COHORT_REPORT_PATH}" \
+  "cohort_report_sha256=${COHORT_REPORT_SHA256}" \
   "input_sha256=${INPUT_SHA256}" \
-  "method_code_sha256=${METHOD_CODE_SHA256}" \
+  "trace_request_kind=${TRACE_REQUEST_KIND}" \
+  "trace_request_sha256=${TRACE_REQUEST_SHA256}" \
+  "legacy_monolithic_method_code_sha256=${LEGACY_METHOD_CODE_SHA256}" \
+  "current_extraction_validation_code_sha256=${EXTRACTION_CODE_SHA256}" \
+  "preflight_sha256=${PREFLIGHT_SHA256}" \
+  "training_code_sha256=${TRAINING_CODE_SHA256}" \
   "layer=${LAYER}" \
+  "generator_model=${GENERATOR_MODEL}" \
+  "cohort_suffix=${COHORT_SUFFIX}" \
+  "selection_limit=${LIMIT}" \
+  "trace_extraction_limit=${TRACE_EXTRACTION_LIMIT}" \
   "threshold=${THRESHOLD}" \
   "source_selection=${SOURCE_SELECTION}" \
   "source_scope=${SOURCE_SCOPE}" \
@@ -391,32 +615,25 @@ guard_config "${RUN_CONFIG_PATH}" \
   "patience=${PATIENCE}" \
   "monitor=${MONITOR}" \
   "split_mode=${SPLIT_MODE}" \
+  "allow_resplit_official_data=${ALLOW_RESPLIT_OFFICIAL_DATA}" \
   "folds=${FOLDS}" \
   "seeds=${SEEDS}"
 
+"${PYTHON_BIN}" - "${PREFLIGHT_CANDIDATE}" "${RUN_ROOT}/preflight.json" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+destination.parent.mkdir(parents=True, exist_ok=True)
+os.replace(source, destination)
+PY
+PREFLIGHT_CANDIDATE=""
+trap - INT TERM EXIT
+
 mkdir -p "${RUN_ROOT}/logs"
 
-GRAPH_ARGS=(
-  --selected-layers "${LAYER}"
-  --selected-heads all
-  --threshold "${THRESHOLD}"
-  --source-selection "${SOURCE_SELECTION}"
-  --source-scope "${SOURCE_SCOPE}"
-  --min-sources "${MIN_SOURCES}"
-  --include-center
-  --propagation-mode "${PROPAGATION_MODE}"
-  --incidence-weight-mode "${INCIDENCE_WEIGHT_MODE}"
-  --edge-attr-mode "${EDGE_ATTR_MODE}"
-  --node-feature-mode "${NODE_FEATURE_MODE}"
-)
-
-"${PYTHON_BIN}" -m hypergraph.attention.train inspect \
-  "${TRACE_INPUTS[@]}" \
-  "${GRAPH_ARGS[@]}" \
-  --output "${RUN_ROOT}/preflight.json"
-
-read -r -a SEED_VALUES <<< "${SEEDS//,/ }"
-((${#SEED_VALUES[@]})) || die "--seeds resolved to an empty list"
 train_pids=()
 train_labels=()
 train_logs=()
@@ -425,6 +642,9 @@ training_job_index=0
 cleanup_training_jobs() {
   local pid
   for pid in "${train_pids[@]:-}"; do
+    if command -v pkill >/dev/null 2>&1; then
+      pkill -TERM -P "${pid}" 2>/dev/null || true
+    fi
     kill "${pid}" 2>/dev/null || true
   done
 }
@@ -450,7 +670,6 @@ wait_for_training_wave() {
 }
 
 for seed in "${SEED_VALUES[@]}"; do
-  [[ "${seed}" =~ ^[0-9]+$ ]] || die "seed must be a non-negative integer: ${seed}"
   for ((fold = 0; fold < FOLDS; fold++)); do
     RUN_DIR="${RUN_ROOT}/fold${fold}_seed${seed}"
     LOG_FILE="${RUN_ROOT}/logs/fold${fold}_seed${seed}.log"
@@ -463,6 +682,7 @@ for seed in "${SEED_VALUES[@]}"; do
       "${TRACE_INPUTS[@]}"
       --objective response_bce
       "${GRAPH_ARGS[@]}"
+      "${COHORT_ARGS[@]}"
       --message-operator "${MESSAGE_OPERATOR}"
       --preprocessing "${PREPROCESSING}"
       --pooling "${POOLING}"
@@ -481,9 +701,7 @@ for seed in "${SEED_VALUES[@]}"; do
       --device cuda:0
       --output "${RUN_DIR}"
     )
-    if [[ "${REPLAY_MODE}" == "observer" ]]; then
-      TRAIN_ARGS+=(--allow-observer-traces)
-    fi
+    TRAIN_ARGS+=("${AUDIT_ARGS[@]}")
     if [[ "${PROPAGATION_MODE}" == "symmetric" || "${PREPROCESSING}" == "per_graph_zscore" ]]; then
       TRAIN_ARGS+=(--allow-offline-full-context)
     fi
@@ -518,33 +736,71 @@ if ((${#train_pids[@]})); then
 fi
 trap - INT TERM EXIT
 
-"${PYTHON_BIN}" - "${RUN_ROOT}" <<'PY'
+"${PYTHON_BIN}" - "${RUN_ROOT}" "${FOLDS}" "${SEEDS}" <<'PY'
 import json
 import math
+import os
 import statistics
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+folds = int(sys.argv[2])
+seeds = [int(value) for value in sys.argv[3].replace(",", " ").split()]
+expected_runs = [
+    f"fold{fold}_seed{seed}" for seed in seeds for fold in range(folds)
+]
+observed_paths = {
+    path.parent.name: path
+    for path in sorted(root.glob("fold*_seed*/results.json"))
+}
+missing = sorted(set(expected_runs) - set(observed_paths))
+extra = sorted(set(observed_paths) - set(expected_runs))
+if missing or extra:
+    raise SystemExit(
+        f"fold result set mismatch: missing={missing}, unexpected={extra}"
+    )
 records = []
-for path in sorted(root.glob("fold*_seed*/results.json")):
+generator_records = {}
+metric_names = ("auroc", "aupr", "accuracy_0.5")
+for run_name in expected_runs:
+    path = observed_paths[run_name]
     payload = json.loads(path.read_text(encoding="utf-8"))
     test = payload.get("metrics", {}).get("test", {})
+    metric_values = {}
+    for key in metric_names:
+        value = test.get(key)
+        if value is None or not math.isfinite(float(value)):
+            raise SystemExit(f"run {run_name} has undefined/non-finite test metric {key}")
+        metric_values[key] = float(value)
     records.append(
         {
             "run": path.parent.name,
             "best_epoch": payload.get("best_epoch"),
-            "auroc": test.get("auroc"),
-            "aupr": test.get("aupr"),
-            "accuracy_0.5": test.get("accuracy_0.5"),
+            **metric_values,
         }
     )
+    grouped = payload.get("trace_detection_by_generator", {}).get("test")
+    if not isinstance(grouped, dict):
+        raise SystemExit(f"run {run_name} lacks test trace_detection_by_generator")
+    for generator, metrics in grouped.items():
+        if not isinstance(metrics, dict):
+            raise SystemExit(f"run {run_name} has invalid generator metrics for {generator!r}")
+        generator_records.setdefault(str(generator), []).append(
+            {
+                "run": run_name,
+                "n": metrics.get("n"),
+                "positives": metrics.get("positives"),
+                "prevalence": metrics.get("prevalence"),
+                **{key: metrics.get(key) for key in metric_names},
+            }
+        )
 if not records:
     raise SystemExit("no completed results.json files found")
 
 aggregate = {}
-for key in ("auroc", "aupr", "accuracy_0.5"):
-    values = [float(row[key]) for row in records if row[key] is not None and math.isfinite(float(row[key]))]
+for key in metric_names:
+    values = [float(row[key]) for row in records]
     aggregate[key] = {
         "n": len(values),
         "mean": statistics.fmean(values) if values else None,
@@ -552,9 +808,38 @@ for key in ("auroc", "aupr", "accuracy_0.5"):
         "min": min(values) if values else None,
         "max": max(values) if values else None,
     }
-summary = {"num_runs": len(records), "runs": records, "test_aggregate": aggregate}
+generator_aggregate = {}
+for generator, run_rows in sorted(generator_records.items()):
+    metric_aggregate = {}
+    for key in metric_names:
+        values = [
+            float(row[key])
+            for row in run_rows
+            if row.get(key) is not None and math.isfinite(float(row[key]))
+        ]
+        metric_aggregate[key] = {
+            "n_defined_runs": len(values),
+            "mean": statistics.fmean(values) if values else None,
+            "std": statistics.stdev(values) if len(values) > 1 else 0.0 if values else None,
+            "min": min(values) if values else None,
+            "max": max(values) if values else None,
+        }
+    generator_aggregate[generator] = {
+        "num_runs_present": len(run_rows),
+        "runs": run_rows,
+        "metrics": metric_aggregate,
+    }
+summary = {
+    "num_runs": len(records),
+    "expected_runs": expected_runs,
+    "runs": records,
+    "test_aggregate": aggregate,
+    "generator_test_aggregate": generator_aggregate,
+}
 destination = root / "aggregate_results.json"
-destination.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+temporary = destination.with_suffix(".json.tmp")
+temporary.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+os.replace(temporary, destination)
 print(json.dumps(summary, indent=2, ensure_ascii=False))
 print("aggregate results:", destination)
 PY

@@ -22,24 +22,13 @@ from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Sequence, T
 
 import numpy as np
 
-
-TRACE_CONTRACT = "exact_prompt_response_attention_v1"
-MODEL_COMMIT_SOURCES = frozenset(
-    {
-        "remote_resolved_model_commit",
-        "remote_pinned_requested_commit",
-        "remote_tokenizer_metadata_only",
-        "local_model_metadata_commit",
-        "local_tokenizer_metadata_only",
-        "local_declared_commit",
-        "unavailable",
-    }
-)
-VERIFIED_MODEL_COMMIT_SOURCES = frozenset(
-    {
-        "remote_resolved_model_commit",
-        "remote_pinned_requested_commit",
-    }
+from .trace_contract import (
+    MODEL_COMMIT_SOURCES,
+    TRACE_CONTRACT,
+    VERIFIED_MODEL_COMMIT_SOURCES,
+    commit_hashes_match,
+    is_immutable_commit_hash,
+    model_identity_matches,
 )
 
 
@@ -90,6 +79,10 @@ _PROVENANCE_KEYS = (
     "attention_storage_dtype",
     "activation_layer",
     "extraction_fingerprint",
+)
+_SOURCE_PROVENANCE_KEYS = (
+    "generator_model",
+    "generator_model_commit",
 )
 _AUDIT_PROVENANCE_KEYS = (
     "rendered_prompt_sha256",
@@ -202,10 +195,40 @@ class AttentionTrace:
         }
 
 
-def trace_provenance_fingerprint(trace: AttentionTrace) -> Optional[str]:
-    """Hash model/template/extraction provenance plus the actual attention axes."""
+def trace_source_provenance(trace: AttentionTrace) -> Dict[str, Any]:
+    """Return sample-source identity without treating it as representation identity."""
+
+    return {
+        key: trace.metadata.get(key)
+        for key in _SOURCE_PROVENANCE_KEYS
+        if trace.metadata.get(key) not in (None, "")
+    }
+
+
+def trace_representation_provenance(trace: AttentionTrace) -> Dict[str, Any]:
+    """Return fields that must agree before traces share one representation space.
+
+    For a validated observer replay, the original generator describes where the
+    frozen answer came from, not which model produced the stored attention.  It
+    therefore remains auditable source metadata but is not a representation
+    compatibility key.  Unknown, incomplete, and same-generator replay states
+    retain the generator fields so legacy inputs fail closed.
+    """
 
     provenance = trace_method_provenance(trace)
+    if (
+        provenance.get("replay_mode") == "observer"
+        and provenance.get("replay_fidelity") == "observer_counterfactual"
+    ):
+        for key in _SOURCE_PROVENANCE_KEYS:
+            provenance.pop(key, None)
+    return provenance
+
+
+def trace_representation_fingerprint(trace: AttentionTrace) -> Optional[str]:
+    """Hash representation provenance plus the actual attention axes."""
+
+    provenance = trace_representation_provenance(trace)
     if not provenance:
         return None
     provenance.update(
@@ -226,55 +249,20 @@ def trace_provenance_fingerprint(trace: AttentionTrace) -> Optional[str]:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def trace_provenance_fingerprint(trace: AttentionTrace) -> Optional[str]:
+    """Backward-compatible alias for :func:`trace_representation_fingerprint`."""
+
+    return trace_representation_fingerprint(trace)
+
+
 def trace_method_provenance(trace: AttentionTrace) -> Dict[str, Any]:
-    """Return homogeneous method-level provenance; sample hashes stay separate."""
+    """Return complete per-trace replay provenance for strict state-machine audit."""
 
     return {
         key: trace.metadata.get(key)
         for key in _PROVENANCE_KEYS
         if trace.metadata.get(key) not in (None, "")
     }
-
-
-def model_identity_matches(source: str, requested: str) -> bool:
-    """Match an exact model identity, allowing a local path to alias its leaf.
-
-    Two different remote repository names with the same final component are not
-    treated as identical.  The leaf exception exists only because an audited
-    model is commonly replayed from a local snapshot directory.
-    """
-
-    source_key = str(source).strip().replace("\\", "/").rstrip("/").lower()
-    requested_key = str(requested).strip().replace("\\", "/").rstrip("/").lower()
-    if not source_key or not requested_key:
-        return False
-    if source_key == requested_key:
-        return True
-    source_local = source_key.startswith("/") or (
-        len(source_key) >= 3 and source_key[1:3] == ":/"
-    )
-    requested_local = requested_key.startswith("/") or (
-        len(requested_key) >= 3 and requested_key[1:3] == ":/"
-    )
-    return bool(
-        (source_local or requested_local)
-        and source_key.rsplit("/", 1)[-1] == requested_key.rsplit("/", 1)[-1]
-    )
-
-
-def is_immutable_commit_hash(value: Any) -> bool:
-    """Return whether ``value`` is a usable abbreviated/full hexadecimal commit."""
-
-    return bool(re.fullmatch(r"[0-9a-fA-F]{7,64}", str(value).strip()))
-
-
-def commit_hashes_match(left: Any, right: Any) -> bool:
-    """Compare full or abbreviated immutable commit hashes."""
-
-    if not is_immutable_commit_hash(left) or not is_immutable_commit_hash(right):
-        return False
-    left_key, right_key = str(left).strip().lower(), str(right).strip().lower()
-    return left_key.startswith(right_key) or right_key.startswith(left_key)
 
 
 def _as_numpy(value: Any) -> np.ndarray:
@@ -1099,7 +1087,10 @@ def trace_summary(trace: AttentionTrace) -> Dict[str, Any]:
         "response_y": trace.response_y,
         "num_steps": None if trace.step_ranges is None else int(len(trace.step_ranges)),
         "gold_step": trace.gold_step,
-        "provenance_fingerprint": trace_provenance_fingerprint(trace),
+        "provenance_fingerprint": trace_representation_fingerprint(trace),
+        "representation_fingerprint": trace_representation_fingerprint(trace),
+        "representation_provenance": trace_representation_provenance(trace),
+        "source_provenance": trace_source_provenance(trace),
         "provenance": {
             key: trace.metadata[key]
             for key in _PROVENANCE_KEYS
@@ -1143,4 +1134,7 @@ __all__ = [
     "trace_summary",
     "trace_method_provenance",
     "trace_provenance_fingerprint",
+    "trace_representation_fingerprint",
+    "trace_representation_provenance",
+    "trace_source_provenance",
 ]

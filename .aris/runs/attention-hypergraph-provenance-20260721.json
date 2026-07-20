@@ -1,0 +1,77 @@
+{
+  "run_id": "attention-hypergraph-provenance-20260721",
+  "executor_model": "codex-gpt-5.6-sol",
+  "executor_family": "openai",
+  "policy": {
+    "provisional_advances": true
+  },
+  "created": "2026-07-20T16:56:16Z",
+  "updated": "2026-07-20T18:00:57Z",
+  "phases": [
+    {
+      "phase": "idea-discovery",
+      "status": "skipped",
+      "artifact": null,
+      "verdict_id": null,
+      "reviewer": null,
+      "reviewer_family": null,
+      "review_independence": null,
+      "acceptance_status": null,
+      "executor_model": "codex-gpt-5.6-sol",
+      "executor_family": "openai",
+      "updated": "2026-07-20T16:56:16Z"
+    },
+    {
+      "phase": "experiment-bridge",
+      "status": "done",
+      "artifact": "hypergraph/attention/OBSERVER_PROVENANCE_AND_MATCHED_GENERATOR_PLAN.md",
+      "verdict_id": null,
+      "reviewer": null,
+      "reviewer_family": null,
+      "review_independence": null,
+      "acceptance_status": null,
+      "executor_model": "codex-gpt-5.6-sol",
+      "executor_family": "openai",
+      "updated": "2026-07-20T18:00:56Z"
+    },
+    {
+      "phase": "auto-review-loop",
+      "status": "provisional",
+      "artifact": "hypergraph/attention/OBSERVER_PROVENANCE_IMPLEMENTATION_REPORT.md",
+      "verdict_id": "attention-hypergraph-code-review-20260721-015842",
+      "reviewer": "codex-gpt-5.6-sol",
+      "reviewer_family": "openai",
+      "review_independence": "same-family",
+      "acceptance_status": "provisional",
+      "executor_model": "codex-gpt-5.6-sol",
+      "executor_family": "openai",
+      "updated": "2026-07-20T18:00:57Z"
+    },
+    {
+      "phase": "summary",
+      "status": "done",
+      "artifact": "hypergraph/attention/OBSERVER_PROVENANCE_IMPLEMENTATION_REPORT.md",
+      "verdict_id": null,
+      "reviewer": null,
+      "reviewer_family": null,
+      "review_independence": null,
+      "acceptance_status": null,
+      "executor_model": "codex-gpt-5.6-sol",
+      "executor_family": "openai",
+      "updated": "2026-07-20T18:00:57Z"
+    },
+    {
+      "phase": "paper-writing",
+      "status": "skipped",
+      "artifact": null,
+      "verdict_id": null,
+      "reviewer": null,
+      "reviewer_family": null,
+      "review_independence": null,
+      "acceptance_status": null,
+      "executor_model": "codex-gpt-5.6-sol",
+      "executor_family": "openai",
+      "updated": "2026-07-20T18:00:57Z"
+    }
+  ]
+}

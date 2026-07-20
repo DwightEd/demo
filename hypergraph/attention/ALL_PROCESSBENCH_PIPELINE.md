@@ -8,8 +8,17 @@ PYTHONUNBUFFERED=1 bash hypergraph/attention/scripts/run_all_processbench_respon
   --layer 14 \
   --folds 5 \
   --seeds 17 \
+  --generator-model Llama-3.1-8B-Instruct \
   2>&1 | tee outputs/job_logs/all_processbench_layer14.log
 ```
+
+This is the generator-tag-matched reconstructed-observer main experiment. The wrapper
+accepts only the explicit `Meta-Llama-*`/`Llama-*` naming alias, but a local path does
+not prove an exact weight revision. Remove
+`--generator-model` only for the separately reported all-generator observer
+experiment. Existing complete all-generator traces are filtered and reused; when no
+complete cache exists, the wrapper first materializes an audited generator cohort and
+forwards only the matching rows.
 
 Do not append `&` or wrap this command in `nohup` when interactive progress is
 required. Extraction reports sample progress for the active extraction worker, and
@@ -69,32 +78,53 @@ outputs/attention_traces/<dataset>_llama31_layer14/
 Per-dataset held-out results:
 
 ```text
-outputs/attention_hypergraph/<dataset>_response_layer14/aggregate_results.json
+outputs/attention_hypergraph/<dataset>_response_layer14_matched_Llama-3.1-8B-Instruct/aggregate_results.json
+outputs/attention_hypergraph/<dataset>_response_layer14_observer_all/aggregate_results.json
 ```
+
+The old unsuffixed path is legacy. New all-generator results use `_observer_all`;
+matched-generator results use `_matched_<generator>` so the two
+experimental populations cannot overwrite each other.
 
 Cross-dataset report:
 
 ```text
-outputs/attention_hypergraph/all_processbench_response_layer14/aggregate_results.json
-outputs/attention_hypergraph/all_processbench_response_layer14/summary.md
+outputs/attention_hypergraph/all_processbench_response_layer14_matched_Llama-3.1-8B-Instruct/aggregate_results.json
+outputs/attention_hypergraph/all_processbench_response_layer14_matched_Llama-3.1-8B-Instruct/summary.md
+outputs/attention_hypergraph/all_processbench_response_layer14_observer_all/aggregate_results.json
+outputs/attention_hypergraph/all_processbench_response_layer14_observer_all/summary.md
 ```
 
 The cross-dataset values are unweighted macro averages of the four dataset-level
 held-out means. They are not pooled predictions and must not be reported as a pooled
-ProcessBench AUROC.
+ProcessBench AUROC. Each per-dataset JSON also contains
+`generator_test_aggregate`; this is required for the all-generator observer analysis.
+Undefined single-class generator/fold metrics remain explicit rather than being
+silently pooled into the overall score.
 
-Completed audited traces and completed fold runs are reused. A partial directory is
-rejected rather than overwritten; inspect its logs before removing it.
+Completed audited traces and completed fold runs are reused. Before reuse, manifests
+are freshly audited and preflight runs the same cohort gate as training. The legacy
+monolithic code hash remains untouched as historical provenance; extraction and
+training hashes are separate for new requests. A partial directory is rejected rather
+than overwritten. The cross-dataset aggregator verifies that every `preflight.json`
+matches the SHA256 bound by its per-dataset `pipeline_request.json`, and then requires
+the observer/template/axis/graph plus current validation/training-code signatures to
+agree across datasets. Legacy/v2 request schemas remain recorded per dataset but do
+not create a false incompatibility when the trace-embedded representation provenance
+itself agrees.
 
-To remove only failed or interrupted layer-14 trace directories, while retaining
-every completed audited extraction:
+Preserve each trace directory together with its `pipeline_request.json`,
+`shard_audit.json`, and any matched-cohort `.report.json`. Bare NPZ files are not a
+self-contained audit package. The preflight is a cohort/provenance/graph gate only; it
+does not prove fold class coverage, successful optimization, causal recovery of the
+original generation, or control of response-length confounding.
+
+The failed legacy run `gsm8k_response_layer14` is not reused by either new suffix. If
+you want it out of the way, preserve it with a timestamped backup rather than deleting
+the completed trace cache:
 
 ```bash
-for dataset in gsm8k math olympiadbench omnimath; do
-  dir="$PWD/outputs/attention_traces/${dataset}_llama31_layer14"
-  if [ -d "$dir" ] && [ ! -f "$dir/shard_audit.json" ]; then
-    echo "removing incomplete trace: $dir"
-    rm -rf -- "$dir"
-  fi
-done
+stamp="$(date +%Y%m%d_%H%M%S)"
+mv -- outputs/attention_hypergraph/gsm8k_response_layer14 \
+  "outputs/attention_hypergraph/gsm8k_response_layer14_failed_${stamp}"
 ```

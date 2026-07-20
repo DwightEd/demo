@@ -34,6 +34,97 @@ from hypergraph.attention.extract import (
 )
 
 
+def _write_audited_observer_cohort(tmp_path, generators, *, model_names=None):
+    """Write a complete tiny extraction cohort with production-format provenance."""
+
+    from hypergraph.attention.data import TRACE_CONTRACT
+
+    attention, token_ids, response_idx = _trace()
+    input_sha = "a" * 64
+    scope = {
+        "input_sha256": input_sha,
+        "input_num_rows": len(generators),
+        "pre_shard_num_rows": len(generators),
+        "selected_num_rows": len(generators),
+        "requested_limit": None,
+        "num_shards": 1,
+        "shard_index": 0,
+        "skip_invalid": False,
+        "max_seq_len": 2048,
+        "max_attention_gib": 24.0,
+        "allow_large_attention": False,
+    }
+    scope_json = json.dumps(scope, sort_keys=True, separators=(",", ":"))
+    scope_fingerprint = hashlib.sha256(scope_json.encode("utf-8")).hexdigest()
+    output = tmp_path / "observer-traces"
+    output.mkdir()
+    if model_names is None:
+        model_names = ["/models/Meta-Llama-3.1-8B-Instruct"] * len(generators)
+    for index, (generator, model_name) in enumerate(zip(generators, model_names)):
+        method = {
+            "trace_contract": TRACE_CONTRACT,
+            "model_name": model_name,
+            "model_commit_hash": None,
+            "model_commit_source": "unavailable",
+            "tokenizer_name": model_name,
+            "prompt_style": "plain",
+            "replay_mode": "observer",
+            "dtype": "bfloat16",
+            "attention_storage_dtype": "float32",
+            "activation_layer": None,
+            "allow_unverified_generator_weights": False,
+            "query_chunk_size": 0,
+            "attention_layers": [14],
+            "attention_heads": [0],
+            "num_model_layers": 32,
+            "num_model_heads": 32,
+        }
+        method_json = json.dumps(method, sort_keys=True, separators=(",", ":"))
+        method_fingerprint = hashlib.sha256(method_json.encode("utf-8")).hexdigest()
+        np.savez_compressed(
+            output / f"trace-{index:02d}.npz",
+            attention=attention,
+            token_ids=token_ids,
+            response_idx=np.asarray(response_idx),
+            response_y=np.asarray(float(index % 2), np.float32),
+            sample_id=np.asarray(f"trace-{index}"),
+            problem_id=np.asarray(f"problem-{index}"),
+            attention_layers=np.asarray([14], np.int64),
+            attention_heads=np.asarray([0], np.int64),
+            num_model_layers=np.asarray(32, np.int64),
+            num_model_heads=np.asarray(32, np.int64),
+            activation_layer=np.asarray(-1, np.int64),
+            model_name=np.asarray(model_name),
+            model_commit_hash=np.asarray(""),
+            model_commit_source=np.asarray("unavailable"),
+            tokenizer_name=np.asarray(model_name),
+            extraction_dtype=np.asarray("bfloat16"),
+            attention_storage_dtype=np.asarray("float32"),
+            extraction_fingerprint=np.asarray(method_fingerprint),
+            extraction_method_json=np.asarray(method_json),
+            extraction_scope_fingerprint=np.asarray(scope_fingerprint),
+            extraction_scope_json=np.asarray(scope_json),
+            source_input_sha256=np.asarray(input_sha),
+            source_row_index=np.asarray(index, np.int64),
+            extraction_forward_mode=np.asarray("full"),
+            chunk_equivalence_status=np.asarray("not_applicable"),
+            chunk_equivalence_json=np.asarray('{"status":"not_applicable"}'),
+            prompt_style=np.asarray("plain"),
+            replay_mode=np.asarray("observer"),
+            step_alignment_policy=np.asarray("positive_character_overlap_v1"),
+            replay_fidelity=np.asarray("observer_counterfactual"),
+            unverified_generator_weights_explicitly_allowed=np.asarray(False),
+            prompt_provenance=np.asarray("frozen_plain_observer"),
+            generator_model=np.asarray(generator),
+            generator_model_commit=np.asarray(""),
+            prompt_add_special_tokens=np.asarray(True),
+            rendered_prompt_sha256=np.asarray(f"prompt-{index}"),
+            response_text_sha256=np.asarray(f"response-{index}"),
+            trace_contract=np.asarray(TRACE_CONTRACT),
+        )
+    return output
+
+
 def _trace():
     attention = np.zeros((1, 1, 5, 5), np.float32)
     np.fill_diagonal(attention[0, 0], [0.9, 0.8, 0.7, 0.5, 0.4])
@@ -393,7 +484,9 @@ def test_processbench_record_preserves_step_granularity_and_memory_estimate():
 def test_accelerated_extraction_configuration_is_strict_and_shards_are_disjoint():
     code_hashes = extraction_code_sha256()
     assert "hypergraph/attention/extract.py" in code_hashes
+    assert "hypergraph/attention/trace_contract.py" in code_hashes
     assert "utils/step_boundaries.py" in code_hashes
+    assert "hypergraph/attention/data.py" not in code_hashes
     assert all(len(digest) == 64 for digest in code_hashes.values())
     assert parse_max_memory("0=22GiB,1=22GiB,cpu=64GiB") == {
         0: "22GiB",
@@ -454,6 +547,122 @@ def test_accelerated_extraction_configuration_is_strict_and_shards_are_disjoint(
                 "prompt_token_ids": [1.2],
             },
             2,
+        )
+
+
+def test_trace_request_gate_preserves_legacy_evidence_and_separates_v2_hashes(
+    tmp_path,
+):
+    from hypergraph.attention.pipeline_guard import (
+        TRACE_REQUEST_SCHEMA,
+        validate_or_initialize_trace_request,
+    )
+
+    request = {"input": "/data/gsm8k.json", "layer": "14", "limit": ""}
+    legacy_path = tmp_path / "legacy" / "pipeline_request.json"
+    legacy_path.parent.mkdir()
+    legacy_payload = {**request, "method_code_sha256": "a" * 64}
+    legacy_bytes = (
+        json.dumps(legacy_payload, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    legacy_path.write_bytes(legacy_bytes)
+
+    accepted = validate_or_initialize_trace_request(
+        legacy_path,
+        request=request,
+        extraction_code_sha256="b" * 64,
+    )
+    assert accepted["mode"] == "validated_legacy_without_rewrite"
+    assert accepted["legacy_method_code_sha256"] == "a" * 64
+    assert legacy_path.read_bytes() == legacy_bytes
+    with pytest.raises(ValueError, match="legacy trace request mismatch"):
+        validate_or_initialize_trace_request(
+            legacy_path,
+            request={**request, "layer": "15"},
+            extraction_code_sha256="b" * 64,
+        )
+
+    v2_path = tmp_path / "v2" / "pipeline_request.json"
+    initialized = validate_or_initialize_trace_request(
+        v2_path,
+        request=request,
+        extraction_code_sha256="c" * 64,
+    )
+    assert initialized["mode"] == "initialized_v2"
+    stored = json.loads(v2_path.read_text(encoding="utf-8"))
+    assert stored["schema"] == TRACE_REQUEST_SCHEMA
+    validated = validate_or_initialize_trace_request(
+        v2_path,
+        request=request,
+        extraction_code_sha256="c" * 64,
+    )
+    assert validated["mode"] == "validated_v2"
+    assert validated["request_file_sha256"] == initialized["request_file_sha256"]
+    with pytest.raises(ValueError, match="trace request mismatch"):
+        validate_or_initialize_trace_request(
+            v2_path,
+            request=request,
+            extraction_code_sha256="d" * 64,
+        )
+
+
+def test_generator_cohort_is_materialized_before_limit_with_source_row_audit(tmp_path):
+    from hypergraph.attention.cohort import materialize_generator_cohort
+
+    rows = [
+        {
+            "id": "q0",
+            "problem": "zero",
+            "steps": ["ok"],
+            "label": -1,
+            "generator": "Qwen2-7B-Instruct",
+        },
+        {
+            "id": "q1",
+            "problem": "one",
+            "steps": ["bad"],
+            "label": 0,
+            "generator": "Llama-3.1-8B-Instruct",
+        },
+        {
+            "id": "q2",
+            "problem": "two",
+            "steps": ["ok"],
+            "label": -1,
+            "generator": "Llama-3.1-8B-Instruct",
+        },
+    ]
+    source = tmp_path / "gsm8k.json"
+    source.write_text(json.dumps(rows), encoding="utf-8")
+    output = tmp_path / "cohorts" / "llama.json"
+    report = materialize_generator_cohort(
+        source,
+        output,
+        generator_model="llama-3.1-8b-instruct",
+    )
+    assert report["num_input_rows"] == 3
+    assert report["num_selected_rows"] == 2
+    assert report["source_row_indices"] == [1, 2]
+    assert report["response_label_counts_selected"] == {
+        "negative": 1,
+        "positive": 1,
+    }
+    assert [row["id"] for row in json.loads(output.read_text(encoding="utf-8"))] == [
+        "q1",
+        "q2",
+    ]
+    same = materialize_generator_cohort(
+        source,
+        output,
+        generator_model="llama-3.1-8b-instruct",
+    )
+    assert same["cohort_sha256"] == report["cohort_sha256"]
+    with pytest.raises(ValueError, match="different paths"):
+        materialize_generator_cohort(
+            source,
+            output,
+            report_path=output,
+            generator_model="llama-3.1-8b-instruct",
         )
 
 
@@ -564,6 +773,7 @@ def test_release_metrics_reject_nonfinite_predictions_and_keep_json_booleans():
         _binary_metrics,
         _finite_json,
         _tie_aware_localization_rank,
+        _trace_metrics_by_generator,
     )
 
     assert _finite_json({"flag": True}) == {"flag": True}
@@ -573,6 +783,16 @@ def test_release_metrics_reject_nonfinite_predictions_and_keep_json_booleans():
         _binary_metrics([0, 1], [0.1])
     with pytest.raises(RuntimeError, match="NaN or infinity"):
         _tie_aware_localization_rank([0.1, np.nan, 0.9], 2, [True, True, True])
+    grouped = _trace_metrics_by_generator(
+        [
+            {"generator_model": "A", "label": 0, "score": 0.1},
+            {"generator_model": "A", "label": 1, "score": 0.9},
+            {"generator_model": "B", "label": 1, "score": 0.8},
+        ]
+    )
+    assert grouped["A"]["auroc"] == pytest.approx(1.0)
+    assert grouped["B"]["n"] == 1
+    assert grouped["B"]["auroc"] is None
 
 
 def test_dual_gpu_script_keeps_worker_identity_options_protected():
@@ -609,8 +829,30 @@ def test_strict_response_pipeline_uses_exact_full_forward_by_default():
     assert 'QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-0}"' in pipeline
     assert "QUERY_CHUNK_SIZE must be a non-negative integer" in pipeline
     assert "strict pipeline requires QUERY_CHUNK_SIZE=0" in pipeline
+    assert "EXTRACTION_CODE_SHA256 TRAINING_CODE_SHA256" in pipeline
+    assert "hypergraph.attention.pipeline_guard" in pipeline
+    assert "hypergraph.attention.cohort" in pipeline
+    assert 'TRACE_INPUT_MODE="materialized_matched_generator"' in pipeline
+    assert 'TRACE_EXTRACTION_LIMIT=""' in pipeline
+    assert 'COHORT_ARGS+=(--limit "${LIMIT}")' in pipeline
+    assert '"cohort_report_sha256=${COHORT_REPORT_SHA256}"' in pipeline
+    assert "validated_legacy_without_rewrite) TRACE_REQUEST_KIND=\"legacy\"" in pipeline
+    assert '"legacy_monolithic_method_code_sha256=${LEGACY_METHOD_CODE_SHA256}"' in pipeline
+    assert 'PREFLIGHT_CANDIDATE="$(mktemp ' in pipeline
+    assert '--output "${PREFLIGHT_CANDIDATE}"' in pipeline
+    assert '"current_extraction_validation_code_sha256=${EXTRACTION_CODE_SHA256}"' in pipeline
+    assert "seed must be a canonical non-negative integer" in pipeline
+    assert "--seeds contains a duplicate value" in pipeline
+    assert "--objective response_bce" in pipeline
+    assert 'COHORT_SUFFIX="_observer_all"' in pipeline
+    assert '--generator-model "${GENERATOR_MODEL}"' in pipeline
     assert 'MODE="${MODE:-model_parallel}"' in all_datasets
     assert '--mode "${MODE}"' in all_datasets
+    assert '--generator-model "${GENERATOR_MODEL}"' in all_datasets
+    assert 'cohort_suffix="_observer_all"' in all_datasets
+    assert "all_processbench_pipeline_request_v2" in all_datasets
+    assert '"preflight_sha256": preflight_sha256' in all_datasets
+    assert '"generator_test_aggregate"' in all_datasets
 
 
 def test_dual_gpu_wrapper_options_match_extraction_cli():
@@ -799,6 +1041,209 @@ def test_same_generator_replay_requires_the_stored_generation_axis():
         resolve_loaded_commit("a" * 40, "b" * 40, None)
     with pytest.raises(ValueError, match="immutable hexadecimal"):
         resolve_loaded_commit("moving-main", None, None)
+
+
+def test_representation_fingerprint_separates_observer_source_from_method():
+    from types import SimpleNamespace
+
+    from hypergraph.attention.data import (
+        trace_representation_fingerprint,
+        trace_source_provenance,
+    )
+
+    method = {
+        "trace_contract": "exact_prompt_response_attention_v1",
+        "model_name": "/models/Meta-Llama-3.1-8B-Instruct",
+        "model_commit_source": "unavailable",
+        "tokenizer_name": "/models/Meta-Llama-3.1-8B-Instruct",
+        "prompt_style": "plain",
+        "replay_mode": "observer",
+        "replay_fidelity": "observer_counterfactual",
+        "prompt_provenance": "frozen_plain_observer",
+        "prompt_add_special_tokens": True,
+        "extraction_dtype": "bfloat16",
+        "attention_storage_dtype": "float32",
+        "extraction_fingerprint": "method-fingerprint",
+    }
+
+    def make_trace(generator, **updates):
+        metadata = dict(method, generator_model=generator, **updates)
+        return SimpleNamespace(
+            metadata=metadata,
+            attention_layer_ids=np.asarray([14], dtype=np.int64),
+            attention_head_ids=np.arange(32, dtype=np.int64),
+            num_model_layers=32,
+            num_model_heads=32,
+        )
+
+    qwen = make_trace("Qwen2-7B-Instruct")
+    llama = make_trace("Llama-3.1-8B-Instruct")
+    assert trace_representation_fingerprint(qwen) == trace_representation_fingerprint(
+        llama
+    )
+    assert trace_source_provenance(qwen) != trace_source_provenance(llama)
+
+    other_observer = make_trace(
+        "Qwen2-7B-Instruct", model_name="/models/other-observer"
+    )
+    assert trace_representation_fingerprint(qwen) != trace_representation_fingerprint(
+        other_observer
+    )
+
+    incomplete = make_trace("Qwen2-7B-Instruct", replay_fidelity="")
+    incomplete_other = make_trace("Llama-3.1-8B-Instruct", replay_fidelity="")
+    assert trace_representation_fingerprint(
+        incomplete
+    ) != trace_representation_fingerprint(incomplete_other)
+
+    same_generator = make_trace(
+        "Qwen2-7B-Instruct",
+        replay_mode="same_generator",
+        replay_fidelity="token_axis_verified_weights_unverified",
+    )
+    same_generator_other = make_trace(
+        "Llama-3.1-8B-Instruct",
+        replay_mode="same_generator",
+        replay_fidelity="token_axis_verified_weights_unverified",
+    )
+    assert trace_representation_fingerprint(
+        same_generator
+    ) != trace_representation_fingerprint(same_generator_other)
+
+
+def test_dataset_generator_match_uses_only_the_curated_meta_llama_alias():
+    from hypergraph.attention.pipeline_guard import (
+        dataset_generator_matches_observer,
+    )
+
+    observer = "/models/Meta-Llama-3.1-8B-Instruct"
+    assert dataset_generator_matches_observer("Llama-3.1-8B-Instruct", observer)
+    assert dataset_generator_matches_observer("Meta-Llama-3.1-8B-Instruct", observer)
+    assert not dataset_generator_matches_observer("Qwen2-7B-Instruct", observer)
+
+
+def test_strict_preflight_accepts_cross_generator_observer_and_filters_before_limit(
+    tmp_path,
+):
+    from hypergraph.attention.train import main
+
+    trace_dir = _write_audited_observer_cohort(
+        tmp_path,
+        [
+            "Qwen2-7B-Instruct",
+            "Llama-3.1-8B-Instruct",
+            "Qwen2-7B-Instruct",
+            "Llama-3.1-8B-Instruct",
+        ],
+    )
+    all_report = tmp_path / "all-preflight.json"
+    assert (
+        main(
+            [
+                "inspect",
+                str(trace_dir),
+                "--objective",
+                "response_bce",
+                "--allow-observer-traces",
+                "--output",
+                str(all_report),
+            ]
+        )
+        == 0
+    )
+    all_payload = json.loads(all_report.read_text(encoding="utf-8"))
+    assert all_payload["inspection_mode"] == "supervised_cohort_gate"
+    assert all_payload["cohort_gate_passed"] is True
+    assert all_payload["cohort_audit"]["representation_fingerprint"]
+    assert all_payload["cohort_audit"]["source_provenance"][
+        "generator_model_counts"
+    ] == {"Llama-3.1-8B-Instruct": 2, "Qwen2-7B-Instruct": 2}
+    assert all_payload["selection"][
+        "generator_response_label_counts_selected"
+    ] == {
+        "Llama-3.1-8B-Instruct": {
+            "negative": 0,
+            "positive": 2,
+            "unlabeled": 0,
+        },
+        "Qwen2-7B-Instruct": {
+            "negative": 2,
+            "positive": 0,
+            "unlabeled": 0,
+        },
+    }
+
+    matched_report = tmp_path / "matched-preflight.json"
+    assert (
+        main(
+            [
+                "inspect",
+                str(trace_dir),
+                "--objective",
+                "response_bce",
+                "--allow-observer-traces",
+                "--generator-model",
+                "Llama-3.1-8B-Instruct",
+                "--limit",
+                "1",
+                "--output",
+                str(matched_report),
+            ]
+        )
+        == 0
+    )
+    selection = json.loads(matched_report.read_text(encoding="utf-8"))["selection"]
+    assert selection["num_input_traces"] == 4
+    assert selection["num_matched_before_limit"] == 2
+    assert selection["num_selected"] == 1
+    assert selection["num_excluded_generator"] == 2
+    assert selection["num_excluded_limit"] == 1
+    assert selection["generator_distribution_selected"] == {
+        "Llama-3.1-8B-Instruct": 1
+    }
+
+
+def test_limit_rejects_multiple_storage_ordered_trace_roots():
+    from types import SimpleNamespace
+
+    from hypergraph.attention.train import (
+        _iter_input_traces,
+        _validate_limit_input_order,
+    )
+
+    args = SimpleNamespace(inputs=["shard0", "shard1"], limit=3)
+    with pytest.raises(SystemExit, match="storage-order dependent"):
+        next(iter(_iter_input_traces(args)))
+    sharded = SimpleNamespace(
+        metadata={"extraction_scope_json": json.dumps({"num_shards": 2})}
+    )
+    with pytest.raises(SystemExit, match="sharded extraction scope"):
+        _validate_limit_input_order(
+            SimpleNamespace(inputs=["parent"], limit=3), sharded
+        )
+
+
+def test_strict_preflight_still_rejects_different_observer_representations(tmp_path):
+    from hypergraph.attention.train import main
+
+    trace_dir = _write_audited_observer_cohort(
+        tmp_path,
+        ["Qwen2-7B-Instruct", "Llama-3.1-8B-Instruct"],
+        model_names=[
+            "/models/Meta-Llama-3.1-8B-Instruct",
+            "/models/another-observer",
+        ],
+    )
+    with pytest.raises(SystemExit, match="different observer/template/layer"):
+        main(
+            [
+                "inspect",
+                str(trace_dir),
+                "--objective",
+                "response_bce",
+                "--allow-observer-traces",
+            ]
+        )
 
 
 def test_training_replay_provenance_is_a_strict_state_machine():

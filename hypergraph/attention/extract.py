@@ -31,7 +31,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .data import (
+from .trace_contract import (
     VERIFIED_MODEL_COMMIT_SOURCES,
     TRACE_CONTRACT,
     commit_hashes_match,
@@ -770,7 +770,11 @@ def extraction_code_sha256() -> Dict[str, str]:
 
     repository = Path(__file__).resolve().parents[2]
     package = Path(__file__).resolve().parent
-    paths = [*sorted(package.glob("*.py")), repository / "utils" / "step_boundaries.py"]
+    paths = [
+        package / "extract.py",
+        package / "trace_contract.py",
+        repository / "utils" / "step_boundaries.py",
+    ]
     hashes: Dict[str, str] = {}
     for path in paths:
         if not path.is_file():
