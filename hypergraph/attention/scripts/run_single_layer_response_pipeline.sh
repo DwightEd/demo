@@ -22,7 +22,7 @@ High-level options:
   --input PATH       ProcessBench JSON/JSONL source; defaults to
                      data/hf_datasets/ProcessBench/<dataset>.json
   --model PATH       local observer model; defaults to
-                     /gz-data/models/Meta-Llama-3.1-8B-Instruct
+                     /share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct
   --layer ID         zero-based Transformer block id (default: 14)
   --dataset NAME     output tag (default: omnimath)
   --folds N          group-CV folds (default: 5)
@@ -117,7 +117,7 @@ PY
 }
 
 INPUT="${INPUT:-}"
-MODEL="${MODEL:-/gz-data/models/Meta-Llama-3.1-8B-Instruct}"
+MODEL="${MODEL:-/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct}"
 LAYER="${LAYER:-14}"
 DATASET_TAG="${DATASET_TAG:-omnimath}"
 FOLDS="${FOLDS:-5}"

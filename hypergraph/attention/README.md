@@ -269,7 +269,7 @@ LIMIT=4 MODE=model_parallel QUERY_CHUNK_SIZE=64 GPU_MEMORY=22GiB CPU_MEMORY=64Gi
 直接运行第 14 层：
 
 ```bash
-cd /gz-data/research/demo
+cd /share/home/tm902089733300000/a903202310/lys/research/demo
 bash hypergraph/attention/scripts/run_single_layer_response_pipeline.sh \
   --layer 14 \
   --dataset omnimath
@@ -277,9 +277,12 @@ bash hypergraph/attention/scripts/run_single_layer_response_pipeline.sh \
 
 测试第 11 层只需改为 `--layer 11`。先跑 4 条 pilot 时增加 `--limit 4`；多随机种子可写成
 `--seeds 17,29,41`。默认读取
-`data/hf_datasets/ProcessBench/<dataset>.json` 和
-`/gz-data/models/Meta-Llama-3.1-8B-Instruct`；用 `--input`、`--model` 可覆盖。所有可配置项及
-默认值通过下面的命令查看：
+`<demo>/data/hf_datasets/ProcessBench/<dataset>.json` 和
+`/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct`。
+例如 OmniMath 的默认输入是
+`/share/home/tm902089733300000/a903202310/lys/research/demo/data/hf_datasets/ProcessBench/omnimath.json`，
+不是 `data/` 目录本身，也不是 `data/features/full_omnimath.npz`。用 `--input`、`--model`
+可覆盖。所有可配置项及默认值通过下面的命令查看：
 
 ```bash
 bash hypergraph/attention/scripts/run_single_layer_response_pipeline.sh --help
