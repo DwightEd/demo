@@ -15,6 +15,7 @@ from hypergraph.attention import (
 )
 from hypergraph.attention.extract import (
     _write_extraction_manifest,
+    build_parser as build_extraction_parser,
     canonical_record,
     char_spans_to_token_ranges,
     classify_model_commit_source,
@@ -539,6 +540,77 @@ def test_dual_gpu_script_keeps_worker_identity_options_protected():
     passthrough = script.index('"$@"', data_worker)
     protected_output = script.index("--output_dir", passthrough)
     assert passthrough < protected_output
+
+
+def test_dual_gpu_wrapper_options_match_extraction_cli():
+    parser = build_extraction_parser()
+    args = parser.parse_args(
+        [
+            "--input",
+            "/data/gsm8k.json",
+            "--output_dir",
+            "/tmp/shard0",
+            "--model",
+            "/models/llama",
+            "--model_class",
+            "base",
+            "--replay_mode",
+            "observer",
+            "--prompt_style",
+            "plain",
+            "--dtype",
+            "auto",
+            "--storage_dtype",
+            "float32",
+            "--query_chunk_size",
+            "64",
+            "--verify_chunked_equivalence",
+            "--archive_compression",
+            "none",
+            "--max_seq_len",
+            "2048",
+            "--max_attention_gib",
+            "24",
+            "--attention_layers",
+            "14",
+            "--attention_heads",
+            "all",
+            "--chunk_equivalence_threshold",
+            "0.01",
+            "--device",
+            "cuda:0",
+            "--num_shards",
+            "2",
+            "--shard_index",
+            "0",
+        ]
+    )
+
+    assert args.replay_mode == "observer"
+    assert args.prompt_style == "plain"
+    assert args.attention_layers == "14"
+    assert args.num_shards == 2
+    assert args.shard_index == 0
+
+
+def test_extraction_cli_accepts_hyphenated_prompt_and_replay_aliases():
+    args = build_extraction_parser().parse_args(
+        [
+            "--input",
+            "/data/gsm8k.json",
+            "--output_dir",
+            "/tmp/shard0",
+            "--model",
+            "/models/llama",
+            "--replay-mode",
+            "observer",
+            "--prompt-style",
+            "chat",
+        ]
+    )
+
+    assert args.replay_mode == "observer"
+    assert args.prompt_style == "chat"
 
 
 def test_extractor_rejects_empty_steps_and_nonempty_output_dirs(tmp_path):

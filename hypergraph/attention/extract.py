@@ -1128,9 +1128,17 @@ def build_parser() -> argparse.ArgumentParser:
             "for a local checkpoint it is only an unverified declaration"
         ),
     )
-    parser.add_argument("--prompt_style", choices=("plain", "chat"), default="plain")
+    parser.add_argument(
+        "--prompt_style",
+        "--prompt-style",
+        dest="prompt_style",
+        choices=("plain", "chat"),
+        default="plain",
+    )
     parser.add_argument(
         "--replay_mode",
+        "--replay-mode",
+        dest="replay_mode",
         choices=("same_generator", "observer"),
         default="same_generator",
         help=(

@@ -70,14 +70,14 @@ export TOKENIZERS_PARALLELISM=false
 common_args=(
   --input "${INPUT}"
   --model "${MODEL}"
-  --model-class base
-  --replay-mode "${REPLAY_MODE}"
-  --prompt-style "${PROMPT_STYLE}"
+  --model_class base
+  --replay_mode "${REPLAY_MODE}"
+  --prompt_style "${PROMPT_STYLE}"
   --dtype "${DTYPE}"
   --storage_dtype "${STORAGE_DTYPE}"
-  --query-chunk-size "${QUERY_CHUNK_SIZE}"
-  --verify-chunked-equivalence
-  --archive-compression "${ARCHIVE_COMPRESSION}"
+  --query_chunk_size "${QUERY_CHUNK_SIZE}"
+  --verify_chunked_equivalence
+  --archive_compression "${ARCHIVE_COMPRESSION}"
   --max_seq_len "${MAX_SEQ_LEN}"
   --max_attention_gib "${MAX_ATTENTION_GIB}"
 )
@@ -143,8 +143,8 @@ case "${MODE}" in
       "${common_args[@]}" \
       "$@" \
       --output_dir "${OUTPUT_ROOT}/balanced" \
-      --device-map balanced \
-      --max-memory "0=${GPU_MEMORY},1=${GPU_MEMORY},cpu=${CPU_MEMORY}" \
+      --device_map balanced \
+      --max_memory "0=${GPU_MEMORY},1=${GPU_MEMORY},cpu=${CPU_MEMORY}" \
       2>&1 | tee "${OUTPUT_ROOT}/logs/balanced.log"
     "${PYTHON_BIN}" -m hypergraph.attention.shards \
       "${OUTPUT_ROOT}/balanced" \
