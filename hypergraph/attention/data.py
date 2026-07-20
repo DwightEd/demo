@@ -79,6 +79,7 @@ _PROVENANCE_KEYS = (
     "tokenizer_name",
     "prompt_style",
     "replay_mode",
+    "step_alignment_policy",
     "replay_fidelity",
     "unverified_generator_weights_explicitly_allowed",
     "prompt_provenance",

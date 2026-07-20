@@ -5,10 +5,11 @@ The legacy geometry archives are not valid inputs here: they retain response
 hidden states and aggregated attention summaries, but not the full
 prompt/response token axis or token-to-token attention rows.  This extractor
 rebuilds the autoregressive axis as prompt IDs followed by visible response
-IDs, derives every boundary from the corresponding fast-tokenizer offsets, and
-writes one trace per sample.  Strict same-generator replay validates this axis
-against stored generation artifacts; reconstructed or cross-model passes are
-explicitly marked as observer traces.
+IDs and writes one trace per sample.  The prompt/response boundary is exact;
+diagnostic step ranges use positive character overlap because subword tokens
+may legitimately absorb an adjacent step separator.  Strict same-generator
+replay validates the generation axis against stored artifacts; reconstructed
+or cross-model passes are explicitly marked as observer traces.
 
 Dense attention is intentionally a first implementation target because it is
 auditable and exactly reproduces the original thresholding rule.  It is also
@@ -41,6 +42,7 @@ from utils.step_boundaries import trim_trailing_generation_tokens
 
 
 PLAIN_PROMPT_TEMPLATE = "Problem: {question}\n\nSolution:\n\n"
+STEP_ALIGNMENT_POLICY = "positive_character_overlap_v1"
 
 EXTRACTION_SCOPE_KEYS = (
     "input_sha256",
@@ -383,11 +385,13 @@ def char_spans_to_token_ranges(
     response_char_start: int,
     step_char_spans: np.ndarray,
 ) -> Tuple[int, np.ndarray]:
-    """Map character spans to the same full token axis used by the model.
+    """Map step text spans to the model's exact prompt/response token axis.
 
-    Boundaries crossed by a tokenizer token are rejected rather than rounded.
-    This is stricter than the legacy prefix-length arithmetic and prevents BOS
-    or prompt/response shifts from silently corrupting graph labels.
+    The prompt/response split remains strict because it defines the graph's
+    generation axis.  Step delimiters do not: a subword may include step text
+    plus adjacent whitespace/newlines.  Such a token belongs to the one step
+    whose text it overlaps.  A token overlapping the text of multiple steps is
+    genuinely ambiguous and is rejected.
     """
 
     offsets = np.asarray(offsets, np.int64)
@@ -396,13 +400,20 @@ def char_spans_to_token_ranges(
     _assert_no_crossing_boundary(
         offsets, int(response_char_start), label="prompt/response"
     )
-    for step_index, (start, stop) in enumerate(np.asarray(step_char_spans, np.int64)):
-        _assert_no_crossing_boundary(offsets, int(start), label=f"step-{step_index} start")
-        _assert_no_crossing_boundary(offsets, int(stop), label=f"step-{step_index} end")
+    spans = np.asarray(step_char_spans, np.int64)
+    if spans.ndim != 2 or spans.shape[1] != 2 or len(spans) == 0:
+        raise ValueError("step_char_spans must have non-empty shape (steps, 2)")
+    if np.any(spans[:, 0] < int(response_char_start)) or np.any(
+        spans[:, 0] >= spans[:, 1]
+    ):
+        raise ValueError("step character spans must be non-empty and inside the response")
+    if len(spans) > 1 and np.any(spans[1:, 0] < spans[:-1, 1]):
+        raise ValueError("step character spans must be sorted and non-overlapping")
 
+    content_offsets = list(_content_token_offsets(offsets))
     response_tokens = [
         token_index
-        for token_index, start, stop in _content_token_offsets(offsets)
+        for token_index, start, _ in content_offsets
         if start >= int(response_char_start)
     ]
     if not response_tokens:
@@ -410,18 +421,25 @@ def char_spans_to_token_ranges(
     response_idx = int(response_tokens[0])
 
     ranges: List[Tuple[int, int]] = []
-    for step_index, (char_start, char_stop) in enumerate(
-        np.asarray(step_char_spans, np.int64)
-    ):
+    token_owner: Dict[int, int] = {}
+    for step_index, (char_start, char_stop) in enumerate(spans):
         members = [
             token_index
-            for token_index, start, stop in _content_token_offsets(offsets)
-            if start >= int(char_start) and stop <= int(char_stop)
+            for token_index, start, stop in content_offsets
+            if min(stop, int(char_stop)) > max(start, int(char_start))
         ]
+        shared = [token_index for token_index in members if token_index in token_owner]
+        if shared:
+            previous_steps = sorted({token_owner[token_index] for token_index in shared})
+            raise ValueError(
+                f"token(s) {shared} overlap text from multiple reasoning steps "
+                f"{previous_steps + [step_index]}; no exact step label exists"
+            )
         if not members:
-            raise ValueError(f"step {step_index} maps to no complete model token")
+            raise ValueError(f"step {step_index} maps to no model token")
         if members != list(range(members[0], members[-1] + 1)):
             raise ValueError(f"step {step_index} token range is not contiguous")
+        token_owner.update({token_index: step_index for token_index in members})
         ranges.append((members[0], members[-1] + 1))
     token_ranges = np.asarray(ranges, dtype=np.int64)
     if np.any(token_ranges[:, 0] < response_idx):
@@ -1427,6 +1445,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "tokenizer_name": str(getattr(tokenizer, "name_or_path", args.model)),
         "prompt_style": str(args.prompt_style),
         "replay_mode": str(args.replay_mode),
+        "step_alignment_policy": STEP_ALIGNMENT_POLICY,
         "allow_unverified_generator_weights": bool(
             args.allow_unverified_generator_weights
         ),
@@ -1726,6 +1745,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 ),
                 "prompt_style": np.asarray(args.prompt_style),
                 "replay_mode": np.asarray(args.replay_mode),
+                "step_alignment_policy": np.asarray(STEP_ALIGNMENT_POLICY),
                 "replay_fidelity": np.asarray(replay_fidelity),
                 "unverified_generator_weights_explicitly_allowed": np.asarray(
                     bool(

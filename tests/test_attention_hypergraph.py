@@ -308,6 +308,54 @@ def test_exact_axis_extractor_rejects_tokens_crossing_response_boundary():
         char_spans_to_token_ranges(offsets, 2, np.asarray([[2, 4]], np.int64))
 
 
+def test_step_alignment_accepts_tokens_that_absorb_only_the_separator():
+    char_spans = np.asarray([[2, 3], [5, 6]], np.int64)
+    offsets = np.asarray(
+        [
+            [0, 0],
+            [0, 1],
+            [1, 2],
+            [2, 4],  # first-step text plus the first separator newline
+            [4, 5],  # separator-only token
+            [5, 6],
+        ],
+        np.int64,
+    )
+
+    response_idx, ranges = char_spans_to_token_ranges(offsets, 2, char_spans)
+
+    assert response_idx == 3
+    np.testing.assert_array_equal(ranges, [[3, 4], [5, 6]])
+
+
+def test_step_alignment_assigns_leading_separator_token_by_text_overlap():
+    char_spans = np.asarray([[2, 3], [5, 6]], np.int64)
+    offsets = np.asarray(
+        [
+            [0, 0],
+            [0, 1],
+            [1, 2],
+            [2, 3],
+            [3, 6],  # separator plus second-step text
+        ],
+        np.int64,
+    )
+
+    _, ranges = char_spans_to_token_ranges(offsets, 2, char_spans)
+
+    np.testing.assert_array_equal(ranges, [[3, 4], [4, 5]])
+
+
+def test_step_alignment_rejects_one_token_covering_two_step_texts():
+    offsets = np.asarray([[0, 0], [0, 1], [1, 2], [2, 6]], np.int64)
+    with pytest.raises(ValueError, match="multiple reasoning steps"):
+        char_spans_to_token_ranges(
+            offsets,
+            2,
+            np.asarray([[2, 3], [5, 6]], np.int64),
+        )
+
+
 def test_processbench_record_preserves_step_granularity_and_memory_estimate():
     record = canonical_record(
         {"id": "q1", "problem": "1+1?", "steps": ["1+1=2", "done"], "label": 0},
