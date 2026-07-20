@@ -12,8 +12,8 @@ PYTHONUNBUFFERED=1 bash hypergraph/attention/scripts/run_all_processbench_respon
 ```
 
 Do not append `&` or wrap this command in `nohup` when interactive progress is
-required. Extraction reports a per-shard sample progress bar, and training streams
-each epoch record while preserving the same output in log files.
+required. Extraction reports sample progress for the active extraction worker, and
+training streams each epoch record while preserving the same output in log files.
 
 It runs these ProcessBench subsets independently:
 
@@ -32,11 +32,17 @@ data/hf_datasets/ProcessBench/<dataset>.json
 
 ## GPU Scheduling
 
-For each dataset, extraction uses `MODE=data_parallel`:
+For each dataset, extraction defaults to `MODE=model_parallel` with
+`QUERY_CHUNK_SIZE=0`:
 
-- physical GPU 0 loads the observer model and extracts complementary `shard0`;
-- physical GPU 1 loads the observer model and extracts complementary `shard1`;
-- `hypergraph.attention.shards` verifies coverage and writes `shard_audit.json`.
+- the observer model is balanced over physical GPUs 0 and 1;
+- attention comes from an exact full-sequence teacher-forcing forward;
+- `hypergraph.attention.shards` verifies the resulting trace scope and writes
+  `shard_audit.json`.
+
+Cached query chunks are not part of the strict pipeline. On the real
+Llama-3.1-8B checkpoint they changed edges selected at the `0.01` topology
+threshold, despite satisfying the synthetic tensor contract.
 
 Training then schedules at most two fold jobs concurrently:
 
@@ -44,8 +50,7 @@ Training then schedules at most two fold jobs concurrently:
 - one fold on physical GPU 1;
 - the next pair starts only after the current wave finishes.
 
-Datasets run sequentially so that extraction never creates more than two simultaneous
-8B model replicas. Override physical device identifiers with:
+Datasets run sequentially. Override physical device identifiers with:
 
 ```bash
 GPU0=0 GPU1=1 TRAIN_GPUS=0,1 \

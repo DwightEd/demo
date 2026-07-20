@@ -14,7 +14,7 @@ Usage:
 
 The pipeline performs:
   1. strict one-layer, all-head prompt+response attention extraction;
-  2. complementary-shard audit and graph preflight;
+  2. trace-cohort audit and graph preflight;
   3. response_bce HyperCHARM training over problem-disjoint folds;
   4. aggregation of held-out response metrics.
 
@@ -28,7 +28,7 @@ High-level options:
   --folds N          group-CV folds (default: 5)
   --seeds LIST       comma/space-separated seeds (default: 17)
   --limit N          pilot extraction limit; output gets a _pilotN suffix
-  --mode MODE        data_parallel or model_parallel (default: data_parallel)
+  --mode MODE        model_parallel or data_parallel (default: model_parallel)
   --extract-only     stop after strict manifest validation and shard audit
   --help             show this message
 
@@ -46,7 +46,7 @@ Method environment variables and defaults:
 
 Runtime environment variables:
   PYTHON_BIN=python              GPU0=0 GPU1=1 TRAIN_GPUS=0,1
-  QUERY_CHUNK_SIZE=64            STORAGE_DTYPE=float32
+  QUERY_CHUNK_SIZE=0             STORAGE_DTYPE=float32
   REPLAY_MODE=observer           PROMPT_STYLE=plain
   REUSE_TRACES=1                 REUSE_RUNS=1 OVERWRITE_RUNS=0
   TRACE_ROOT=/custom/path        RUN_ROOT=/custom/path
@@ -124,7 +124,7 @@ DATASET_TAG="${DATASET_TAG:-omnimath}"
 FOLDS="${FOLDS:-5}"
 SEEDS="${SEEDS:-17}"
 LIMIT="${LIMIT:-}"
-MODE="${MODE:-data_parallel}"
+MODE="${MODE:-model_parallel}"
 EXTRACT_ONLY="${EXTRACT_ONLY:-0}"
 
 while (($#)); do
@@ -164,7 +164,7 @@ command -v "${PYTHON_BIN}" >/dev/null 2>&1 || die "Python executable not found: 
 GPU0="${GPU0:-0}"
 GPU1="${GPU1:-1}"
 TRAIN_GPUS="${TRAIN_GPUS:-${TRAIN_GPU:-${GPU0},${GPU1}}}"
-QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-64}"
+QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-0}"
 STORAGE_DTYPE="${STORAGE_DTYPE:-float32}"
 DTYPE="${DTYPE:-auto}"
 ARCHIVE_COMPRESSION="${ARCHIVE_COMPRESSION:-none}"
@@ -212,6 +212,10 @@ done
   die "this audited entrypoint supports SOURCE_SELECTION=threshold only"
 [[ "${NODE_FEATURE_MODE}" == "attention_diagonal" ]] || \
   die "this attention-only entrypoint requires NODE_FEATURE_MODE=attention_diagonal"
+[[ "${QUERY_CHUNK_SIZE}" =~ ^[0-9]+$ ]] || \
+  die "QUERY_CHUNK_SIZE must be a non-negative integer"
+[[ "${QUERY_CHUNK_SIZE}" == "0" ]] || \
+  die "the strict pipeline requires QUERY_CHUNK_SIZE=0; cached chunks changed the real-model threshold topology"
 
 LIMIT_SUFFIX=""
 if [[ -n "${LIMIT}" ]]; then

@@ -12,8 +12,8 @@ set -Eeuo pipefail
 
 MODEL="${MODEL:-/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/attention_traces/llama31_8b_observer}"
-MODE="${MODE:-data_parallel}"
-QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-64}"
+MODE="${MODE:-model_parallel}"
+QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-0}"
 STORAGE_DTYPE="${STORAGE_DTYPE:-float32}"
 DTYPE="${DTYPE:-auto}"
 ARCHIVE_COMPRESSION="${ARCHIVE_COMPRESSION:-none}"
@@ -39,8 +39,8 @@ if [[ ! -d "${MODEL}" ]]; then
   printf 'Model directory does not exist: %s\n' "${MODEL}" >&2
   exit 2
 fi
-if ! [[ "${QUERY_CHUNK_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
-  printf 'QUERY_CHUNK_SIZE must be a positive integer\n' >&2
+if ! [[ "${QUERY_CHUNK_SIZE}" =~ ^[0-9]+$ ]]; then
+  printf 'QUERY_CHUNK_SIZE must be a non-negative integer\n' >&2
   exit 2
 fi
 if [[ "${GPU0}" == "${GPU1}" ]]; then

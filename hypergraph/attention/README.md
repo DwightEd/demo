@@ -232,28 +232,31 @@ nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv
 export INPUT=/absolute/path/to/processbench.json
 export MODEL=/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct
 export OUTPUT_ROOT="$PWD/outputs/attention_traces/llama31_8b_pilot4"
-LIMIT=4 MODE=data_parallel QUERY_CHUNK_SIZE=64 \
+LIMIT=4 MODE=model_parallel QUERY_CHUNK_SIZE=0 \
   bash hypergraph/attention/scripts/extract_dual_gpu.sh
-tail -n 50 "$OUTPUT_ROOT"/logs/shard0.log
-tail -n 50 "$OUTPUT_ROOT"/logs/shard1.log
+tail -n 50 "$OUTPUT_ROOT"/logs/balanced.log
 ```
 
 pilot 通过后，用新的输出目录跑完整数据；不设置 `LIMIT`：
 
 ```bash
 export OUTPUT_ROOT="$PWD/outputs/attention_traces/llama31_8b_full"
-MODE=data_parallel QUERY_CHUNK_SIZE=64 \
+MODE=model_parallel QUERY_CHUNK_SIZE=0 \
   bash hypergraph/attention/scripts/extract_dual_gpu.sh
 ```
 
-如果单卡一份 8B 模型仍 OOM，改用一个进程把模型平衡切到两卡；该模式不提供样本级
-2 倍并行，但显存余量更大：
+严格主流程默认使用一个进程把模型平衡切到两卡。它不提供样本级 2 倍并行，目的是让
+完整序列 attention 前向有足够显存；下面展示如何显式调整两张卡和 CPU 的内存预算：
 
 ```bash
 export OUTPUT_ROOT="$PWD/outputs/attention_traces/llama31_8b_balanced_pilot4"
-LIMIT=4 MODE=model_parallel QUERY_CHUNK_SIZE=64 GPU_MEMORY=22GiB CPU_MEMORY=64GiB \
+LIMIT=4 MODE=model_parallel QUERY_CHUNK_SIZE=0 GPU_MEMORY=22GiB CPU_MEMORY=64GiB \
   bash hypergraph/attention/scripts/extract_dual_gpu.sh
 ```
+
+`QUERY_CHUNK_SIZE>0` 的 cached-query 路径只保留作诊断实验，不属于严格主结果。真实
+Llama-3.1-8B pilot 中，该路径相对完整前向出现 `max_abs=0.0488`，并在 `0.01` 阈值处
+造成 1606 次超边成员翻转；因此不能通过放宽容差或关闭等价性门禁用于正式构图。
 
 ## 严格单层 response 检测：全流程入口
 

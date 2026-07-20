@@ -590,6 +590,29 @@ def test_dual_gpu_script_keeps_worker_identity_options_protected():
     assert passthrough < protected_output
 
 
+def test_strict_response_pipeline_uses_exact_full_forward_by_default():
+    from pathlib import Path
+
+    extractor = Path(
+        "hypergraph/attention/scripts/extract_dual_gpu.sh"
+    ).read_text(encoding="utf-8")
+    pipeline = Path(
+        "hypergraph/attention/scripts/run_single_layer_response_pipeline.sh"
+    ).read_text(encoding="utf-8")
+    all_datasets = Path(
+        "hypergraph/attention/scripts/run_all_processbench_response_pipeline.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'MODE="${MODE:-model_parallel}"' in extractor
+    assert 'QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-0}"' in extractor
+    assert 'MODE="${MODE:-model_parallel}"' in pipeline
+    assert 'QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-0}"' in pipeline
+    assert "QUERY_CHUNK_SIZE must be a non-negative integer" in pipeline
+    assert "strict pipeline requires QUERY_CHUNK_SIZE=0" in pipeline
+    assert 'MODE="${MODE:-model_parallel}"' in all_datasets
+    assert '--mode "${MODE}"' in all_datasets
+
+
 def test_dual_gpu_wrapper_options_match_extraction_cli():
     parser = build_extraction_parser()
     args = parser.parse_args(

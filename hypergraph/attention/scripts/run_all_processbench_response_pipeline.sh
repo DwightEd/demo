@@ -11,11 +11,11 @@ usage() {
   cat <<'EOF'
 Usage:
   bash hypergraph/attention/scripts/run_all_processbench_response_pipeline.sh \
-    [--layer 14] [--folds 5] [--seeds 17]
+    [--layer 14] [--folds 5] [--seeds 17] [--mode model_parallel]
 
 Defaults:
   datasets: gsm8k, math, olympiadbench, omnimath
-  extraction: two complementary data-parallel shards on GPU 0 and GPU 1
+  extraction: exact full forward with the observer model balanced over both GPUs
   training: concurrent folds scheduled across GPU 0 and GPU 1
 
 Options:
@@ -24,6 +24,7 @@ Options:
   --layer ID        zero-based Transformer block id (default: 14)
   --folds N         problem-disjoint group-CV folds (default: 5)
   --seeds LIST      comma/space-separated seeds (default: 17)
+  --mode MODE       model_parallel (default) or data_parallel
   --limit N         pilot limit applied independently to every subset
   --help            show this message
 
@@ -43,6 +44,7 @@ LAYER="${LAYER:-14}"
 FOLDS="${FOLDS:-5}"
 SEEDS="${SEEDS:-17}"
 LIMIT="${LIMIT:-}"
+MODE="${MODE:-model_parallel}"
 
 while (($#)); do
   case "$1" in
@@ -51,6 +53,7 @@ while (($#)); do
     --layer) LAYER="${2:?--layer requires an integer}"; shift 2 ;;
     --folds) FOLDS="${2:?--folds requires an integer}"; shift 2 ;;
     --seeds) SEEDS="${2:?--seeds requires a list}"; shift 2 ;;
+    --mode) MODE="${2:?--mode requires a value}"; shift 2 ;;
     --limit) LIMIT="${2:?--limit requires an integer}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1 (run with --help)" ;;
@@ -64,6 +67,8 @@ done
   die "--folds must be an integer >= 3"
 [[ -z "${LIMIT}" || "${LIMIT}" =~ ^[1-9][0-9]*$ ]] || \
   die "--limit must be a positive integer"
+[[ "${MODE}" == "model_parallel" || "${MODE}" == "data_parallel" ]] || \
+  die "--mode must be model_parallel or data_parallel"
 
 read -r -a DATASET_VALUES <<< "${DATASETS//,/ }"
 ((${#DATASET_VALUES[@]})) || die "--datasets resolved to an empty list"
@@ -80,6 +85,7 @@ printf '\n===== All-ProcessBench response pipeline =====\n'
 printf 'datasets:       %s\n' "${DATASET_VALUES[*]}"
 printf 'layer:          %s\n' "${LAYER}"
 printf 'folds/seeds:    %s / %s\n' "${FOLDS}" "${SEEDS}"
+printf 'extraction:     %s, exact full forward\n' "${MODE}"
 printf 'extract GPUs:   %s, %s\n' "${GPU0:-0}" "${GPU1:-1}"
 printf 'training GPUs:  %s\n\n' "${TRAIN_GPUS:-${GPU0:-0},${GPU1:-1}}"
 
@@ -91,7 +97,7 @@ for dataset in "${DATASET_VALUES[@]}"; do
     --dataset "${dataset}"
     --folds "${FOLDS}"
     --seeds "${SEEDS}"
-    --mode data_parallel
+    --mode "${MODE}"
   )
   if [[ -n "${LIMIT}" ]]; then
     args+=(--limit "${LIMIT}")
