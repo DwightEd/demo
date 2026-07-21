@@ -11,7 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .core import paired_auc_difference, paired_summary
+from .statistics import paired_auc_difference, paired_summary
 from .layer_time import crossfit_layer_time_scores, load_matched_layer_time_geometry
 from .output import versioned_paths
 
@@ -32,7 +32,11 @@ def _pair_rows(source: Path, data, scores: dict[str, np.ndarray]) -> list[dict[s
         control = int(indices[data.labels[indices] == 0][0])
         row: dict[str, Any] = {
             "source": str(source.resolve()),
-            "axis_kind": data.metadata["axis_kind"],
+            "axis_kind": (
+                data.metadata.provenance.axis_kind
+                if hasattr(data.metadata, "provenance")
+                else data.metadata["axis_kind"]
+            ),
             "pair_id": int(pair),
             "component_id": int(data.component_ids[error]),
             "error_row_id": int(data.row_ids[error]),

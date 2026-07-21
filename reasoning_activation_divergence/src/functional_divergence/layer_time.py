@@ -9,21 +9,8 @@ from sklearn.linear_model import Ridge
 from sklearn.utils.extmath import randomized_svd
 
 from .core import DEFAULT_METRICS, EPS, _component_ids, connected_component_folds
-
-
-@dataclass(frozen=True)
-class LayerTimeDataset:
-    """Matched dense event windows with explicit time, layer, and feature axes."""
-
-    states: np.ndarray
-    labels: np.ndarray
-    pair_ids: np.ndarray
-    component_ids: np.ndarray
-    row_ids: np.ndarray
-    time_offsets: np.ndarray
-    layer_ids: np.ndarray
-    feature_names: tuple[str, ...]
-    metadata: dict[str, Any]
+from .domain import LayerTimeDataset
+from .progress import NullProgress, ProgressReporter
 
 
 @dataclass(frozen=True)
@@ -224,6 +211,7 @@ def crossfit_layer_time_scores(
     n_splits: int = 5,
     seed: int = 17,
     ridge_alpha: float = 1.0,
+    progress: ProgressReporter | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     """Cross-fit control operator fields in one shared fold-specific coordinate gauge."""
     if data.states.ndim != 4 or data.states.shape[1] < 2 or data.states.shape[2] < 2:
@@ -243,7 +231,11 @@ def crossfit_layer_time_scores(
     component_overlaps: list[int] = []
     selected_ranks: list[int] = []
     folds = connected_component_folds(data.component_ids, n_splits=n_splits, seed=seed)
-    for fold_index, (train, test) in enumerate(folds):
+    reporter = progress or NullProgress()
+    tracked_folds = reporter.track(
+        folds, total=len(folds), description="cross-validation folds"
+    )
+    for fold_index, (train, test) in enumerate(tracked_folds):
         overlap = np.intersect1d(data.component_ids[train], data.component_ids[test]).size
         component_overlaps.append(int(overlap))
         train_control = train[data.labels[train] == 0]

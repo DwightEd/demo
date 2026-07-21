@@ -6,6 +6,9 @@ from functional_divergence.raw_residual import (
     inspect_raw_residual_source,
     load_matched_raw_residual,
 )
+from functional_divergence.config import RunConfig, SourceConfig
+from functional_divergence.matching import MatchedWindowBuilder
+from functional_divergence.source import RawResidualRepository
 
 
 def _states(row: int) -> np.ndarray:
@@ -54,11 +57,18 @@ def test_canonical_full_loader_reads_raw_hidden_shards_and_event_windows(tmp_pat
     assert info["first_shard_shape"] == [8, 3, 4]
     assert data.states.shape == (4, 3, 2, 4)
     assert data.layer_ids.tolist() == [10, 18]
-    assert data.metadata["representation_scope"] == "raw_residual_stream"
-    assert data.metadata["depth_semantics"] == "sparse_depth_interval"
-    assert data.metadata["n_retained_pairs"] == 2
+    assert data.metadata.provenance.representation_scope == "raw_residual_stream"
+    assert data.metadata.depth_semantics == "sparse_depth_interval"
+    assert data.metadata.cohort.retained_pairs == 2
     # Error step 1 starts at absolute token 12; shards start at response token 10.
     assert np.allclose(data.states[0, 1], _states(0)[2, [0, 2]])
+
+    repository = RawResidualRepository(SourceConfig(manifest, hidden))
+    rebuilt = MatchedWindowBuilder(
+        repository, RunConfig(offsets=(-1, 0, 1), layers=(10, 18))
+    ).build()
+    assert repository.inspect()["n_records"] == 4
+    assert np.array_equal(rebuilt.states, data.states)
 
 
 def test_raw_loader_groups_distinct_pairs_that_share_a_problem(tmp_path) -> None:
@@ -82,7 +92,7 @@ def test_raw_loader_groups_distinct_pairs_that_share_a_problem(tmp_path) -> None
     data = load_matched_raw_residual(manifest, hidden_dir=hidden, offsets=(-1, 0))
 
     assert data.component_ids[0] == data.component_ids[2]
-    assert data.metadata["component_grouping"] == "matched_rows_plus_problem_ids"
+    assert data.metadata.component_grouping == "matched_rows_plus_problem_ids"
 
 
 def test_exact_manifest_loader_resolves_relative_response_state_files(tmp_path) -> None:
@@ -114,9 +124,9 @@ def test_exact_manifest_loader_resolves_relative_response_state_files(tmp_path) 
     assert info["source_format"] == "exact_response_state_manifest_v1"
     assert info["snapshot_kind"] == "raw_residual_stream"
     assert data.states.shape == (2, 2, 3, 4)
-    assert data.metadata["n_retained_pairs"] == 1
-    assert data.metadata["source_format"] == "exact_response_state_manifest_v1"
-    assert data.metadata["problem_group_field"] == "problem_group_id"
+    assert data.metadata.cohort.retained_pairs == 1
+    assert data.metadata.provenance.source_format == "exact_response_state_manifest_v1"
+    assert data.metadata.provenance.problem_group_field == "problem_group_id"
 
 
 def test_exact_loader_filters_records_and_shards_by_response_generator(tmp_path) -> None:
@@ -162,7 +172,7 @@ def test_exact_loader_filters_records_and_shards_by_response_generator(tmp_path)
     assert info["n_records"] == 2
     assert info["response_generator_filter"] == "llama3.1-8b"
     assert set(data.row_ids.tolist()) == {0, 1}
-    assert data.metadata["generator_field"] == "generator"
+    assert data.metadata.provenance.generator_field == "generator"
 
 
 def test_loader_rejects_exact_manifest_without_raw_residual_provenance(tmp_path) -> None:

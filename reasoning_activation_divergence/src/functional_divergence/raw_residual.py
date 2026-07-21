@@ -8,7 +8,8 @@ from typing import Any, Iterable
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from .layer_time import LayerTimeDataset
+from .domain import CohortSummary, DatasetMetadata, LayerTimeDataset, SourceProvenance
+from .progress import NullProgress, ProgressReporter
 
 
 @dataclass(frozen=True)
@@ -371,18 +372,16 @@ def _pair_components(
     return np.asarray([remap[root] for root in roots], dtype=np.int64)
 
 
-def load_matched_raw_residual(
-    path: str | Path,
+def _load_matched_from_source(
+    source: _RawSource,
     *,
-    hidden_dir: str | Path | None = None,
     offsets: Iterable[int] = (-2, -1, 0, 1),
     layers: str | Iterable[int] = "all",
     max_pairs: int = 0,
     same_problem_bonus: float = 25.0,
-    response_generator: str | None = None,
+    progress: ProgressReporter | None = None,
 ) -> LayerTimeDataset:
-    """Load matched first-error windows directly from raw response-token residual shards."""
-    source = _resolve_source(path, hidden_dir, response_generator)
+    """Build matched windows from one already audited and filtered source."""
     time_offsets = np.asarray(tuple(offsets), dtype=np.int64)
     if time_offsets.size < 2 or np.any(np.diff(time_offsets) != 1):
         raise ValueError("offsets must contain at least two consecutive increasing integers")
@@ -397,7 +396,11 @@ def load_matched_raw_residual(
     retained_error: list[int] = []
     retained_control: list[int] = []
     dropped = 0
-    for match in matches:
+    reporter = progress or NullProgress()
+    tracked_matches = reporter.track(
+        matches, total=len(matches), description="matched pairs"
+    )
+    for match in tracked_matches:
         windows = []
         for row, step in ((match.error_row, match.error_step), (match.control_row, match.control_step)):
             event = int(source.step_ranges[row][step, 0] - source.response_starts[row])
@@ -440,29 +443,58 @@ def load_matched_raw_residual(
         time_offsets=time_offsets,
         layer_ids=selected_layers,
         feature_names=tuple(f"hidden_{index}" for index in range(states[0].shape[-1])),
-        metadata={
-            "source_path": str(source.manifest_path),
-            "axis_kind": "token",
-            "source_format": source.source_format,
-            "snapshot_kind": source.snapshot_kind,
-            "representation_scope": "raw_residual_stream",
-            "depth_semantics": (
-                "adjacent_block" if np.all(np.diff(selected_layers) == 1) else "sparse_depth_interval"
+        metadata=DatasetMetadata(
+            provenance=SourceProvenance(
+                manifest_path=str(source.manifest_path),
+                source_format=source.source_format,
+                snapshot_kind=source.snapshot_kind,
+                representation_scope="raw_residual_stream",
+                axis_kind="token",
+                problem_group_field=source.problem_group_field,
+                generator_field=source.generator_field,
+                generator_filter=source.generator_filter,
+                response_generators=tuple(
+                    () if source.response_generators is None
+                    else sorted({str(value) for value in source.response_generators})
+                ),
             ),
-            "n_manifest_records": source.n_manifest_records,
-            "n_source_records": int(source.gold_error_step.size),
-            "n_candidate_pairs": int(len(matches)),
-            "n_retained_pairs": int(len(retained_error)),
-            "n_dropped_boundary_pairs": int(dropped),
-            "n_components": int(np.unique(components).size),
-            "component_grouping": "matched_rows_plus_problem_ids",
-            "problem_group_field": source.problem_group_field,
-            "response_generator_filter": source.generator_filter,
-            "generator_field": source.generator_field,
-            "response_generators": (
-                []
-                if source.response_generators is None
-                else sorted({str(value) for value in source.response_generators})
+            cohort=CohortSummary(
+                manifest_records=source.n_manifest_records,
+                selected_records=int(source.gold_error_step.size),
+                error_records=int(np.sum(source.gold_error_step >= 0)),
+                correct_records=int(np.sum(source.gold_error_step < 0)),
+                candidate_pairs=int(len(matches)),
+                retained_pairs=int(len(retained_error)),
+                dropped_boundary_pairs=int(dropped),
+                components=int(np.unique(components).size),
             ),
-        },
+            depth_semantics=(
+                "adjacent_block" if np.all(np.diff(selected_layers) == 1)
+                else "sparse_depth_interval"
+            ),
+            component_grouping="matched_rows_plus_problem_ids",
+        ),
+    )
+
+
+def load_matched_raw_residual(
+    path: str | Path,
+    *,
+    hidden_dir: str | Path | None = None,
+    offsets: Iterable[int] = (-2, -1, 0, 1),
+    layers: str | Iterable[int] = "all",
+    max_pairs: int = 0,
+    same_problem_bonus: float = 25.0,
+    response_generator: str | None = None,
+    progress: ProgressReporter | None = None,
+) -> LayerTimeDataset:
+    """Compatibility facade for audited manifest loading and window construction."""
+    source = _resolve_source(path, hidden_dir, response_generator)
+    return _load_matched_from_source(
+        source,
+        offsets=offsets,
+        layers=layers,
+        max_pairs=max_pairs,
+        same_problem_bonus=same_problem_bonus,
+        progress=progress,
     )
