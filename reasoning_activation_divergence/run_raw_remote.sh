@@ -35,12 +35,11 @@ case "${MODE}" in
       --rank 16 --folds 5 --bootstrap 2000 --seed 17
     ;;
   exact-pilot|exact-full)
+    data_root="${REPO_ROOT}/data/exact/processbench_observer_llama31_full"
     if [[ "${MODE}" == "exact-pilot" ]]; then
-      data_root="${REPO_ROOT}/data/exact/processbench_observer_llama31_pilot"
       output_root="${REPO_ROOT}/outputs/raw_layer_time/exact_pilot"
       extra=(--max-pairs 20 --rank 8 --folds 2 --bootstrap 200)
     else
-      data_root="${REPO_ROOT}/data/exact/processbench_observer_llama31_full"
       output_root="${REPO_ROOT}/outputs/raw_layer_time/exact_full"
       extra=(--rank 16 --folds 5 --bootstrap 2000)
     fi
@@ -50,10 +49,11 @@ case "${MODE}" in
         echo "missing verified raw-residual manifest: ${manifest}" >&2
         exit 2
       fi
-      run_raw --input "${manifest}" --preflight
+      run_raw --input "${manifest}" --response-generator llama3.1-8b --preflight
       run_raw \
         --input "${manifest}" \
         --output-dir "${output_root}/${subset}" \
+        --response-generator llama3.1-8b \
         --offsets=-2,-1,0,1 --layers all --seed 17 \
         "${extra[@]}"
     done

@@ -23,12 +23,12 @@ data/hidden/gsm8k/gsm8k-<row>.npy
 ### Exact observer pilot/full
 
 ```text
-data/exact/processbench_observer_llama31_pilot/<subset>/selected/trace.raw_residual_stream.npz
 data/exact/processbench_observer_llama31_full/<subset>/selected/trace.raw_residual_stream.npz
 ```
 
-- `pilot` is the small extraction used to validate exact prompt/token alignment,
-  shard loading and analysis before scale-up;
+- `pilot` analysis uses at most 20 matched pairs selected from the full audited
+  manifest after response-generator filtering. This avoids a one-class pilot
+  extraction while keeping the same real-data population as the full run;
 - `full` is the scaled extraction for GSM8K, MATH, OlympiadBench and Omni-MATH;
 - each `trace.npz` points to per-chain response-token state `.npy` files;
 - the loader requires
@@ -42,6 +42,12 @@ The exact experiment runner intentionally reads
 does not fall back to the original unmarked `trace.npz`. Override
 `EXACT_MANIFEST_NAME` only to select another manifest that itself declares
 `response_token_state_snapshot_kind=raw_residual_stream`.
+
+Both exact modes also pass `--response-generator llama3.1-8b`. The loader
+applies that filter as one row-aligned mask to labels, token ranges and state
+shard paths, so activations cannot be detached from the responses that produced
+them. See [REAL_RAW_RESIDUAL_METHOD.md](REAL_RAW_RESIDUAL_METHOD.md) for the
+method and per-function call-path documentation.
 
 These are benchmark-observer residual streams. They are not the unknown original
 generator's internal states. Stored states support empirical local transport and

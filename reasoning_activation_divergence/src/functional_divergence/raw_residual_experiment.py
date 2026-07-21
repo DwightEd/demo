@@ -28,6 +28,7 @@ def run_raw_residual_experiment(
     n_boot: int = 2000,
     seed: int = 17,
     ridge_alpha: float = 1.0,
+    response_generator: str | None = None,
 ) -> dict[str, Any]:
     """Run the joint operator-field analysis on raw response-token residual shards."""
     source = Path(input_path)
@@ -37,6 +38,7 @@ def run_raw_residual_experiment(
         offsets=offsets,
         layers=layers,
         max_pairs=max_pairs,
+        response_generator=response_generator,
     )
     scores, diagnostics = crossfit_layer_time_scores(
         data,
@@ -129,6 +131,11 @@ def main() -> None:
     parser.add_argument("--bootstrap", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--ridge-alpha", type=float, default=1.0)
+    parser.add_argument(
+        "--response-generator",
+        default=None,
+        help="keep only manifest rows whose response generator matches this normalized substring",
+    )
     parser.add_argument("--preflight", action="store_true")
     args = parser.parse_args()
     layer_selection: str | tuple[int, ...] = (
@@ -136,7 +143,11 @@ def main() -> None:
     )
     if args.preflight:
         print(json.dumps(
-            inspect_raw_residual_source(args.input, hidden_dir=args.hidden_dir),
+            inspect_raw_residual_source(
+                args.input,
+                hidden_dir=args.hidden_dir,
+                response_generator=args.response_generator,
+            ),
             indent=2,
         ))
         return
@@ -154,6 +165,7 @@ def main() -> None:
         n_boot=args.bootstrap,
         seed=args.seed,
         ridge_alpha=args.ridge_alpha,
+        response_generator=args.response_generator,
     )
     print(json.dumps(result, indent=2))
 

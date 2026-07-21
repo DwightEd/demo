@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -23,6 +24,11 @@ class _RawSource:
     response_starts: np.ndarray
     snapshot_kind: str
     counts: np.ndarray | None
+    manifest_rows: np.ndarray
+    n_manifest_records: int
+    response_generators: np.ndarray | None
+    generator_field: str
+    generator_filter: str | None
 
 
 @dataclass(frozen=True)
@@ -49,7 +55,37 @@ def _ranges(value: Any) -> np.ndarray:
     return array
 
 
-def _resolve_source(path: str | Path, hidden_dir: str | Path | None) -> _RawSource:
+def _normalized_model_name(value: str) -> str:
+    return "".join(character for character in str(value).lower() if character.isalnum())
+
+
+def _response_generators(
+    archive: np.lib.npyio.NpzFile, n_records: int
+) -> tuple[np.ndarray | None, str]:
+    for field in ("response_generator", "generator"):
+        if field in archive.files:
+            values = np.asarray(archive[field], dtype=object).reshape(-1)
+            if values.shape != (n_records,):
+                raise ValueError(f"{field} is not record-aligned")
+            return values, field
+    if "metadata_json" in archive.files:
+        metadata = np.asarray(archive["metadata_json"], dtype=object).reshape(-1)
+        if metadata.shape != (n_records,):
+            raise ValueError("metadata_json is not record-aligned")
+        values = np.asarray(
+            [str(json.loads(str(item)).get("response_generator", "")) for item in metadata],
+            dtype=object,
+        )
+        if np.any(values != ""):
+            return values, "metadata_json.response_generator"
+    return None, "missing"
+
+
+def _resolve_source(
+    path: str | Path,
+    hidden_dir: str | Path | None,
+    response_generator: str | None = None,
+) -> _RawSource:
     manifest = Path(path).expanduser().resolve()
     if not manifest.is_file():
         raise FileNotFoundError(manifest)
@@ -121,10 +157,6 @@ def _resolve_source(path: str | Path, hidden_dir: str | Path | None) -> _RawSour
             raise ValueError("problem_ids is not record-aligned")
         if counts is not None and counts.shape != (n_records,):
             raise ValueError("response_token_state_counts is not record-aligned")
-        resolved_files = np.asarray(
-            [str((Path(item) if Path(str(item)).is_absolute() else base / str(item)).resolve()) for item in files],
-            dtype=object,
-        )
         if "response_token_ranges" in archive.files:
             response_starts = np.asarray(
                 [int(np.asarray(value).reshape(-1)[0]) for value in archive["response_token_ranges"]],
@@ -134,6 +166,42 @@ def _resolve_source(path: str | Path, hidden_dir: str | Path | None) -> _RawSour
             response_starts = np.asarray(archive["prompt_token_counts"], dtype=np.int64)
         else:
             response_starts = np.asarray([value[0, 0] for value in step_ranges], dtype=np.int64)
+        if response_starts.shape != (n_records,):
+            raise ValueError("response token starts are not record-aligned")
+        generators, generator_field = _response_generators(archive, n_records)
+        manifest_rows = np.arange(n_records, dtype=np.int64)
+        if response_generator is not None:
+            requested = _normalized_model_name(response_generator)
+            if not requested:
+                raise ValueError("response_generator must contain letters or digits")
+            if generators is None:
+                raise ValueError(
+                    "response-generator filtering was requested but the manifest has no "
+                    "response_generator/generator provenance"
+                )
+            mask = np.asarray(
+                [requested in _normalized_model_name(str(value)) for value in generators],
+                dtype=bool,
+            )
+            if not np.any(mask):
+                available = sorted({str(value) for value in generators})
+                raise ValueError(
+                    f"no records match response generator {response_generator!r}; "
+                    f"available={available}"
+                )
+            manifest_rows = manifest_rows[mask]
+            gold = gold[mask]
+            problem_ids = problem_ids[mask]
+            step_ranges = [value for value, keep in zip(step_ranges, mask) if keep]
+            files = files[mask]
+            response_starts = response_starts[mask]
+            generators = generators[mask]
+            if counts is not None:
+                counts = counts[mask]
+        resolved_files = np.asarray(
+            [str((Path(item) if Path(str(item)).is_absolute() else base / str(item)).resolve()) for item in files],
+            dtype=object,
+        )
     return _RawSource(
         manifest_path=manifest,
         source_format=source_format,
@@ -146,6 +214,11 @@ def _resolve_source(path: str | Path, hidden_dir: str | Path | None) -> _RawSour
         response_starts=response_starts,
         snapshot_kind=snapshot_kind,
         counts=counts,
+        manifest_rows=manifest_rows,
+        n_manifest_records=n_records,
+        response_generators=generators,
+        generator_field=generator_field,
+        generator_filter=response_generator,
     )
 
 
@@ -164,15 +237,19 @@ def _load_shard(source: _RawSource, row: int) -> np.ndarray:
 
 
 def inspect_raw_residual_source(
-    path: str | Path, *, hidden_dir: str | Path | None = None
+    path: str | Path,
+    *,
+    hidden_dir: str | Path | None = None,
+    response_generator: str | None = None,
 ) -> dict[str, Any]:
     """Fail-closed preflight that touches only the first raw shard."""
-    source = _resolve_source(path, hidden_dir)
+    source = _resolve_source(path, hidden_dir, response_generator)
     first = _load_shard(source, 0)
     return {
         "manifest_path": str(source.manifest_path),
         "source_format": source.source_format,
         "snapshot_kind": source.snapshot_kind,
+        "n_manifest_records": source.n_manifest_records,
         "n_records": int(source.gold_error_step.size),
         "n_error_records": int(np.sum(source.gold_error_step >= 0)),
         "n_correct_records": int(np.sum(source.gold_error_step < 0)),
@@ -182,6 +259,13 @@ def inspect_raw_residual_source(
         ),
         "first_shard": str(source.files[0]),
         "first_shard_shape": list(first.shape),
+        "response_generator_filter": source.generator_filter,
+        "generator_field": source.generator_field,
+        "response_generators": (
+            []
+            if source.response_generators is None
+            else sorted({str(value) for value in source.response_generators})
+        ),
     }
 
 
@@ -189,7 +273,11 @@ def _match_events(source: _RawSource, same_problem_bonus: float) -> list[_Match]
     errors = np.where(source.gold_error_step >= 0)[0]
     controls = np.where(source.gold_error_step < 0)[0]
     if errors.size == 0 or controls.size == 0:
-        raise ValueError("both first-error and fully-correct records are required")
+        raise ValueError(
+            "both first-error and fully-correct records are required after filtering; "
+            f"errors={errors.size}, correct={controls.size}, "
+            f"response_generator={source.generator_filter!r}"
+        )
     cost = np.full((errors.size, controls.size), np.inf)
     chosen = np.zeros_like(cost, dtype=np.int64)
     for error_index, error_row in enumerate(errors):
@@ -291,9 +379,10 @@ def load_matched_raw_residual(
     layers: str | Iterable[int] = "all",
     max_pairs: int = 0,
     same_problem_bonus: float = 25.0,
+    response_generator: str | None = None,
 ) -> LayerTimeDataset:
     """Load matched first-error windows directly from raw response-token residual shards."""
-    source = _resolve_source(path, hidden_dir)
+    source = _resolve_source(path, hidden_dir, response_generator)
     time_offsets = np.asarray(tuple(offsets), dtype=np.int64)
     if time_offsets.size < 2 or np.any(np.diff(time_offsets) != 1):
         raise ValueError("offsets must contain at least two consecutive increasing integers")
@@ -334,7 +423,7 @@ def load_matched_raw_residual(
             states.append(window)
             labels.append(label)
             pair_ids.append(pair)
-            row_ids.append(row)
+            row_ids.append(int(source.manifest_rows[row]))
         retained_error.append(match.error_row)
         retained_control.append(match.control_row)
     if len(retained_error) < 2 and max_pairs != 1:
@@ -360,6 +449,7 @@ def load_matched_raw_residual(
             "depth_semantics": (
                 "adjacent_block" if np.all(np.diff(selected_layers) == 1) else "sparse_depth_interval"
             ),
+            "n_manifest_records": source.n_manifest_records,
             "n_source_records": int(source.gold_error_step.size),
             "n_candidate_pairs": int(len(matches)),
             "n_retained_pairs": int(len(retained_error)),
@@ -367,5 +457,12 @@ def load_matched_raw_residual(
             "n_components": int(np.unique(components).size),
             "component_grouping": "matched_rows_plus_problem_ids",
             "problem_group_field": source.problem_group_field,
+            "response_generator_filter": source.generator_filter,
+            "generator_field": source.generator_field,
+            "response_generators": (
+                []
+                if source.response_generators is None
+                else sorted({str(value) for value in source.response_generators})
+            ),
         },
     )

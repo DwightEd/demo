@@ -119,6 +119,52 @@ def test_exact_manifest_loader_resolves_relative_response_state_files(tmp_path) 
     assert data.metadata["problem_group_field"] == "problem_group_id"
 
 
+def test_exact_loader_filters_records_and_shards_by_response_generator(tmp_path) -> None:
+    shard_dir = tmp_path / "states"
+    shard_dir.mkdir()
+    files = []
+    for row in range(4):
+        path = shard_dir / f"trace-{row}.npy"
+        np.save(path, _states(row))
+        files.append(str(path.relative_to(tmp_path)))
+    manifest = tmp_path / "trace.raw_residual_stream.npz"
+    np.savez(
+        manifest,
+        **_metadata_arrays(),
+        generator=np.asarray(
+            [
+                "Meta-Llama-3.1-8B-Instruct",
+                "meta-llama/Llama-3.1-8B-Instruct",
+                "Qwen2.5-7B-Instruct",
+                "Qwen2.5-7B-Instruct",
+            ],
+            dtype=object,
+        ),
+        response_token_state_files=np.asarray(files, dtype=object),
+        response_token_state_layers=np.asarray([8, 10, 12]),
+        response_token_state_counts=np.full(4, 8),
+        response_token_state_storage_kind=np.asarray("per_chain_npy_shards_v1"),
+        response_token_state_snapshot_kind=np.asarray("raw_residual_stream"),
+        response_token_ranges=np.asarray([[10, 18]] * 4),
+    )
+
+    info = inspect_raw_residual_source(
+        manifest, response_generator="llama3.1-8b"
+    )
+    data = load_matched_raw_residual(
+        manifest,
+        offsets=(-1, 0),
+        max_pairs=1,
+        response_generator="llama3.1-8b",
+    )
+
+    assert info["n_manifest_records"] == 4
+    assert info["n_records"] == 2
+    assert info["response_generator_filter"] == "llama3.1-8b"
+    assert set(data.row_ids.tolist()) == {0, 1}
+    assert data.metadata["generator_field"] == "generator"
+
+
 def test_loader_rejects_exact_manifest_without_raw_residual_provenance(tmp_path) -> None:
     shard = tmp_path / "trace.npy"
     np.save(shard, _states(0))
