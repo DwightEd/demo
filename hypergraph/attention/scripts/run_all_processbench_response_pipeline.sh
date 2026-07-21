@@ -149,11 +149,42 @@ path = root / "pipeline_request.json"
 root.mkdir(parents=True, exist_ok=True)
 if path.is_file():
     stored = json.loads(path.read_text(encoding="utf-8"))
-    if stored != request:
+    # Wrapper hashes are provenance, not experiment identity.  Reporting-only
+    # changes (for example adding pooled OOF aggregation) must not invalidate
+    # completed extraction/training artifacts.  Per-dataset gates separately
+    # verify the extraction method, training code, cohort, and preflight hash.
+    semantic_keys = (
+        "layer",
+        "folds",
+        "seeds",
+        "mode",
+        "limit",
+        "generator_model",
+        "observer_model",
+        "datasets",
+    )
+    semantic_differences = {
+        key: {"stored": stored.get(key), "requested": request.get(key)}
+        for key in semantic_keys
+        if stored.get(key) != request.get(key)
+    }
+    if semantic_differences:
         raise SystemExit(
-            f"cross-dataset summary request mismatch for {path}: "
-            f"stored={stored!r}, requested={request!r}"
+            f"cross-dataset experiment request mismatch for {path}: "
+            f"{semantic_differences}"
         )
+    wrapper_differences = {
+        key: {"stored": stored.get(key), "current": request.get(key)}
+        for key in ("all_wrapper_sha256", "single_wrapper_sha256")
+        if stored.get(key) != request.get(key)
+    }
+    if wrapper_differences:
+        print(
+            "experiment gate passed; orchestration/reporting code changed and "
+            f"will be revalidated by per-dataset gates: {wrapper_differences}"
+        )
+    else:
+        print("cross-dataset experiment gate passed:", path)
 else:
     unexpected = [item.name for item in root.iterdir()]
     if unexpected:
@@ -266,6 +297,21 @@ for dataset in datasets:
             f"dataset {dataset} has {payload.get('num_runs')} runs; "
             f"expected {expected_num_runs}"
         )
+    pooled_oof = payload.get("pooled_oof_test")
+    if not isinstance(pooled_oof, dict):
+        raise SystemExit(
+            f"dataset {dataset} lacks pooled_oof_test; run aggregate_oof.py on "
+            f"{path.parent} or rerun the updated single-dataset aggregation"
+        )
+    pooled_final = pooled_oof.get("seed_ensemble")
+    if not isinstance(pooled_final, dict):
+        raise SystemExit(f"dataset {dataset} has no pooled OOF seed ensemble")
+    for metric in metrics:
+        value = pooled_final.get(metric)
+        if value is None or not math.isfinite(float(value)):
+            raise SystemExit(
+                f"dataset {dataset} has undefined/non-finite pooled OOF {metric}"
+            )
     cohort_gate_passed = preflight.get(
         "cohort_gate_passed", preflight.get("training_gate_passed")
     )
@@ -305,6 +351,7 @@ for dataset in datasets:
         },
         "num_runs": payload.get("num_runs"),
         "test_aggregate": payload.get("test_aggregate", {}),
+        "pooled_oof_test": pooled_oof,
         "generator_test_aggregate": payload.get("generator_test_aggregate", {}),
         "representation_fingerprint": cohort_audit.get(
             "representation_fingerprint"
@@ -343,15 +390,31 @@ for metric in metrics:
         "std": statistics.stdev(values) if len(values) > 1 else 0.0 if values else None,
     }
 
+pooled_macro = {}
+for metric in metrics:
+    values = [
+        float(per_dataset[dataset]["pooled_oof_test"]["seed_ensemble"][metric])
+        for dataset in datasets
+    ]
+    pooled_macro[metric] = {
+        "n_datasets": len(values),
+        "mean": statistics.fmean(values),
+        "std": statistics.stdev(values) if len(values) > 1 else 0.0,
+    }
+
 summary = {
-    "schema": "all_processbench_response_macro_v2",
+    "schema": "all_processbench_response_macro_v3",
     "layer": layer,
     "generator_model": generator_model,
     "datasets": datasets,
     "per_dataset": per_dataset,
     "cross_dataset_representation_compatibility": reference_compatibility,
-    "macro_dataset_mean": macro,
-    "note": "Macro values average held-out dataset-level means; they are not pooled predictions.",
+    "macro_fold_metric_mean_legacy": macro,
+    "macro_pooled_oof_test": pooled_macro,
+    "note": (
+        "Primary values are unweighted macro means of each dataset's final pooled OOF "
+        "test metric. Fold metric means are retained only as variability diagnostics."
+    ),
 }
 json_path = output / "aggregate_results.json"
 
@@ -360,19 +423,23 @@ rows = [
     "",
     f"- Layer: `{layer}`",
     f"- Generator cohort: `{generator_model or 'all generators'}`",
-    "- Aggregation: unweighted macro mean over dataset-level held-out results",
+    "- Primary aggregation: final pooled OOF test metric per dataset, then unweighted macro mean",
+    "- Diagnostic aggregation: mean and standard deviation of individual held-out folds",
     "",
-    "| dataset | AUROC | AUPRC | accuracy@0.5 |",
-    "|---|---:|---:|---:|",
+    "| dataset | final OOF AUROC | fold AUROC mean +/- std | final OOF AUPRC | final n |",
+    "|---|---:|---:|---:|---:|",
 ]
 for dataset in datasets:
-    aggregate = per_dataset[dataset]["test_aggregate"]
-    values = [aggregate.get(metric, {}).get("mean") for metric in metrics]
-    rendered = ["NA" if value is None else f"{float(value):.4f}" for value in values]
-    rows.append(f"| {dataset} | {rendered[0]} | {rendered[1]} | {rendered[2]} |")
-rows.extend(["", "## Macro Dataset Mean", ""])
+    diagnostic = per_dataset[dataset]["test_aggregate"]["auroc"]
+    final = per_dataset[dataset]["pooled_oof_test"]["seed_ensemble"]
+    rows.append(
+        f"| {dataset} | {float(final['auroc']):.4f} | "
+        f"{float(diagnostic['mean']):.4f} +/- {float(diagnostic['std']):.4f} | "
+        f"{float(final['aupr']):.4f} | {int(final['n'])} |"
+    )
+rows.extend(["", "## Macro Final Pooled OOF Test", ""])
 for metric in metrics:
-    value = macro[metric]["mean"]
+    value = pooled_macro[metric]["mean"]
     rows.append(f"- `{metric}`: " + ("NA" if value is None else f"{float(value):.4f}"))
 summary_path = output / "summary.md"
 json_temporary = json_path.with_suffix(".json.tmp")

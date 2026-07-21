@@ -748,6 +748,8 @@ import statistics
 import sys
 from pathlib import Path
 
+from hypergraph.attention.aggregate_oof import aggregate_oof_run
+
 root = Path(sys.argv[1])
 folds = int(sys.argv[2])
 seeds = [int(value) for value in sys.argv[3].replace(",", " ").split()]
@@ -802,6 +804,16 @@ for run_name in expected_runs:
 if not records:
     raise SystemExit("no completed results.json files found")
 
+# Fold means describe run-to-run variability.  The final test metric instead
+# concatenates the mutually exclusive held-out folds once per seed, then
+# averages each trace's independently held-out probabilities across seeds.
+pooled_oof = aggregate_oof_run(
+    root,
+    folds=folds,
+    seeds=seeds,
+    write_outputs=True,
+)
+
 aggregate = {}
 for key in metric_names:
     values = [float(row[key]) for row in records]
@@ -838,6 +850,7 @@ summary = {
     "expected_runs": expected_runs,
     "runs": records,
     "test_aggregate": aggregate,
+    "pooled_oof_test": pooled_oof,
     "generator_test_aggregate": generator_aggregate,
 }
 destination = root / "aggregate_results.json"
@@ -845,7 +858,15 @@ temporary = destination.with_suffix(".json.tmp")
 temporary.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 os.replace(temporary, destination)
 print(json.dumps(summary, indent=2, ensure_ascii=False))
+final = pooled_oof["seed_ensemble"]
+print("===== Final pooled OOF test =====")
+print(
+    f"traces={final['n']} positives={final['positives']} "
+    f"AUROC={final['auroc']:.6f} AUPRC={final['aupr']:.6f} "
+    f"accuracy@0.5={final['accuracy_0.5']:.6f}"
+)
 print("aggregate results:", destination)
+print("pooled OOF report:", root / "pooled_oof_results.json")
 PY
 
 printf '\nPipeline complete. Results: %s\n' "${RUN_ROOT}"

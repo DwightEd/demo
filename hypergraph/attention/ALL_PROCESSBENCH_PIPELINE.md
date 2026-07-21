@@ -87,6 +87,8 @@ Per-dataset held-out results:
 
 ```text
 outputs/attention_hypergraph/<dataset>_response_layer14_matched_Llama-3.1-8B-Instruct/aggregate_results.json
+outputs/attention_hypergraph/<dataset>_response_layer14_matched_Llama-3.1-8B-Instruct/pooled_oof_results.json
+outputs/attention_hypergraph/<dataset>_response_layer14_matched_Llama-3.1-8B-Instruct/predictions_pooled_oof_seed_ensemble.csv
 outputs/attention_hypergraph/<dataset>_response_layer14_observer_all/aggregate_results.json
 ```
 
@@ -103,12 +105,30 @@ outputs/attention_hypergraph/all_processbench_response_layer14_observer_all/aggr
 outputs/attention_hypergraph/all_processbench_response_layer14_observer_all/summary.md
 ```
 
-The cross-dataset values are unweighted macro averages of the four dataset-level
-held-out means. They are not pooled predictions and must not be reported as a pooled
-ProcessBench AUROC. Each per-dataset JSON also contains
-`generator_test_aggregate`; this is required for the all-generator observer analysis.
-Undefined single-class generator/fold metrics remain explicit rather than being
-silently pooled into the overall score.
+The primary per-dataset result is `pooled_oof_test.seed_ensemble`: each trace is
+predicted exactly once by its held-out fold for each seed, probabilities are averaged
+per trace across seeds, and one final AUROC/AUPRC is computed. `test_aggregate` remains
+the mean/std/min/max of individual fold runs and is a variability diagnostic, not the
+final test AUROC. The primary cross-dataset result is the unweighted macro average of
+the four dataset-level pooled OOF metrics. Each per-dataset JSON also contains
+`generator_test_aggregate`; undefined single-class generator/fold metrics remain
+explicit rather than being silently pooled into the overall score.
+
+The default five-fold protocol is problem-disjoint. For fold `k`, fold `k` is test,
+fold `(k+1) mod 5` is validation, and the remaining three folds are training data.
+After all five runs, every problem has appeared in test exactly once per seed. This is
+used because the ProcessBench traces in this pipeline do not provide a reusable
+official train/validation/test partition. If an official split is present, training
+refuses to repartition it by default.
+
+To aggregate already completed folds without extracting or training again:
+
+```bash
+python hypergraph/attention/aggregate_oof.py \
+  --run-root outputs/attention_hypergraph/gsm8k_response_layer14_matched_Llama-3.1-8B-Instruct \
+  --folds 5 \
+  --seeds 17
+```
 
 Completed audited traces and completed fold runs are reused. Before reuse, manifests
 are freshly audited and preflight runs the same cohort gate as training. The legacy

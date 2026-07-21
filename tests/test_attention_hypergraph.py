@@ -857,6 +857,10 @@ def test_strict_response_pipeline_uses_exact_full_forward_by_default():
     assert "all_processbench_pipeline_request_v2" in all_datasets
     assert '"preflight_sha256": preflight_sha256' in all_datasets
     assert '"generator_test_aggregate"' in all_datasets
+    assert '"pooled_oof_test"' in pipeline
+    assert '"pooled_oof_test"' in all_datasets
+    assert '"macro_pooled_oof_test"' in all_datasets
+    assert "Wrapper hashes are provenance, not experiment identity" in all_datasets
 
 
 def test_extraction_has_no_artificial_sequence_cap_by_default():
