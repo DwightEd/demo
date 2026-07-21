@@ -4,6 +4,7 @@ set -euo pipefail
 MODE="${1:-canonical-preflight}"
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
+EXACT_MANIFEST_NAME="${EXACT_MANIFEST_NAME:-trace.raw_residual_stream.npz}"
 export PYTHONPATH="${REPO_ROOT}/reasoning_activation_divergence/src:${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 run_raw() {
@@ -44,9 +45,9 @@ case "${MODE}" in
       extra=(--rank 16 --folds 5 --bootstrap 2000)
     fi
     for subset in gsm8k math olympiadbench omnimath; do
-      manifest="${data_root}/${subset}/selected/trace.npz"
+      manifest="${data_root}/${subset}/selected/${EXACT_MANIFEST_NAME}"
       if [[ ! -f "${manifest}" ]]; then
-        echo "missing manifest: ${manifest}" >&2
+        echo "missing verified raw-residual manifest: ${manifest}" >&2
         exit 2
       fi
       run_raw --input "${manifest}" --preflight

@@ -23,8 +23,8 @@ data/hidden/gsm8k/gsm8k-<row>.npy
 ### Exact observer pilot/full
 
 ```text
-data/exact/processbench_observer_llama31_pilot/<subset>/selected/trace.npz
-data/exact/processbench_observer_llama31_full/<subset>/selected/trace.npz
+data/exact/processbench_observer_llama31_pilot/<subset>/selected/trace.raw_residual_stream.npz
+data/exact/processbench_observer_llama31_full/<subset>/selected/trace.raw_residual_stream.npz
 ```
 
 - `pilot` is the small extraction used to validate exact prompt/token alignment,
@@ -36,6 +36,12 @@ data/exact/processbench_observer_llama31_full/<subset>/selected/trace.npz
   unverified/final-normalized snapshots;
 - selected depths may still be sparse. Always read the preflight
   `depth_semantics` and `layers` fields before interpreting results.
+
+The exact experiment runner intentionally reads
+`selected/trace.raw_residual_stream.npz`, the provenance-audited manifest. It
+does not fall back to the original unmarked `trace.npz`. Override
+`EXACT_MANIFEST_NAME` only to select another manifest that itself declares
+`response_token_state_snapshot_kind=raw_residual_stream`.
 
 These are benchmark-observer residual streams. They are not the unknown original
 generator's internal states. Stored states support empirical local transport and
