@@ -1759,11 +1759,159 @@ def _group_cv_split(
     }
 
 
+def _fixed_holdout_split(
+    traces: Sequence[_TraceMeta], args: argparse.Namespace
+) -> Tuple[List[int], List[int], List[int], Dict[str, Any]]:
+    """Create one deterministic, problem-disjoint train/validation/test split.
+
+    This is the ProcessBench analogue of the original project's fixed test
+    protocol.  Because ProcessBench does not carry that project's external
+    RAGTruth train/test directories, the holdout is created once from problem
+    groups and is controlled by a split seed that is independent of model
+    initialization seeds.
+    """
+
+    official = [trace.trace_id for trace in traces if trace.split is not None]
+    if official and not args.allow_resplit_official_data:
+        raise SystemExit(
+            f"fixed_holdout found official split metadata on {len(official)} traces; "
+            "use --split-mode explicit instead of replacing the official test set, or "
+            "pass --allow-resplit-official-data for a diagnostic-only repartition"
+        )
+    fallback = [trace.trace_id for trace in traces if trace.group_is_fallback]
+    if fallback and not args.allow_trace_as_group:
+        raise SystemExit(
+            f"fixed holdout requires a real problem/question id; {len(fallback)} "
+            "traces only have trace ids. Add problem_id or pass --allow-trace-as-group "
+            "for a diagnostic run."
+        )
+
+    val_ratio = float(args.val_ratio)
+    test_ratio = float(args.test_ratio)
+    train_ratio = 1.0 - val_ratio - test_ratio
+    if not 0.0 < val_ratio < 1.0 or not 0.0 < test_ratio < 1.0 or train_ratio <= 0.0:
+        raise SystemExit(
+            "fixed holdout requires 0 < val_ratio, test_ratio < 1 and "
+            "val_ratio + test_ratio < 1"
+        )
+
+    groups: Dict[str, List[int]] = {}
+    for index, trace in enumerate(traces):
+        groups.setdefault(trace.group_id, []).append(index)
+    if len(groups) < 3:
+        raise SystemExit("fixed holdout requires at least three problem groups")
+
+    balance_names = (
+        "groups",
+        "traces",
+        "negative_traces",
+        "positive_traces",
+        "early_errors",
+        "middle_errors",
+        "late_errors",
+        "response_tokens",
+    )
+
+    def group_vector(indices: Sequence[int]) -> np.ndarray:
+        vector = np.zeros(len(balance_names), dtype=np.float64)
+        vector[0] = 1.0
+        vector[1] = float(len(indices))
+        for index in indices:
+            trace = traces[index]
+            if trace.response_label == 0:
+                vector[2] += 1.0
+            elif trace.response_label == 1:
+                vector[3] += 1.0
+            if trace.gold_step is not None and trace.gold_step >= 0 and trace.num_steps > 0:
+                relative = (float(trace.gold_step) + 0.5) / float(trace.num_steps)
+                position = 4 if relative <= 1.0 / 3.0 else 5 if relative <= 2.0 / 3.0 else 6
+                vector[position] += 1.0
+            vector[7] += float(trace.num_response_tokens)
+        return vector
+
+    rng = np.random.default_rng(int(args.split_seed))
+    enriched = [(group_id, indices, group_vector(indices)) for group_id, indices in groups.items()]
+    rng.shuffle(enriched)
+    total_vector = np.sum([item[2] for item in enriched], axis=0)
+    ratios = np.asarray([train_ratio, val_ratio, test_ratio], dtype=np.float64)
+    targets = ratios[:, None] * total_vector[None, :]
+    scales = np.maximum(targets, 1.0)
+    global_scale = np.maximum(total_vector, 1.0)
+    # Difficult and class-informative groups are placed first. The shuffled
+    # order remains the deterministic tie breaker for otherwise equal groups.
+    enriched.sort(
+        key=lambda item: (
+            float(np.max(item[2] / global_scale)),
+            float(item[2][1]),
+        ),
+        reverse=True,
+    )
+
+    partitions: List[List[int]] = [[], [], []]
+    partition_vectors = np.zeros_like(targets)
+    for _, indices, vector in enriched:
+
+        def assignment_cost(partition: int) -> Tuple[float, float, int]:
+            proposed = partition_vectors.copy()
+            proposed[partition] += vector
+            fit = float(np.sum(((proposed - targets) / scales) ** 2))
+            overflow = float(
+                np.sum((np.maximum(proposed - targets, 0.0) / scales) ** 2)
+            )
+            fullness = float(
+                proposed[partition, 0] / max(targets[partition, 0], 1.0)
+            )
+            return fit + 2.0 * overflow, fullness, partition
+
+        destination = min(range(3), key=assignment_cost)
+        partitions[destination].extend(indices)
+        partition_vectors[destination] += vector
+
+    train, val, test = (sorted(indices) for indices in partitions)
+    if any(not indices for indices in (train, val, test)):
+        raise SystemExit(
+            "fixed holdout assignment produced an empty partition; increase the "
+            "cohort or adjust validation/test ratios"
+        )
+    _assert_group_disjoint(traces, (train, val, test))
+    partition_names = ("train", "validation", "test")
+    partition_indices = (train, val, test)
+    return train, val, test, {
+        "mode": "fixed_holdout",
+        "split_seed": int(args.split_seed),
+        "ratios": {
+            "train": train_ratio,
+            "validation": val_ratio,
+            "test": test_ratio,
+        },
+        "assignment": "greedy_group_stratified_response_error_position_length",
+        "partition_balance": {
+            name: {
+                field: int(round(partition_vectors[position, field_index]))
+                for field_index, field in enumerate(balance_names)
+            }
+            for position, name in enumerate(partition_names)
+        },
+        "partition_trace_ids": {
+            name: [traces[index].trace_id for index in indices]
+            for name, indices in zip(partition_names, partition_indices)
+        },
+        "partition_group_ids": {
+            name: sorted({traces[index].group_id for index in indices})
+            for name, indices in zip(partition_names, partition_indices)
+        },
+    }
+
+
 def _assert_group_disjoint(
     traces: Sequence[_TraceMeta], partitions: Sequence[Sequence[int]]
 ) -> None:
     group_sets = [{traces[index].group_id for index in part} for part in partitions]
-    if group_sets[0] & group_sets[1] or group_sets[0] & group_sets[2] or group_sets[1] & group_sets[2]:
+    if (
+        group_sets[0] & group_sets[1]
+        or group_sets[0] & group_sets[2]
+        or group_sets[1] & group_sets[2]
+    ):
         raise SystemExit("problem/group leakage detected across train/validation/test")
 
 
@@ -1789,7 +1937,11 @@ def _make_split(
             )
         else:
             mode = "explicit"
-    return _explicit_split(traces, args) if mode == "explicit" else _group_cv_split(traces, args)
+    if mode == "explicit":
+        return _explicit_split(traces, args)
+    if mode == "fixed_holdout":
+        return _fixed_holdout_split(traces, args)
+    return _group_cv_split(traces, args)
 
 
 def _assert_partition_class_coverage(
@@ -2597,6 +2749,9 @@ def command_train(args: argparse.Namespace) -> Dict[str, Any]:
             "max_pos_weight": float(args.max_pos_weight),
             "seed": int(args.seed),
             "split_mode": str(args.split_mode),
+            "split_seed": int(args.split_seed),
+            "val_ratio": float(args.val_ratio),
+            "test_ratio": float(args.test_ratio),
             "allow_single_class_partition": bool(args.allow_single_class_partition),
             "allow_resplit_official_data": bool(args.allow_resplit_official_data),
             "allow_trace_as_group": bool(args.allow_trace_as_group),
@@ -2732,14 +2887,22 @@ def _add_graph_arguments(parser: argparse.ArgumentParser) -> None:
         "--threshold",
         type=float,
         default=0.01,
-        help="active processed_hypergraph.py uses 0.01; pass 0.05 for the alternate QA artifacts",
+        help="generic legacy default; the original-aligned response wrapper passes tau=0.05",
     )
     parser.add_argument("--top-k", type=int, default=None, help="innovation; default keeps threshold-only edges")
     parser.add_argument(
         "--source-selection",
-        choices=("threshold", "top_k_only", "cumulative_mass"),
+        choices=(
+            "threshold",
+            "threshold_fallback_topk",
+            "top_k_only",
+            "cumulative_mass",
+        ),
         default="threshold",
-        help="threshold is faithful; the other modes explicitly control length-dependent sparsity",
+        help=(
+            "threshold_fallback_topk reproduces the local original's fallback when no "
+            "source crosses tau; other modes are explicit sparsifier ablations"
+        ),
     )
     parser.add_argument(
         "--cumulative-mass",
@@ -2828,12 +2991,24 @@ def build_parser() -> argparse.ArgumentParser:
         default="per_graph_zscore",
         help="per_graph_zscore reproduces original per-graph feature standardization",
     )
-    train.add_argument("--split-mode", choices=("auto", "explicit", "group_cv"), default="auto")
+    train.add_argument(
+        "--split-mode",
+        choices=("auto", "explicit", "fixed_holdout", "group_cv"),
+        default="auto",
+    )
     train.add_argument("--train-split", default="train")
     train.add_argument("--val-split", default="validation")
     train.add_argument("--test-split", default="test")
     train.add_argument("--folds", type=int, default=5)
     train.add_argument("--fold-index", type=int, default=0)
+    train.add_argument(
+        "--split-seed",
+        type=int,
+        default=17,
+        help="data-partition seed for fixed_holdout; independent of model initialization",
+    )
+    train.add_argument("--val-ratio", type=float, default=0.1)
+    train.add_argument("--test-ratio", type=float, default=0.2)
     train.add_argument("--allow-trace-as-group", action="store_true")
     train.add_argument(
         "--allow-resplit-official-data",

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the strict single-layer response pipeline on every ProcessBench subset.
+# Run the fixed-holdout, original-aligned response pipeline on ProcessBench.
 
 set -Eeuo pipefail
 
@@ -12,28 +12,37 @@ usage() {
   cat <<'EOF'
 Usage:
   bash hypergraph/attention/scripts/run_all_processbench_response_pipeline.sh \
-    [--layer 14] [--folds 5] [--seeds 17] [--mode model_parallel] \
+    [--layer 14] [--seed 17] [--mode model_parallel] \
     [--generator-model Llama-3.1-8B-Instruct]
 
 Defaults:
   datasets: gsm8k, math, olympiadbench, omnimath
-  extraction: exact full forward with the observer model balanced over both GPUs
-  training: concurrent folds scheduled across GPU 0 and GPU 1
+  extraction: exact full forward balanced over both GPUs
+  evaluation: one persisted problem-disjoint train/validation/test split per dataset
+  selection: validation AUPRC; final test is evaluated exactly once
 
 Options:
   --datasets LIST   comma/space-separated ProcessBench subset names
   --model PATH      local observer model path
   --layer ID        zero-based Transformer block id (default: 14)
-  --folds N         problem-disjoint group-CV folds (default: 5)
-  --seeds LIST      comma/space-separated seeds (default: 17)
+  --seed N          model initialization seed (default: 17)
+  --seeds N         compatibility alias for --seed; exactly one value is required
   --generator-model TAG
                      exact ProcessBench generator tag selected before training
   --mode MODE       model_parallel (default) or data_parallel
   --limit N         pilot limit applied independently to every subset
   --help            show this message
 
-Runtime environment variables:
-  PYTHON_BIN=python  GPU0=0  GPU1=1  TRAIN_GPUS=0,1
+Method/runtime environment variables:
+  SPLIT_SEED=17 VAL_RATIO=0.1 TEST_RATIO=0.2
+  THRESHOLD=0.05 SOURCE_SELECTION=threshold_fallback_topk TOP_K=16 MIN_SOURCES=2
+  TOPOLOGY_HEADS=0
+  PYTHON_BIN=python GPU0=0 GPU1=1 TRAIN_GPUS=0,1
+
+The original code's three values are hyperedge attributes
+(attention mean, attention max, normalized head id). Node features are the
+self-attention diagonal over every extracted head; selecting TOPOLOGY_HEADS=0
+only restricts which attention rows create hyperedges.
 EOF
 }
 
@@ -45,19 +54,27 @@ die() {
 DATASETS="${DATASETS:-gsm8k,math,olympiadbench,omnimath}"
 MODEL="${MODEL:-/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct}"
 LAYER="${LAYER:-14}"
-FOLDS="${FOLDS:-5}"
 SEEDS="${SEEDS:-17}"
 LIMIT="${LIMIT:-}"
 MODE="${MODE:-model_parallel}"
 GENERATOR_MODEL="${GENERATOR_MODEL:-}"
+SPLIT_SEED="${SPLIT_SEED:-17}"
+VAL_RATIO="${VAL_RATIO:-0.1}"
+TEST_RATIO="${TEST_RATIO:-0.2}"
+THRESHOLD="${THRESHOLD:-0.05}"
+SOURCE_SELECTION="${SOURCE_SELECTION:-threshold_fallback_topk}"
+TOP_K="${TOP_K:-16}"
+MIN_SOURCES="${MIN_SOURCES:-2}"
+TOPOLOGY_HEADS="${TOPOLOGY_HEADS:-0}"
 
 while (($#)); do
   case "$1" in
     --datasets) DATASETS="${2:?--datasets requires a list}"; shift 2 ;;
     --model) MODEL="${2:?--model requires a path}"; shift 2 ;;
     --layer) LAYER="${2:?--layer requires an integer}"; shift 2 ;;
-    --folds) FOLDS="${2:?--folds requires an integer}"; shift 2 ;;
-    --seeds) SEEDS="${2:?--seeds requires a list}"; shift 2 ;;
+    --folds) die "--folds was removed: this entrypoint performs one fixed held-out test" ;;
+    --seed) SEEDS="${2:?--seed requires an integer}"; shift 2 ;;
+    --seeds) SEEDS="${2:?--seeds requires one integer}"; shift 2 ;;
     --generator-model) GENERATOR_MODEL="${2:?--generator-model requires a tag}"; shift 2 ;;
     --mode) MODE="${2:?--mode requires a value}"; shift 2 ;;
     --limit) LIMIT="${2:?--limit requires an integer}"; shift 2 ;;
@@ -66,26 +83,23 @@ while (($#)); do
   esac
 done
 
-[[ -x "${SINGLE_PIPELINE}" || -f "${SINGLE_PIPELINE}" ]] || \
-  die "single-dataset pipeline does not exist: ${SINGLE_PIPELINE}"
+[[ -f "${SINGLE_PIPELINE}" ]] || die "single-dataset pipeline does not exist: ${SINGLE_PIPELINE}"
 command -v realpath >/dev/null 2>&1 || die "realpath is required"
 [[ "${LAYER}" =~ ^[0-9]+$ ]] || die "--layer must be a non-negative integer"
-[[ "${FOLDS}" =~ ^[0-9]+$ ]] && ((FOLDS >= 3)) || \
-  die "--folds must be an integer >= 3"
-[[ -z "${LIMIT}" || "${LIMIT}" =~ ^[1-9][0-9]*$ ]] || \
-  die "--limit must be a positive integer"
+[[ "${SEEDS}" =~ ^(0|[1-9][0-9]*)$ ]] || die "exactly one canonical non-negative --seed is required"
+[[ "${SPLIT_SEED}" =~ ^(0|[1-9][0-9]*)$ ]] || die "SPLIT_SEED must be non-negative"
+[[ -z "${LIMIT}" || "${LIMIT}" =~ ^[1-9][0-9]*$ ]] || die "--limit must be positive"
 [[ "${MODE}" == "model_parallel" || "${MODE}" == "data_parallel" ]] || \
   die "--mode must be model_parallel or data_parallel"
 [[ -z "${GENERATOR_MODEL}" || "${GENERATOR_MODEL}" =~ ^[A-Za-z0-9._-]+$ ]] || \
   die "--generator-model contains unsafe characters"
 [[ -z "${TRACE_ROOT:-}" && -z "${RUN_ROOT:-}" ]] || \
-  die "TRACE_ROOT/RUN_ROOT are ambiguous across datasets; invoke the single-dataset wrapper for custom roots"
+  die "TRACE_ROOT/RUN_ROOT are ambiguous across datasets; use the single-dataset wrapper"
 
 read -r -a DATASET_VALUES <<< "${DATASETS//,/ }"
 ((${#DATASET_VALUES[@]})) || die "--datasets resolved to an empty list"
 for dataset in "${DATASET_VALUES[@]}"; do
-  [[ "${dataset}" =~ ^[A-Za-z0-9._-]+$ ]] || \
-    die "unsafe dataset name: ${dataset}"
+  [[ "${dataset}" =~ ^[A-Za-z0-9._-]+$ ]] || die "unsafe dataset name: ${dataset}"
   input="${REPO_ROOT}/data/hf_datasets/ProcessBench/${dataset}.json"
   [[ -f "${input}" ]] || die "ProcessBench input does not exist: ${input}"
 done
@@ -93,17 +107,6 @@ for index in "${!DATASET_VALUES[@]}"; do
   for ((previous = 0; previous < index; previous++)); do
     [[ "${DATASET_VALUES[$index],,}" != "${DATASET_VALUES[$previous],,}" ]] || \
       die "--datasets contains duplicate subset: ${DATASET_VALUES[$index]}"
-  done
-done
-read -r -a SEED_VALUES <<< "${SEEDS//,/ }"
-((${#SEED_VALUES[@]})) || die "--seeds resolved to an empty list"
-for index in "${!SEED_VALUES[@]}"; do
-  seed="${SEED_VALUES[$index]}"
-  [[ "${seed}" =~ ^(0|[1-9][0-9]*)$ ]] || \
-    die "seed must be a canonical non-negative integer: ${seed}"
-  for ((previous = 0; previous < index; previous++)); do
-    [[ "${seed}" != "${SEED_VALUES[$previous]}" ]] || \
-      die "--seeds contains a duplicate value: ${seed}"
   done
 done
 [[ -d "${MODEL}" ]] || die "model directory does not exist: ${MODEL}"
@@ -119,12 +122,14 @@ if [[ -n "${GENERATOR_MODEL}" ]]; then
   generator_slug="${GENERATOR_MODEL//\//-}"
   cohort_suffix="_matched_${generator_slug}"
 fi
-run_suffix="${limit_suffix}${cohort_suffix}"
+run_suffix="${limit_suffix}${cohort_suffix}_fixed_original"
 SUMMARY_ROOT="${REPO_ROOT}/outputs/attention_hypergraph/all_processbench_response_layer${LAYER}${run_suffix}"
 
-"${PYTHON_BIN:-python}" - "${SUMMARY_ROOT}" "${LAYER}" "${FOLDS}" "${SEEDS}" \
-  "${MODE}" "${LIMIT}" "${GENERATOR_MODEL}" "${MODEL}" "${ALL_PIPELINE}" \
-  "${SINGLE_PIPELINE}" "${DATASET_VALUES[@]}" <<'PY'
+"${PYTHON_BIN:-python}" - "${SUMMARY_ROOT}" "${LAYER}" "${SEEDS}" \
+  "${SPLIT_SEED}" "${VAL_RATIO}" "${TEST_RATIO}" "${THRESHOLD}" \
+  "${SOURCE_SELECTION}" "${TOP_K}" "${MIN_SOURCES}" "${TOPOLOGY_HEADS}" \
+  "${MODE}" "${LIMIT}" "${GENERATOR_MODEL}" "${MODEL}" \
+  "${ALL_PIPELINE}" "${SINGLE_PIPELINE}" "${DATASET_VALUES[@]}" <<'PY'
 import hashlib
 import json
 import os
@@ -133,78 +138,60 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 request = {
-    "schema": "all_processbench_pipeline_request_v2",
+    "schema": "all_processbench_fixed_holdout_request_v1",
     "layer": sys.argv[2],
-    "folds": sys.argv[3],
-    "seeds": sys.argv[4],
-    "mode": sys.argv[5],
-    "limit": sys.argv[6],
-    "generator_model": sys.argv[7],
-    "observer_model": sys.argv[8],
-    "all_wrapper_sha256": hashlib.sha256(Path(sys.argv[9]).read_bytes()).hexdigest(),
-    "single_wrapper_sha256": hashlib.sha256(Path(sys.argv[10]).read_bytes()).hexdigest(),
-    "datasets": sys.argv[11:],
+    "model_seed": sys.argv[3],
+    "split_seed": sys.argv[4],
+    "val_ratio": sys.argv[5],
+    "test_ratio": sys.argv[6],
+    "threshold": sys.argv[7],
+    "source_selection": sys.argv[8],
+    "top_k": sys.argv[9],
+    "min_sources": sys.argv[10],
+    "topology_heads": sys.argv[11],
+    "mode": sys.argv[12],
+    "limit": sys.argv[13],
+    "generator_model": sys.argv[14],
+    "observer_model": sys.argv[15],
+    "all_wrapper_sha256": hashlib.sha256(Path(sys.argv[16]).read_bytes()).hexdigest(),
+    "single_wrapper_sha256": hashlib.sha256(Path(sys.argv[17]).read_bytes()).hexdigest(),
+    "datasets": sys.argv[18:],
 }
 path = root / "pipeline_request.json"
 root.mkdir(parents=True, exist_ok=True)
 if path.is_file():
     stored = json.loads(path.read_text(encoding="utf-8"))
-    # Wrapper hashes are provenance, not experiment identity.  Reporting-only
-    # changes (for example adding pooled OOF aggregation) must not invalidate
-    # completed extraction/training artifacts.  Per-dataset gates separately
-    # verify the extraction method, training code, cohort, and preflight hash.
-    semantic_keys = (
-        "layer",
-        "folds",
-        "seeds",
-        "mode",
-        "limit",
-        "generator_model",
-        "observer_model",
-        "datasets",
-    )
-    semantic_differences = {
+    provenance = {"all_wrapper_sha256", "single_wrapper_sha256"}
+    differences = {
         key: {"stored": stored.get(key), "requested": request.get(key)}
-        for key in semantic_keys
+        for key in sorted((set(stored) | set(request)) - provenance)
         if stored.get(key) != request.get(key)
     }
-    if semantic_differences:
-        raise SystemExit(
-            f"cross-dataset experiment request mismatch for {path}: "
-            f"{semantic_differences}"
-        )
-    wrapper_differences = {
-        key: {"stored": stored.get(key), "current": request.get(key)}
-        for key in ("all_wrapper_sha256", "single_wrapper_sha256")
-        if stored.get(key) != request.get(key)
-    }
-    if wrapper_differences:
-        print(
-            "experiment gate passed; orchestration/reporting code changed and "
-            f"will be revalidated by per-dataset gates: {wrapper_differences}"
-        )
-    else:
-        print("cross-dataset experiment gate passed:", path)
+    if differences:
+        raise SystemExit(f"cross-dataset experiment request mismatch for {path}: {differences}")
+    print("cross-dataset fixed-holdout gate passed:", path)
 else:
     unexpected = [item.name for item in root.iterdir()]
     if unexpected:
-        raise SystemExit(
-            f"summary directory has no request gate and is non-empty: {unexpected[:10]}"
-        )
-    rendered = json.dumps(request, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        raise SystemExit(f"summary directory has no request gate and is non-empty: {unexpected[:10]}")
     temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(rendered, encoding="utf-8")
+    temporary.write_text(
+        json.dumps(request, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     os.replace(temporary, path)
 PY
 
-printf '\n===== All-ProcessBench response pipeline =====\n'
-printf 'datasets:       %s\n' "${DATASET_VALUES[*]}"
-printf 'layer:          %s\n' "${LAYER}"
-printf 'folds/seeds:    %s / %s\n' "${FOLDS}" "${SEEDS}"
-printf 'generator:      %s\n' "${GENERATOR_MODEL:-all generators}"
-printf 'extraction:     %s, exact full forward\n' "${MODE}"
-printf 'extract GPUs:   %s, %s\n' "${GPU0:-0}" "${GPU1:-1}"
-printf 'training GPUs:  %s\n\n' "${TRAIN_GPUS:-${GPU0:-0},${GPU1:-1}}"
+printf '\n===== All-ProcessBench fixed-test pipeline =====\n'
+printf 'datasets:        %s\n' "${DATASET_VALUES[*]}"
+printf 'layer:           %s\n' "${LAYER}"
+printf 'model seed:      %s\n' "${SEEDS}"
+printf 'split:           seed=%s val=%s test=%s\n' "${SPLIT_SEED}" "${VAL_RATIO}" "${TEST_RATIO}"
+printf 'graph:           %s tau=%s fallback_top_k=%s min_sources=%s topology_heads=%s\n' \
+  "${SOURCE_SELECTION}" "${THRESHOLD}" "${TOP_K}" "${MIN_SOURCES}" "${TOPOLOGY_HEADS}"
+printf 'generator:       %s\n' "${GENERATOR_MODEL:-all generators}"
+printf 'extraction:      %s, exact full forward\n' "${MODE}"
+printf 'extract GPUs:    %s, %s\n\n' "${GPU0:-0}" "${GPU1:-1}"
 
 for dataset in "${DATASET_VALUES[@]}"; do
   printf '\n===== Dataset: %s =====\n' "${dataset}"
@@ -212,8 +199,7 @@ for dataset in "${DATASET_VALUES[@]}"; do
     --model "${MODEL}"
     --layer "${LAYER}"
     --dataset "${dataset}"
-    --folds "${FOLDS}"
-    --seeds "${SEEDS}"
+    --seed "${SEEDS}"
     --mode "${MODE}"
   )
   if [[ -n "${LIMIT}" ]]; then
@@ -222,12 +208,17 @@ for dataset in "${DATASET_VALUES[@]}"; do
   if [[ -n "${GENERATOR_MODEL}" ]]; then
     args+=(--generator-model "${GENERATOR_MODEL}")
   fi
-  bash "${SINGLE_PIPELINE}" "${args[@]}"
+  SPLIT_SEED="${SPLIT_SEED}" VAL_RATIO="${VAL_RATIO}" TEST_RATIO="${TEST_RATIO}" \
+  THRESHOLD="${THRESHOLD}" SOURCE_SELECTION="${SOURCE_SELECTION}" \
+  TOP_K="${TOP_K}" MIN_SOURCES="${MIN_SOURCES}" TOPOLOGY_HEADS="${TOPOLOGY_HEADS}" \
+    bash "${SINGLE_PIPELINE}" "${args[@]}"
 done
 
 "${PYTHON_BIN:-python}" - "${REPO_ROOT}" "${SUMMARY_ROOT}" "${LAYER}" \
-  "${run_suffix}" "${cohort_suffix}" "${GENERATOR_MODEL}" "${FOLDS}" \
-  "${SEEDS}" "${LIMIT}" "${DATASET_VALUES[@]}" <<'PY'
+  "${run_suffix}" "${cohort_suffix}" "${GENERATOR_MODEL}" "${SEEDS}" \
+  "${SPLIT_SEED}" "${VAL_RATIO}" "${TEST_RATIO}" "${THRESHOLD}" \
+  "${SOURCE_SELECTION}" "${TOP_K}" "${MIN_SOURCES}" "${TOPOLOGY_HEADS}" \
+  "${LIMIT}" "${DATASET_VALUES[@]}" <<'PY'
 import hashlib
 import json
 import math
@@ -242,80 +233,74 @@ layer = int(sys.argv[3])
 suffix = sys.argv[4]
 cohort_suffix = sys.argv[5]
 generator_model = sys.argv[6] or None
-folds = int(sys.argv[7])
-seeds_raw = sys.argv[8]
-limit = sys.argv[9]
-datasets = sys.argv[10:]
-metrics = ("auroc", "aupr", "accuracy_0.5")
-seed_values = [int(value) for value in seeds_raw.replace(",", " ").split()]
-expected_num_runs = folds * len(seed_values)
+model_seed = sys.argv[7]
+split_seed = sys.argv[8]
+val_ratio = sys.argv[9]
+test_ratio = sys.argv[10]
+threshold = sys.argv[11]
+source_selection = sys.argv[12]
+top_k = sys.argv[13]
+min_sources = sys.argv[14]
+topology_heads = sys.argv[15]
+limit = sys.argv[16]
+datasets = sys.argv[17:]
+metric_names = ("auroc", "aupr", "accuracy_0.5")
 
 per_dataset = {}
 compatibility_records = {}
 for dataset in datasets:
-    path = (
-        repo
-        / "outputs"
-        / "attention_hypergraph"
-        / f"{dataset}_response_layer{layer}{suffix}"
-        / "aggregate_results.json"
-    )
-    if not path.is_file():
-        raise SystemExit(f"missing dataset aggregate: {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    preflight_path = path.parent / "preflight.json"
-    run_gate_path = path.parent / "pipeline_request.json"
-    if not preflight_path.is_file():
-        raise SystemExit(f"missing strict dataset preflight: {preflight_path}")
-    if not run_gate_path.is_file():
-        raise SystemExit(f"missing dataset run gate: {run_gate_path}")
+    root = repo / "outputs" / "attention_hypergraph" / f"{dataset}_response_layer{layer}{suffix}"
+    aggregate_path = root / "aggregate_results.json"
+    preflight_path = root / "preflight.json"
+    gate_path = root / "pipeline_request.json"
+    prediction_path = root / "predictions_test.csv"
+    for required in (aggregate_path, preflight_path, gate_path, prediction_path):
+        if not required.is_file():
+            raise SystemExit(f"missing completed fixed-test artifact: {required}")
+    payload = json.loads(aggregate_path.read_text(encoding="utf-8"))
+    if payload.get("schema") != "fixed_holdout_response_test_v1":
+        raise SystemExit(f"dataset {dataset} is not a fixed-holdout result: {aggregate_path}")
+    final = payload.get("final_test")
+    if not isinstance(final, dict):
+        raise SystemExit(f"dataset {dataset} lacks final_test")
+    for metric in metric_names:
+        value = final.get(metric)
+        if value is None or not math.isfinite(float(value)):
+            raise SystemExit(f"dataset {dataset} has undefined/non-finite final test {metric}")
+    split = payload.get("split") or {}
+    if split.get("mode") != "fixed_holdout" or str(split.get("split_seed")) != split_seed:
+        raise SystemExit(f"dataset {dataset} has incompatible split manifest: {split}")
+
     preflight_bytes = preflight_path.read_bytes()
     preflight_sha256 = hashlib.sha256(preflight_bytes).hexdigest()
     preflight = json.loads(preflight_bytes.decode("utf-8"))
-    run_gate_bytes = run_gate_path.read_bytes()
-    run_gate = json.loads(run_gate_bytes.decode("utf-8"))
-    expected_gate_fields = {
+    gate_bytes = gate_path.read_bytes()
+    gate = json.loads(gate_bytes.decode("utf-8"))
+    expected_gate = {
         "layer": str(layer),
         "generator_model": generator_model or "",
         "cohort_suffix": cohort_suffix,
         "selection_limit": limit,
-        "folds": str(folds),
-        "seeds": seeds_raw,
+        "split_mode": "fixed_holdout",
+        "split_seed": split_seed,
+        "val_ratio": val_ratio,
+        "test_ratio": test_ratio,
+        "threshold": threshold,
+        "source_selection": source_selection,
+        "top_k": top_k,
+        "min_sources": min_sources,
+        "topology_heads": topology_heads,
+        "seeds": model_seed,
         "preflight_sha256": preflight_sha256,
     }
-    gate_differences = {
-        key: {"stored": run_gate.get(key), "expected": value}
-        for key, value in expected_gate_fields.items()
-        if run_gate.get(key) != value
+    differences = {
+        key: {"stored": gate.get(key), "expected": expected}
+        for key, expected in expected_gate.items()
+        if gate.get(key) != expected
     }
-    if gate_differences:
-        raise SystemExit(
-            f"dataset run/preflight gate mismatch for {dataset}: {gate_differences}"
-        )
-    if payload.get("num_runs") != expected_num_runs:
-        raise SystemExit(
-            f"dataset {dataset} has {payload.get('num_runs')} runs; "
-            f"expected {expected_num_runs}"
-        )
-    pooled_oof = payload.get("pooled_oof_test")
-    if not isinstance(pooled_oof, dict):
-        raise SystemExit(
-            f"dataset {dataset} lacks pooled_oof_test; run aggregate_oof.py on "
-            f"{path.parent} or rerun the updated single-dataset aggregation"
-        )
-    pooled_final = pooled_oof.get("seed_ensemble")
-    if not isinstance(pooled_final, dict):
-        raise SystemExit(f"dataset {dataset} has no pooled OOF seed ensemble")
-    for metric in metrics:
-        value = pooled_final.get(metric)
-        if value is None or not math.isfinite(float(value)):
-            raise SystemExit(
-                f"dataset {dataset} has undefined/non-finite pooled OOF {metric}"
-            )
-    cohort_gate_passed = preflight.get(
-        "cohort_gate_passed", preflight.get("training_gate_passed")
-    )
-    if cohort_gate_passed is not True:
+    if differences:
+        raise SystemExit(f"dataset run/preflight gate mismatch for {dataset}: {differences}")
+    if preflight.get("cohort_gate_passed", preflight.get("training_gate_passed")) is not True:
         raise SystemExit(f"dataset preflight did not pass its cohort gate: {preflight_path}")
     cohort_audit = preflight.get("cohort_audit") or {}
     representation = cohort_audit.get("representation_provenance")
@@ -326,133 +311,105 @@ for dataset in datasets:
         "representation": representation,
         "attention_axis_contract": axis_contract,
         "graph_config": preflight.get("graph_config"),
-        "current_validation": {
-            key: run_gate.get(key)
-            for key in (
-                "current_extraction_validation_code_sha256",
-                "training_code_sha256",
-            )
-        },
     }
     compatibility_records[dataset] = compatibility
     per_dataset[dataset] = {
-        "source": str(path),
-        "preflight": str(preflight_path),
+        "source": str(aggregate_path),
+        "predictions_test": str(prediction_path),
         "preflight_sha256": preflight_sha256,
-        "run_gate": str(run_gate_path),
-        "run_gate_sha256": hashlib.sha256(run_gate_bytes).hexdigest(),
-        "trace_request_provenance": {
-            key: run_gate.get(key)
-            for key in (
-                "trace_request_kind",
-                "trace_request_sha256",
-                "legacy_monolithic_method_code_sha256",
-            )
-        },
-        "num_runs": payload.get("num_runs"),
-        "test_aggregate": payload.get("test_aggregate", {}),
-        "pooled_oof_test": pooled_oof,
-        "generator_test_aggregate": payload.get("generator_test_aggregate", {}),
-        "representation_fingerprint": cohort_audit.get(
-            "representation_fingerprint"
-        ),
-        "source_provenance": cohort_audit.get("source_provenance"),
+        "partition_sizes": payload.get("partition_sizes"),
+        "split": split,
+        "final_test": final,
+        "generator_final_test": payload.get("generator_final_test", {}),
+        "representation_fingerprint": cohort_audit.get("representation_fingerprint"),
         "selection": preflight.get("selection"),
     }
 
 reference_dataset = datasets[0]
-reference_compatibility = compatibility_records[reference_dataset]
+reference = compatibility_records[reference_dataset]
 for dataset in datasets[1:]:
-    if compatibility_records[dataset] != reference_compatibility:
+    if compatibility_records[dataset] != reference:
         raise SystemExit(
             "cross-dataset observer/template/axis/graph compatibility mismatch: "
             f"{reference_dataset!r} != {dataset!r}"
         )
 
 macro = {}
-for metric in metrics:
-    values = []
-    for dataset in datasets:
-        value = (
-            per_dataset[dataset]
-            .get("test_aggregate", {})
-            .get(metric, {})
-            .get("mean")
-        )
-        if value is None or not math.isfinite(float(value)):
-            raise SystemExit(f"dataset {dataset} has undefined/non-finite {metric}")
-        values.append(float(value))
-    if len(values) != len(datasets):
-        raise SystemExit(f"metric {metric} is incomplete across datasets")
+for metric in metric_names:
+    values = [float(per_dataset[name]["final_test"][metric]) for name in datasets]
     macro[metric] = {
-        "n_datasets": len(values),
-        "mean": statistics.fmean(values) if values else None,
-        "std": statistics.stdev(values) if len(values) > 1 else 0.0 if values else None,
-    }
-
-pooled_macro = {}
-for metric in metrics:
-    values = [
-        float(per_dataset[dataset]["pooled_oof_test"]["seed_ensemble"][metric])
-        for dataset in datasets
-    ]
-    pooled_macro[metric] = {
         "n_datasets": len(values),
         "mean": statistics.fmean(values),
         "std": statistics.stdev(values) if len(values) > 1 else 0.0,
     }
 
 summary = {
-    "schema": "all_processbench_response_macro_v3",
+    "schema": "all_processbench_fixed_holdout_macro_v1",
+    "protocol": "single_problem_disjoint_fixed_holdout_per_dataset",
     "layer": layer,
+    "model_seed": int(model_seed),
+    "split_seed": int(split_seed),
     "generator_model": generator_model,
+    "method_contract": {
+        "node_features": "self-attention diagonal over all extracted heads",
+        "edge_attributes": ["attention_mean", "attention_max", "flattened_head_normalized"],
+        "source_selection": source_selection,
+        "fallback_top_k": int(top_k),
+        "min_sources_before_center": int(min_sources),
+        "topology_heads": topology_heads,
+        "threshold": float(threshold),
+    },
     "datasets": datasets,
     "per_dataset": per_dataset,
-    "cross_dataset_representation_compatibility": reference_compatibility,
-    "macro_fold_metric_mean_legacy": macro,
-    "macro_pooled_oof_test": pooled_macro,
+    "macro_final_test": macro,
+    "cross_dataset_representation_compatibility": reference,
     "note": (
-        "Primary values are unweighted macro means of each dataset's final pooled OOF "
-        "test metric. Fold metric means are retained only as variability diagnostics."
+        "Each ProcessBench subset uses one persisted problem-disjoint internal holdout. "
+        "This mirrors the original train/validation/test protocol, but it is not the "
+        "original paper's external RAGTruth test set."
     ),
 }
 json_path = output / "aggregate_results.json"
-
+markdown_path = output / "summary.md"
 rows = [
-    "# All-ProcessBench Response Results",
+    "# All-ProcessBench Fixed Held-Out Test",
     "",
     f"- Layer: `{layer}`",
     f"- Generator cohort: `{generator_model or 'all generators'}`",
-    "- Primary aggregation: final pooled OOF test metric per dataset, then unweighted macro mean",
-    "- Diagnostic aggregation: mean and standard deviation of individual held-out folds",
+    f"- Split seed: `{split_seed}`; model seed: `{model_seed}`",
+    "- Model selection uses validation AUPRC; each held-out test is evaluated once.",
     "",
-    "| dataset | final OOF AUROC | fold AUROC mean +/- std | final OOF AUPRC | final n |",
-    "|---|---:|---:|---:|---:|",
+    "| dataset | test n | positives | AUROC | AUPRC | accuracy@0.5 |",
+    "|---|---:|---:|---:|---:|---:|",
 ]
 for dataset in datasets:
-    diagnostic = per_dataset[dataset]["test_aggregate"]["auroc"]
-    final = per_dataset[dataset]["pooled_oof_test"]["seed_ensemble"]
+    final = per_dataset[dataset]["final_test"]
     rows.append(
-        f"| {dataset} | {float(final['auroc']):.4f} | "
-        f"{float(diagnostic['mean']):.4f} +/- {float(diagnostic['std']):.4f} | "
-        f"{float(final['aupr']):.4f} | {int(final['n'])} |"
+        f"| {dataset} | {int(final['n'])} | {int(final['positives'])} | "
+        f"{float(final['auroc']):.4f} | {float(final['aupr']):.4f} | "
+        f"{float(final['accuracy_0.5']):.4f} |"
     )
-rows.extend(["", "## Macro Final Pooled OOF Test", ""])
-for metric in metrics:
-    value = pooled_macro[metric]["mean"]
-    rows.append(f"- `{metric}`: " + ("NA" if value is None else f"{float(value):.4f}"))
-summary_path = output / "summary.md"
-json_temporary = json_path.with_suffix(".json.tmp")
-summary_temporary = summary_path.with_suffix(".md.tmp")
-json_temporary.write_text(
-    json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-)
-summary_temporary.write_text("\n".join(rows) + "\n", encoding="utf-8")
-os.replace(json_temporary, json_path)
-os.replace(summary_temporary, summary_path)
+rows.extend(["", "## Unweighted Macro", ""])
+for metric in metric_names:
+    rows.append(f"- `{metric}`: {macro[metric]['mean']:.4f} +/- {macro[metric]['std']:.4f}")
 
-print(json.dumps(summary, indent=2, ensure_ascii=False))
+json_tmp = json_path.with_suffix(".json.tmp")
+markdown_tmp = markdown_path.with_suffix(".md.tmp")
+json_tmp.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+markdown_tmp.write_text("\n".join(rows) + "\n", encoding="utf-8")
+os.replace(json_tmp, json_path)
+os.replace(markdown_tmp, markdown_path)
+
+print("===== Final fixed held-out tests =====")
+for dataset in datasets:
+    final = per_dataset[dataset]["final_test"]
+    print(
+        f"{dataset}: n={int(final['n'])} positives={int(final['positives'])} "
+        f"AUROC={float(final['auroc']):.6f} AUPRC={float(final['aupr']):.6f}"
+    )
+print(f"macro AUROC={macro['auroc']['mean']:.6f} AUPRC={macro['aupr']['mean']:.6f}")
 print("all-dataset aggregate:", json_path)
+print("human-readable summary:", markdown_path)
 PY
 
 printf '\nAll ProcessBench datasets complete. Summary: %s\n' "${SUMMARY_ROOT}"

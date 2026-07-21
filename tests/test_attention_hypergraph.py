@@ -191,6 +191,21 @@ def test_length_robust_sparsifiers_are_explicit_and_can_rescue_subthreshold_rows
     faithful = build_attention_hypergraph(attention, token_ids, response_idx)
     assert faithful.num_hyperedges == 0
 
+    with pytest.raises(ValueError, match="requires top_k"):
+        AttentionHypergraphConfig(source_selection="threshold_fallback_topk")
+    original_fallback = build_attention_hypergraph(
+        attention,
+        token_ids,
+        response_idx,
+        config=AttentionHypergraphConfig(
+            threshold=0.05,
+            source_selection="threshold_fallback_topk",
+            top_k=2,
+            min_sources=2,
+        ),
+    )
+    assert _edge_members(original_fallback) == [[1, 2, 3], [2, 3, 4]]
+
     top_k = build_attention_hypergraph(
         attention,
         token_ids,
@@ -265,7 +280,7 @@ def test_hidden_content_and_attention_diagonal_are_independent_node_feature_cont
             config=AttentionHypergraphConfig(node_feature_mode="activation_only"),
         )
 
-def test_extracted_layer_head_ids_are_not_silently_renumbered():
+def test_extracted_layer_head_ids_stay_global_but_faithful_edge_attr_is_local():
     attention, token_ids, response_idx = _trace()
     graph = build_attention_hypergraph(
         attention,
@@ -279,7 +294,9 @@ def test_extracted_layer_head_ids_are_not_silently_renumbered():
     )
     np.testing.assert_array_equal(graph.he_layer, [5, 5])
     np.testing.assert_array_equal(graph.he_head, [3, 3])
-    np.testing.assert_allclose(graph.he_attr[:, 2], 23 / 31)
+    # The original computes this field from the flattened stored attention
+    # tensor. Global model ids remain available separately in he_layer/he_head.
+    np.testing.assert_allclose(graph.he_attr[:, 2], 0.0)
     validate_attention_hypergraph(graph)
 
 
@@ -824,6 +841,9 @@ def test_strict_response_pipeline_uses_exact_full_forward_by_default():
     all_datasets = Path(
         "hypergraph/attention/scripts/run_all_processbench_response_pipeline.sh"
     ).read_text(encoding="utf-8")
+    fixed_aggregate = Path(
+        "hypergraph/attention/aggregate_fixed.py"
+    ).read_text(encoding="utf-8")
 
     assert 'MODE="${MODE:-model_parallel}"' in extractor
     assert 'QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-0}"' in extractor
@@ -854,13 +874,27 @@ def test_strict_response_pipeline_uses_exact_full_forward_by_default():
     assert '--mode "${MODE}"' in all_datasets
     assert '--generator-model "${GENERATOR_MODEL}"' in all_datasets
     assert 'cohort_suffix="_observer_all"' in all_datasets
-    assert "all_processbench_pipeline_request_v2" in all_datasets
+    assert "all_processbench_fixed_holdout_request_v1" in all_datasets
     assert '"preflight_sha256": preflight_sha256' in all_datasets
-    assert '"generator_test_aggregate"' in all_datasets
-    assert '"pooled_oof_test"' in pipeline
-    assert '"pooled_oof_test"' in all_datasets
-    assert '"macro_pooled_oof_test"' in all_datasets
-    assert "Wrapper hashes are provenance, not experiment identity" in all_datasets
+    assert 'SPLIT_MODE="${SPLIT_MODE:-fixed_holdout}"' in pipeline
+    assert 'THRESHOLD="${THRESHOLD:-0.05}"' in pipeline
+    assert 'TRACE_EQUIVALENCE_THRESHOLD="${TRACE_EQUIVALENCE_THRESHOLD:-0.01}"' in pipeline
+    assert '"chunk_equivalence_threshold=${TRACE_EQUIVALENCE_THRESHOLD}"' in pipeline
+    assert '--chunk-equivalence-threshold "${TRACE_EQUIVALENCE_THRESHOLD}"' in pipeline
+    assert 'SOURCE_SELECTION="${SOURCE_SELECTION:-threshold_fallback_topk}"' in pipeline
+    assert 'TOP_K="${TOP_K:-16}"' in pipeline
+    assert 'MIN_SOURCES="${MIN_SOURCES:-2}"' in pipeline
+    assert 'TOPOLOGY_HEADS="${TOPOLOGY_HEADS:-0}"' in pipeline
+    assert '--selected-heads "${TOPOLOGY_HEADS}"' in pipeline
+    assert '--split-mode fixed_holdout' in pipeline
+    assert '"partition_group_ids"' not in pipeline  # written by train.py, not fabricated in shell
+    assert "-m hypergraph.attention.aggregate_fixed" in pipeline
+    assert '"final_test": dict(test)' in fixed_aggregate
+    assert '"generator_final_test"' in all_datasets
+    assert '"macro_final_test"' in all_datasets
+    assert '"node_features": "self-attention diagonal over all extracted heads"' in all_datasets
+    assert "fold${fold}" not in pipeline
+    assert "pooled_oof_test" not in pipeline
 
 
 def test_extraction_has_no_artificial_sequence_cap_by_default():
@@ -1787,6 +1821,118 @@ def test_split_protocol_never_discards_or_resplits_official_partitions():
     cv_args = Namespace(allow_resplit_official_data=False)
     with pytest.raises(SystemExit, match="official split metadata"):
         _group_cv_split(traces[:3], cv_args)
+
+
+def test_fixed_holdout_is_deterministic_group_disjoint_and_single_test():
+    from argparse import Namespace
+
+    from hypergraph.attention.train import _TraceMeta, _fixed_holdout_split
+
+    traces = [
+        _TraceMeta(
+            trace_id=f"trace-{index}",
+            group_id=f"problem-{index // 2}",
+            group_is_fallback=False,
+            split=None,
+            response_label=(index // 2) % 2,
+            gold_step=(-1 if (index // 2) % 2 == 0 else (index // 7) % 4),
+            num_steps=4,
+            num_response_tokens=20 + (index % 17),
+            generator_model="model",
+        )
+        for index in range(120)
+    ]
+    args = Namespace(
+        allow_resplit_official_data=False,
+        allow_trace_as_group=False,
+        split_seed=41,
+        val_ratio=0.1,
+        test_ratio=0.2,
+    )
+
+    first = _fixed_holdout_split(traces, args)
+    second = _fixed_holdout_split(traces, args)
+    train, val, test, info = first
+
+    assert first == second
+    assert info["mode"] == "fixed_holdout"
+    assert info["split_seed"] == 41
+    assert set(info["partition_trace_ids"]) == {"train", "validation", "test"}
+    assert set(info["partition_group_ids"]) == {"train", "validation", "test"}
+    manifest_groups = [
+        set(info["partition_group_ids"][name])
+        for name in ("train", "validation", "test")
+    ]
+    assert not (manifest_groups[0] & manifest_groups[1])
+    assert not (manifest_groups[0] & manifest_groups[2])
+    assert not (manifest_groups[1] & manifest_groups[2])
+    assert set(train).isdisjoint(val)
+    assert set(train).isdisjoint(test)
+    assert set(val).isdisjoint(test)
+    assert sorted(train + val + test) == list(range(len(traces)))
+    for left, right in ((train, val), (train, test), (val, test)):
+        assert {
+            traces[index].group_id for index in left
+        }.isdisjoint({traces[index].group_id for index in right})
+    assert 0.05 <= len(val) / len(traces) <= 0.15
+    assert 0.15 <= len(test) / len(traces) <= 0.25
+    for partition in (train, val, test):
+        assert {traces[index].response_label for index in partition} == {0, 1}
+
+
+def test_fixed_holdout_aggregation_reads_one_test_and_never_scans_folds(tmp_path):
+    import json
+
+    from hypergraph.attention.aggregate_fixed import aggregate_fixed_run
+
+    root = tmp_path / "experiment"
+    run = root / "fixed_seed17"
+    run.mkdir(parents=True)
+    split = {
+        "mode": "fixed_holdout",
+        "split_seed": 17,
+        "partition_group_ids": {
+            "train": ["p0"],
+            "validation": ["p1"],
+            "test": ["p2"],
+        },
+    }
+    (run / "results.json").write_text(
+        json.dumps(
+            {
+                "best_epoch": 3,
+                "validation_monitor": {"name": "aupr", "value": 0.7},
+                "partition_sizes": {"train": 7, "val": 1, "test": 2},
+                "metrics": {
+                    "test": {
+                        "n": 2,
+                        "positives": 1,
+                        "auroc": 0.75,
+                        "aupr": 0.8,
+                        "accuracy_0.5": 0.5,
+                    }
+                },
+                "trace_detection_by_generator": {"test": {"model": {"n": 2}}},
+                "resolved": {"split": split},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run / "predictions_test.csv").write_text(
+        "trace_id,label,probability\na,0,0.2\nb,1,0.8\n", encoding="utf-8"
+    )
+
+    summary = aggregate_fixed_run(root, run, write_outputs=True)
+
+    assert summary["schema"] == "fixed_holdout_response_test_v1"
+    assert summary["final_test"]["auroc"] == 0.75
+    assert (root / "aggregate_results.json").is_file()
+    assert (root / "predictions_test.csv").is_file()
+    assert json.loads((root / "split_manifest.json").read_text())["mode"] == "fixed_holdout"
+
+    (run / "predictions_test.csv").unlink()
+    with pytest.raises(FileNotFoundError, match="fixed held-out prediction"):
+        aggregate_fixed_run(root, run, write_outputs=False)
 
 
 def test_json_config_is_strict_and_never_overrides_explicit_cli(tmp_path):

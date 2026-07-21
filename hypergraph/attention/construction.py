@@ -257,6 +257,12 @@ def _select_sources(
                 config.top_k,
             )
         return sources
+    if config.source_selection == "threshold_fallback_topk":
+        sources = candidates[scores > float(config.threshold)]
+        if len(sources):
+            return sources
+        positive = scores > 0.0
+        return _top_k_sources(candidates[positive], scores[positive], config.top_k)
     if config.source_selection == "top_k_only":
         return _top_k_sources(candidates, scores, config.top_k)
     if config.source_selection == "cumulative_mass":
@@ -359,9 +365,12 @@ def build_attention_hyperedges(
         for head in heads:
             model_head = int(head_ids[head])
             head_normalized = float(model_head) / float(max(1, total_heads - 1))
-            flattened_head = model_layer * total_heads + model_head
+            # The local original flattens the stored [L,H,...] tensor before
+            # constructing this three-column edge attribute. Preserve that
+            # local channel index; global model ids remain in he_layer/he_head.
+            flattened_head = layer * n_heads + head
             flattened_head_normalized = float(flattened_head) / float(
-                max(1, total_layers * total_heads - 1)
+                max(1, n_layers * n_heads - 1)
             )
             matrix = value[layer, head]
             for receiver in range(response_idx, n_tokens):
@@ -693,12 +702,26 @@ def validate_attention_hypergraph(
         if not set(graph.he_head.tolist()).issubset(selected_head_ids):
             raise ValueError("he_head contains an unselected model head id")
         if cfg.edge_attr_mode == "faithful":
-            expected_flattened = (
-                graph.he_layer.astype(np.float64) * int(graph.num_model_heads)
-                + graph.he_head.astype(np.float64)
-            ) / float(max(1, int(graph.num_model_layers) * int(graph.num_model_heads) - 1))
+            layer_positions = {
+                int(value): position
+                for position, value in enumerate(graph.attention_layer_ids.tolist())
+            }
+            head_positions = {
+                int(value): position
+                for position, value in enumerate(graph.attention_head_ids.tolist())
+            }
+            expected_flattened = np.asarray(
+                [
+                    layer_positions[int(layer)] * len(head_positions)
+                    + head_positions[int(head)]
+                    for layer, head in zip(graph.he_layer, graph.he_head)
+                ],
+                dtype=np.float64,
+            ) / float(max(1, len(layer_positions) * len(head_positions) - 1))
             if not np.allclose(graph.he_attr[:, 2], expected_flattened):
-                raise ValueError("flattened layer-head edge attribute disagrees with axis metadata")
+                raise ValueError(
+                    "flattened local layer-head edge attribute disagrees with stored axes"
+                )
         else:
             expected_layer = graph.he_layer.astype(np.float64) / float(
                 max(1, int(graph.num_model_layers) - 1)

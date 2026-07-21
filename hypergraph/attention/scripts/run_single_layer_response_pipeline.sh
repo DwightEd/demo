@@ -10,14 +10,14 @@ usage() {
   cat <<'EOF'
 Usage:
   bash hypergraph/attention/scripts/run_single_layer_response_pipeline.sh \
-    [--layer 14] [--dataset omnimath] [--folds 5] [--seeds 17] \
+    [--layer 14] [--dataset omnimath] [--seed 17] \
     [--generator-model Llama-3.1-8B-Instruct] [--extract-only]
 
 The pipeline performs:
   1. strict one-layer, all-head prompt+response attention extraction;
   2. trace-cohort audit and graph preflight;
-  3. response_bce HyperCHARM training over problem-disjoint folds;
-  4. aggregation of held-out response metrics.
+  3. one deterministic problem-disjoint train/validation/test split;
+  4. validation-selected HyperCHARM training and one final held-out test.
 
 High-level options:
   --input PATH       ProcessBench JSON/JSONL source; defaults to
@@ -26,8 +26,8 @@ High-level options:
                      /share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct
   --layer ID         zero-based Transformer block id (default: 14)
   --dataset NAME     output tag (default: omnimath)
-  --folds N          group-CV folds (default: 5)
-  --seeds LIST       comma/space-separated seeds (default: 17)
+  --seed N           model initialization seed (default: 17)
+  --seeds N          compatibility alias for --seed; exactly one value is required
   --generator-model TAG
                      exact ProcessBench generator tag selected before training;
                      a complete cache is reused, otherwise only matches are forwarded
@@ -37,20 +37,24 @@ High-level options:
   --help             show this message
 
 Method environment variables and defaults:
-  THRESHOLD=0.01                 SOURCE_SELECTION=threshold
-  SOURCE_SCOPE=all_past          MIN_SOURCES=1
+  THRESHOLD=0.05                 SOURCE_SELECTION=threshold_fallback_topk
+  TOP_K=16                       MIN_SOURCES=2
+  SOURCE_SCOPE=all_past
+  TOPOLOGY_HEADS=0               node features still retain all extracted heads
   PROPAGATION_MODE=symmetric     INCIDENCE_WEIGHT_MODE=uniform
   EDGE_ATTR_MODE=faithful        NODE_FEATURE_MODE=attention_diagonal
   MESSAGE_OPERATOR=hypergraph    PREPROCESSING=per_graph_zscore
   POOLING=mean                   MODEL_LAYERS=2
   HIDDEN_DIM=128                 EPOCHS=50
-  PATIENCE=5                     SPLIT_MODE=group_cv
+  PATIENCE=5                     SPLIT_MODE=fixed_holdout
+  SPLIT_SEED=17                  VAL_RATIO=0.1 TEST_RATIO=0.2
   LEARNING_RATE=3e-4             WEIGHT_DECAY=1e-3
   DROPOUT=0.25                   MONITOR=aupr
 
 Runtime environment variables:
   PYTHON_BIN=python              GPU0=0 GPU1=1 TRAIN_GPUS=0,1
   QUERY_CHUNK_SIZE=0             STORAGE_DTYPE=float32
+  TRACE_EQUIVALENCE_THRESHOLD=0.01  cache-validation setting, not graph tau
   MAX_SEQ_LEN=0                 0 disables the user cap; model context still applies
   MAX_ATTENTION_GIB=24          dense tensor allocation guard, not a token cap
   REPLAY_MODE=observer           PROMPT_STYLE=plain
@@ -133,7 +137,6 @@ INPUT="${INPUT:-}"
 MODEL="${MODEL:-/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct}"
 LAYER="${LAYER:-14}"
 DATASET_TAG="${DATASET_TAG:-omnimath}"
-FOLDS="${FOLDS:-5}"
 SEEDS="${SEEDS:-17}"
 LIMIT="${LIMIT:-}"
 MODE="${MODE:-model_parallel}"
@@ -146,7 +149,8 @@ while (($#)); do
     --model) MODEL="${2:?--model requires a path}"; shift 2 ;;
     --layer) LAYER="${2:?--layer requires an integer}"; shift 2 ;;
     --dataset) DATASET_TAG="${2:?--dataset requires a name}"; shift 2 ;;
-    --folds) FOLDS="${2:?--folds requires an integer}"; shift 2 ;;
+    --folds) die "--folds was removed: this entrypoint now performs one fixed held-out test" ;;
+    --seed) SEEDS="${2:?--seed requires an integer}"; shift 2 ;;
     --seeds) SEEDS="${2:?--seeds requires a list}"; shift 2 ;;
     --generator-model) GENERATOR_MODEL="${2:?--generator-model requires a tag}"; shift 2 ;;
     --limit) LIMIT="${2:?--limit requires an integer}"; shift 2 ;;
@@ -159,8 +163,6 @@ done
 
 INPUT="${INPUT:-${REPO_ROOT}/data/hf_datasets/ProcessBench/${DATASET_TAG}.json}"
 [[ "${LAYER}" =~ ^[0-9]+$ ]] || die "--layer must be a non-negative integer"
-[[ "${FOLDS}" =~ ^[0-9]+$ ]] && ((FOLDS >= 3)) || \
-  die "--folds must be an integer >= 3"
 [[ -z "${LIMIT}" || "${LIMIT}" =~ ^[1-9][0-9]*$ ]] || die "--limit must be positive"
 [[ "${DATASET_TAG}" =~ ^[A-Za-z0-9._-]+$ ]] || die "--dataset contains unsafe characters"
 [[ -z "${GENERATOR_MODEL}" || "${GENERATOR_MODEL}" =~ ^[A-Za-z0-9._-]+$ ]] || \
@@ -182,6 +184,7 @@ GPU0="${GPU0:-0}"
 GPU1="${GPU1:-1}"
 TRAIN_GPUS="${TRAIN_GPUS:-${TRAIN_GPU:-${GPU0},${GPU1}}}"
 QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-0}"
+TRACE_EQUIVALENCE_THRESHOLD="${TRACE_EQUIVALENCE_THRESHOLD:-0.01}"
 STORAGE_DTYPE="${STORAGE_DTYPE:-float32}"
 DTYPE="${DTYPE:-auto}"
 ARCHIVE_COMPRESSION="${ARCHIVE_COMPRESSION:-none}"
@@ -192,10 +195,12 @@ PROMPT_STYLE="${PROMPT_STYLE:-plain}"
 [[ "${REPLAY_MODE}" == "observer" ]] || \
   die "this audited pipeline supports REPLAY_MODE=observer only"
 
-THRESHOLD="${THRESHOLD:-0.01}"
-SOURCE_SELECTION="${SOURCE_SELECTION:-threshold}"
+THRESHOLD="${THRESHOLD:-0.05}"
+SOURCE_SELECTION="${SOURCE_SELECTION:-threshold_fallback_topk}"
+TOP_K="${TOP_K:-16}"
 SOURCE_SCOPE="${SOURCE_SCOPE:-all_past}"
-MIN_SOURCES="${MIN_SOURCES:-1}"
+MIN_SOURCES="${MIN_SOURCES:-2}"
+TOPOLOGY_HEADS="${TOPOLOGY_HEADS:-0}"
 PROPAGATION_MODE="${PROPAGATION_MODE:-symmetric}"
 INCIDENCE_WEIGHT_MODE="${INCIDENCE_WEIGHT_MODE:-uniform}"
 EDGE_ATTR_MODE="${EDGE_ATTR_MODE:-faithful}"
@@ -207,7 +212,10 @@ MODEL_LAYERS="${MODEL_LAYERS:-2}"
 HIDDEN_DIM="${HIDDEN_DIM:-128}"
 EPOCHS="${EPOCHS:-50}"
 PATIENCE="${PATIENCE:-5}"
-SPLIT_MODE="${SPLIT_MODE:-group_cv}"
+SPLIT_MODE="${SPLIT_MODE:-fixed_holdout}"
+SPLIT_SEED="${SPLIT_SEED:-17}"
+VAL_RATIO="${VAL_RATIO:-0.1}"
+TEST_RATIO="${TEST_RATIO:-0.2}"
 LEARNING_RATE="${LEARNING_RATE:-3e-4}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-3}"
 DROPOUT="${DROPOUT:-0.25}"
@@ -228,6 +236,8 @@ for index in "${!TRAIN_GPU_VALUES[@]}"; do
 done
 read -r -a SEED_VALUES <<< "${SEEDS//,/ }"
 ((${#SEED_VALUES[@]})) || die "--seeds resolved to an empty list"
+(( ${#SEED_VALUES[@]} == 1 )) || \
+  die "the fixed-test entrypoint requires exactly one model seed"
 for index in "${!SEED_VALUES[@]}"; do
   seed="${SEED_VALUES[$index]}"
   [[ "${seed}" =~ ^(0|[1-9][0-9]*)$ ]] || \
@@ -238,8 +248,17 @@ for index in "${!SEED_VALUES[@]}"; do
   done
 done
 
-[[ "${SOURCE_SELECTION}" == "threshold" ]] || \
-  die "this audited entrypoint supports SOURCE_SELECTION=threshold only"
+[[ "${SOURCE_SELECTION}" == "threshold_fallback_topk" ]] || \
+  die "the original-aligned entrypoint requires SOURCE_SELECTION=threshold_fallback_topk"
+[[ "${TOP_K}" =~ ^[1-9][0-9]*$ ]] || die "TOP_K must be a positive integer"
+[[ "${SPLIT_MODE}" == "fixed_holdout" ]] || \
+  die "this entrypoint requires SPLIT_MODE=fixed_holdout; use train.py directly for CV diagnostics"
+[[ "${SPLIT_SEED}" =~ ^(0|[1-9][0-9]*)$ ]] || \
+  die "SPLIT_SEED must be a canonical non-negative integer"
+[[ "${VAL_RATIO}" =~ ^0?\.[0-9]+$ ]] || die "VAL_RATIO must be a decimal in (0,1)"
+[[ "${TEST_RATIO}" =~ ^0?\.[0-9]+$ ]] || die "TEST_RATIO must be a decimal in (0,1)"
+[[ "${TOPOLOGY_HEADS}" == "all" || "${TOPOLOGY_HEADS}" =~ ^[0-9]+(,[0-9]+)*$ ]] || \
+  die "TOPOLOGY_HEADS must be all or a comma-separated list of non-negative head ids"
 [[ "${NODE_FEATURE_MODE}" == "attention_diagonal" ]] || \
   die "this attention-only entrypoint requires NODE_FEATURE_MODE=attention_diagonal"
 [[ "${QUERY_CHUNK_SIZE}" =~ ^[0-9]+$ ]] || \
@@ -308,7 +327,8 @@ elif [[ -n "${GENERATOR_MODEL}" ]]; then
 else
   TRACE_ROOT="${DEFAULT_TRACE_ROOT}"
 fi
-RUN_ROOT="${RUN_ROOT:-${REPO_ROOT}/outputs/attention_hypergraph/${DATASET_TAG}_response_layer${LAYER}${LIMIT_SUFFIX}${COHORT_SUFFIX}}"
+PROTOCOL_SUFFIX="_fixed_original"
+RUN_ROOT="${RUN_ROOT:-${REPO_ROOT}/outputs/attention_hypergraph/${DATASET_TAG}_response_layer${LAYER}${LIMIT_SUFFIX}${COHORT_SUFFIX}${PROTOCOL_SUFFIX}}"
 
 read -r SOURCE_INPUT_SHA256 INPUT_SHA256 EXTRACTION_CODE_SHA256 TRAINING_CODE_SHA256 < <("${PYTHON_BIN}" - "${SOURCE_INPUT}" "${INPUT}" <<'PY'
 import hashlib
@@ -339,6 +359,7 @@ extraction_paths = [
     Path("hypergraph/attention/scripts/extract_dual_gpu.sh"),
 ]
 training_paths = [
+    Path("hypergraph/attention/aggregate_fixed.py"),
     Path("hypergraph/attention/trace_contract.py"),
     Path("hypergraph/attention/data.py"),
     Path("hypergraph/attention/schema.py"),
@@ -402,11 +423,15 @@ printf 'run root:                %s\n' "${RUN_ROOT}"
 printf 'generator cohort:        %s\n' "${GENERATOR_MODEL:-all generators}"
 printf 'source/receiver:         %s / response-only receivers\n' "${SOURCE_SCOPE}"
 printf 'objective/pooling:       response_bce / %s\n' "${POOLING}"
-printf 'topology:                %s, threshold=%s, min_sources=%s\n' \
-  "${SOURCE_SELECTION}" "${THRESHOLD}" "${MIN_SOURCES}"
+printf 'topology:                %s, threshold=%s, fallback_top_k=%s, min_sources=%s, heads=%s\n' \
+  "${SOURCE_SELECTION}" "${THRESHOLD}" "${TOP_K}" "${MIN_SOURCES}" "${TOPOLOGY_HEADS}"
 printf 'propagation/incidence:   %s / %s\n' "${PROPAGATION_MODE}" "${INCIDENCE_WEIGHT_MODE}"
 printf 'node/operator:           %s / %s\n' "${NODE_FEATURE_MODE}" "${MESSAGE_OPERATOR}"
-printf 'split/folds/seeds:       %s / %s / %s\n\n' "${SPLIT_MODE}" "${FOLDS}" "${SEEDS}"
+printf 'split:                   %s seed=%s train/val/test=%.3f/%.3f/%.3f\n' \
+  "${SPLIT_MODE}" "${SPLIT_SEED}" \
+  "$("${PYTHON_BIN}" -c "print(1-float('${VAL_RATIO}')-float('${TEST_RATIO}'))")" \
+  "${VAL_RATIO}" "${TEST_RATIO}"
+printf 'model seed:              %s\n\n' "${SEEDS}"
 if [[ "${PROPAGATION_MODE}" == "symmetric" || "${PREPROCESSING}" == "per_graph_zscore" ]]; then
   printf '%s\n\n' \
     'scope:                   offline full-response (explicitly recorded by train.py)'
@@ -441,7 +466,7 @@ read -r TRACE_GATE_MODE TRACE_REQUEST_SHA256 LEGACY_METHOD_CODE_SHA256 < <(
   "max_seq_len=${MAX_SEQ_LEN}" \
   "replay_mode=${REPLAY_MODE}" \
   "prompt_style=${PROMPT_STYLE}" \
-  "chunk_equivalence_threshold=${THRESHOLD}" \
+  "chunk_equivalence_threshold=${TRACE_EQUIVALENCE_THRESHOLD}" \
   "${TRACE_SOURCE_ARGS[@]}"
 )
 printf 'trace request gate:       %s (%s)\n' \
@@ -471,7 +496,7 @@ else
     bash "${SCRIPT_DIR}/extract_dual_gpu.sh" \
       --attention_layers "${LAYER}" \
       --attention_heads all \
-      --chunk-equivalence-threshold "${THRESHOLD}"
+      --chunk-equivalence-threshold "${TRACE_EQUIVALENCE_THRESHOLD}"
 fi
 
 if [[ "${MODE}" == "data_parallel" ]]; then
@@ -523,8 +548,9 @@ fi
 
 GRAPH_ARGS=(
   --selected-layers "${LAYER}"
-  --selected-heads all
+  --selected-heads "${TOPOLOGY_HEADS}"
   --threshold "${THRESHOLD}"
+  --top-k "${TOP_K}"
   --source-selection "${SOURCE_SELECTION}"
   --source-scope "${SOURCE_SCOPE}"
   --min-sources "${MIN_SOURCES}"
@@ -599,9 +625,11 @@ guard_config "${RUN_CONFIG_PATH}" \
   "selection_limit=${LIMIT}" \
   "trace_extraction_limit=${TRACE_EXTRACTION_LIMIT}" \
   "threshold=${THRESHOLD}" \
+  "top_k=${TOP_K}" \
   "source_selection=${SOURCE_SELECTION}" \
   "source_scope=${SOURCE_SCOPE}" \
   "min_sources=${MIN_SOURCES}" \
+  "topology_heads=${TOPOLOGY_HEADS}" \
   "propagation_mode=${PROPAGATION_MODE}" \
   "incidence_weight_mode=${INCIDENCE_WEIGHT_MODE}" \
   "edge_attr_mode=${EDGE_ATTR_MODE}" \
@@ -619,8 +647,10 @@ guard_config "${RUN_CONFIG_PATH}" \
   "patience=${PATIENCE}" \
   "monitor=${MONITOR}" \
   "split_mode=${SPLIT_MODE}" \
+  "split_seed=${SPLIT_SEED}" \
+  "val_ratio=${VAL_RATIO}" \
+  "test_ratio=${TEST_RATIO}" \
   "allow_resplit_official_data=${ALLOW_RESPLIT_OFFICIAL_DATA}" \
-  "folds=${FOLDS}" \
   "seeds=${SEEDS}"
 
 "${PYTHON_BIN}" - "${PREFLIGHT_CANDIDATE}" "${RUN_ROOT}/preflight.json" <<'PY'
@@ -637,236 +667,59 @@ PREFLIGHT_CANDIDATE=""
 trap - INT TERM EXIT
 
 mkdir -p "${RUN_ROOT}/logs"
-
-train_pids=()
-train_labels=()
-train_logs=()
-training_job_index=0
-
-cleanup_training_jobs() {
-  local pid
-  for pid in "${train_pids[@]:-}"; do
-    if command -v pkill >/dev/null 2>&1; then
-      pkill -TERM -P "${pid}" 2>/dev/null || true
-    fi
-    kill "${pid}" 2>/dev/null || true
-  done
-}
-trap cleanup_training_jobs INT TERM EXIT
-
-wait_for_training_wave() {
-  local status=0
-  local index
-  for index in "${!train_pids[@]}"; do
-    if wait "${train_pids[$index]}"; then
-      printf 'Completed %s\n' "${train_labels[$index]}"
-    else
-      printf 'FAILED %s; tail of %s:\n' \
-        "${train_labels[$index]}" "${train_logs[$index]}" >&2
-      tail -n 40 "${train_logs[$index]}" >&2 || true
-      status=1
-    fi
-  done
-  train_pids=()
-  train_labels=()
-  train_logs=()
-  [[ "${status}" -eq 0 ]] || die "at least one parallel fold training job failed"
-}
-
-for seed in "${SEED_VALUES[@]}"; do
-  for ((fold = 0; fold < FOLDS; fold++)); do
-    RUN_DIR="${RUN_ROOT}/fold${fold}_seed${seed}"
-    LOG_FILE="${RUN_ROOT}/logs/fold${fold}_seed${seed}.log"
-    if [[ -f "${RUN_DIR}/results.json" ]] && is_true "${REUSE_RUNS}"; then
-      printf 'Reusing completed run: %s\n' "${RUN_DIR}"
-      continue
-    fi
-    TRAIN_ARGS=(
-      train
-      "${TRACE_INPUTS[@]}"
-      --objective response_bce
-      "${GRAPH_ARGS[@]}"
-      "${COHORT_ARGS[@]}"
-      --message-operator "${MESSAGE_OPERATOR}"
-      --preprocessing "${PREPROCESSING}"
-      --pooling "${POOLING}"
-      --split-mode "${SPLIT_MODE}"
-      --folds "${FOLDS}"
-      --fold-index "${fold}"
-      --model-layers "${MODEL_LAYERS}"
-      --hidden-dim "${HIDDEN_DIM}"
-      --dropout "${DROPOUT}"
-      --learning-rate "${LEARNING_RATE}"
-      --weight-decay "${WEIGHT_DECAY}"
-      --epochs "${EPOCHS}"
-      --patience "${PATIENCE}"
-      --monitor "${MONITOR}"
-      --seed "${seed}"
-      --device cuda:0
-      --output "${RUN_DIR}"
-    )
-    TRAIN_ARGS+=("${AUDIT_ARGS[@]}")
-    if [[ "${PROPAGATION_MODE}" == "symmetric" || "${PREPROCESSING}" == "per_graph_zscore" ]]; then
-      TRAIN_ARGS+=(--allow-offline-full-context)
-    fi
-    if is_true "${ALLOW_RESPLIT_OFFICIAL_DATA}"; then
-      TRAIN_ARGS+=(--allow-resplit-official-data)
-    fi
-    if is_true "${OVERWRITE_RUNS}"; then
-      TRAIN_ARGS+=(--overwrite)
-    elif [[ -d "${RUN_DIR}" ]] && find "${RUN_DIR}" -mindepth 1 -print -quit | grep -q .; then
-      die "partial run directory exists; set OVERWRITE_RUNS=1 or remove it: ${RUN_DIR}"
-    fi
-    TRAIN_DEVICE="${TRAIN_GPU_VALUES[$((training_job_index % ${#TRAIN_GPU_VALUES[@]}))]}"
-    printf '\nTraining fold=%s seed=%s on physical GPU %s -> %s\n' \
-      "${fold}" "${seed}" "${TRAIN_DEVICE}" "${RUN_DIR}"
-    (
-      set -o pipefail
-      PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES="${TRAIN_DEVICE}" "${PYTHON_BIN}" \
-        -m hypergraph.attention.train "${TRAIN_ARGS[@]}" \
-        2>&1 | tee "${LOG_FILE}"
-    ) &
-    train_pids+=("$!")
-    train_labels+=("fold=${fold} seed=${seed} gpu=${TRAIN_DEVICE}")
-    train_logs+=("${LOG_FILE}")
-    ((training_job_index += 1))
-    if ((${#train_pids[@]} >= ${#TRAIN_GPU_VALUES[@]})); then
-      wait_for_training_wave
-    fi
-  done
-done
-if ((${#train_pids[@]})); then
-  wait_for_training_wave
+seed="${SEED_VALUES[0]}"
+RUN_DIR="${RUN_ROOT}/fixed_seed${seed}"
+LOG_FILE="${RUN_ROOT}/logs/fixed_seed${seed}.log"
+if [[ -f "${RUN_DIR}/results.json" ]] && is_true "${REUSE_RUNS}"; then
+  printf 'Reusing completed fixed-holdout run: %s\n' "${RUN_DIR}"
+else
+  TRAIN_ARGS=(
+    train
+    "${TRACE_INPUTS[@]}"
+    --objective response_bce
+    "${GRAPH_ARGS[@]}"
+    "${COHORT_ARGS[@]}"
+    --message-operator "${MESSAGE_OPERATOR}"
+    --preprocessing "${PREPROCESSING}"
+    --pooling "${POOLING}"
+    --split-mode fixed_holdout
+    --split-seed "${SPLIT_SEED}"
+    --val-ratio "${VAL_RATIO}"
+    --test-ratio "${TEST_RATIO}"
+    --model-layers "${MODEL_LAYERS}"
+    --hidden-dim "${HIDDEN_DIM}"
+    --dropout "${DROPOUT}"
+    --learning-rate "${LEARNING_RATE}"
+    --weight-decay "${WEIGHT_DECAY}"
+    --epochs "${EPOCHS}"
+    --patience "${PATIENCE}"
+    --monitor "${MONITOR}"
+    --seed "${seed}"
+    --device cuda:0
+    --output "${RUN_DIR}"
+  )
+  TRAIN_ARGS+=("${AUDIT_ARGS[@]}")
+  if [[ "${PROPAGATION_MODE}" == "symmetric" || "${PREPROCESSING}" == "per_graph_zscore" ]]; then
+    TRAIN_ARGS+=(--allow-offline-full-context)
+  fi
+  if is_true "${ALLOW_RESPLIT_OFFICIAL_DATA}"; then
+    TRAIN_ARGS+=(--allow-resplit-official-data)
+  fi
+  if is_true "${OVERWRITE_RUNS}"; then
+    TRAIN_ARGS+=(--overwrite)
+  elif [[ -d "${RUN_DIR}" ]] && find "${RUN_DIR}" -mindepth 1 -print -quit | grep -q .; then
+    die "partial run directory exists; set OVERWRITE_RUNS=1 or remove it: ${RUN_DIR}"
+  fi
+  TRAIN_DEVICE="${TRAIN_GPU_VALUES[0]}"
+  printf '\nTraining fixed split seed=%s model seed=%s on physical GPU %s -> %s\n' \
+    "${SPLIT_SEED}" "${seed}" "${TRAIN_DEVICE}" "${RUN_DIR}"
+  PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES="${TRAIN_DEVICE}" "${PYTHON_BIN}" \
+    -m hypergraph.attention.train "${TRAIN_ARGS[@]}" \
+    2>&1 | tee "${LOG_FILE}"
 fi
-trap - INT TERM EXIT
 
-"${PYTHON_BIN}" - "${RUN_ROOT}" "${FOLDS}" "${SEEDS}" <<'PY'
-import json
-import math
-import os
-import statistics
-import sys
-from pathlib import Path
-
-from hypergraph.attention.aggregate_oof import aggregate_oof_run
-
-root = Path(sys.argv[1])
-folds = int(sys.argv[2])
-seeds = [int(value) for value in sys.argv[3].replace(",", " ").split()]
-expected_runs = [
-    f"fold{fold}_seed{seed}" for seed in seeds for fold in range(folds)
-]
-observed_paths = {
-    path.parent.name: path
-    for path in sorted(root.glob("fold*_seed*/results.json"))
-}
-missing = sorted(set(expected_runs) - set(observed_paths))
-extra = sorted(set(observed_paths) - set(expected_runs))
-if missing or extra:
-    raise SystemExit(
-        f"fold result set mismatch: missing={missing}, unexpected={extra}"
-    )
-records = []
-generator_records = {}
-metric_names = ("auroc", "aupr", "accuracy_0.5")
-for run_name in expected_runs:
-    path = observed_paths[run_name]
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    test = payload.get("metrics", {}).get("test", {})
-    metric_values = {}
-    for key in metric_names:
-        value = test.get(key)
-        if value is None or not math.isfinite(float(value)):
-            raise SystemExit(f"run {run_name} has undefined/non-finite test metric {key}")
-        metric_values[key] = float(value)
-    records.append(
-        {
-            "run": path.parent.name,
-            "best_epoch": payload.get("best_epoch"),
-            **metric_values,
-        }
-    )
-    grouped = payload.get("trace_detection_by_generator", {}).get("test")
-    if not isinstance(grouped, dict):
-        raise SystemExit(f"run {run_name} lacks test trace_detection_by_generator")
-    for generator, metrics in grouped.items():
-        if not isinstance(metrics, dict):
-            raise SystemExit(f"run {run_name} has invalid generator metrics for {generator!r}")
-        generator_records.setdefault(str(generator), []).append(
-            {
-                "run": run_name,
-                "n": metrics.get("n"),
-                "positives": metrics.get("positives"),
-                "prevalence": metrics.get("prevalence"),
-                **{key: metrics.get(key) for key in metric_names},
-            }
-        )
-if not records:
-    raise SystemExit("no completed results.json files found")
-
-# Fold means describe run-to-run variability.  The final test metric instead
-# concatenates the mutually exclusive held-out folds once per seed, then
-# averages each trace's independently held-out probabilities across seeds.
-pooled_oof = aggregate_oof_run(
-    root,
-    folds=folds,
-    seeds=seeds,
-    write_outputs=True,
-)
-
-aggregate = {}
-for key in metric_names:
-    values = [float(row[key]) for row in records]
-    aggregate[key] = {
-        "n": len(values),
-        "mean": statistics.fmean(values) if values else None,
-        "std": statistics.stdev(values) if len(values) > 1 else 0.0 if values else None,
-        "min": min(values) if values else None,
-        "max": max(values) if values else None,
-    }
-generator_aggregate = {}
-for generator, run_rows in sorted(generator_records.items()):
-    metric_aggregate = {}
-    for key in metric_names:
-        values = [
-            float(row[key])
-            for row in run_rows
-            if row.get(key) is not None and math.isfinite(float(row[key]))
-        ]
-        metric_aggregate[key] = {
-            "n_defined_runs": len(values),
-            "mean": statistics.fmean(values) if values else None,
-            "std": statistics.stdev(values) if len(values) > 1 else 0.0 if values else None,
-            "min": min(values) if values else None,
-            "max": max(values) if values else None,
-        }
-    generator_aggregate[generator] = {
-        "num_runs_present": len(run_rows),
-        "runs": run_rows,
-        "metrics": metric_aggregate,
-    }
-summary = {
-    "num_runs": len(records),
-    "expected_runs": expected_runs,
-    "runs": records,
-    "test_aggregate": aggregate,
-    "pooled_oof_test": pooled_oof,
-    "generator_test_aggregate": generator_aggregate,
-}
-destination = root / "aggregate_results.json"
-temporary = destination.with_suffix(".json.tmp")
-temporary.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-os.replace(temporary, destination)
-print(json.dumps(summary, indent=2, ensure_ascii=False))
-final = pooled_oof["seed_ensemble"]
-print("===== Final pooled OOF test =====")
-print(
-    f"traces={final['n']} positives={final['positives']} "
-    f"AUROC={final['auroc']:.6f} AUPRC={final['aupr']:.6f} "
-    f"accuracy@0.5={final['accuracy_0.5']:.6f}"
-)
-print("aggregate results:", destination)
-print("pooled OOF report:", root / "pooled_oof_results.json")
-PY
+"${PYTHON_BIN}" -m hypergraph.attention.aggregate_fixed \
+  --root "${RUN_ROOT}" \
+  --run "${RUN_DIR}"
 
 printf '\nPipeline complete. Results: %s\n' "${RUN_ROOT}"

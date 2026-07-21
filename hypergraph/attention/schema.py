@@ -42,7 +42,9 @@ _SOURCE_SCOPES = frozenset({"all_past", "prompt_only", "response_only"})
 _WEIGHT_MODES = frozenset({"uniform", "attention", "normalized_attention"})
 _PROPAGATION_MODES = frozenset({"symmetric", "receiver"})
 _EDGE_ATTR_MODES = frozenset({"faithful", "extended"})
-_SOURCE_SELECTION_MODES = frozenset({"threshold", "top_k_only", "cumulative_mass"})
+_SOURCE_SELECTION_MODES = frozenset(
+    {"threshold", "threshold_fallback_topk", "top_k_only", "cumulative_mass"}
+)
 _NODE_FEATURE_MODES = frozenset(
     {"attention_diagonal", "activation_only", "diagonal_plus_activation"}
 )
@@ -52,12 +54,12 @@ _NODE_FEATURE_MODES = frozenset(
 class AttentionHypergraphConfig:
     """Configuration for faithful attention-row hypergraph construction.
 
-    Defaults reproduce the local original method: an attention threshold of
-    ``0.01`` (the active value in ``processed_hypergraph.py``), all preceding
-    prompt/response tokens as candidate sources, the
-    receiver included as the hyperedge centre, uniform incidence weights, and
-    symmetric hypergraph propagation.  ``top_k`` and layer/head selection are
-    disabled by default so that they cannot silently change the original graph.
+    Library defaults preserve the earlier pure-threshold compatibility path.
+    The original-aligned response wrapper explicitly supplies the local
+    ``processed_hypergraph.py`` settings: ``threshold=0.05``,
+    ``source_selection='threshold_fallback_topk'``, ``top_k=16``, and
+    ``min_sources=2``. Layer/head selection remains explicit because the local
+    original contains an unconditional first-head ``break``.
 
     ``propagation_mode`` is construction metadata.  Both modes preserve the
     receiver index; a downstream model decides whether an edge updates all its
@@ -104,8 +106,11 @@ class AttentionHypergraphConfig:
             )
         if not np.isfinite(self.cumulative_mass) or not 0.0 < float(self.cumulative_mass) <= 1.0:
             raise ValueError("cumulative_mass must be finite and lie in (0, 1]")
-        if self.source_selection == "top_k_only" and self.top_k is None:
-            raise ValueError("source_selection='top_k_only' requires top_k")
+        if (
+            self.source_selection in {"top_k_only", "threshold_fallback_topk"}
+            and self.top_k is None
+        ):
+            raise ValueError(f"source_selection={self.source_selection!r} requires top_k")
         if self.source_selection == "cumulative_mass" and self.top_k is not None:
             raise ValueError(
                 "cumulative_mass selection cannot also set top_k; vary one sparsifier at a time"
