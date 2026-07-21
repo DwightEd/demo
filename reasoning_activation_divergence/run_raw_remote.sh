@@ -5,7 +5,10 @@ MODE="${1:-canonical-preflight}"
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 EXACT_MANIFEST_NAME="${EXACT_MANIFEST_NAME:-trace.raw_residual_stream.npz}"
+export PYTHONUNBUFFERED=1
 export PYTHONPATH="${REPO_ROOT}/reasoning_activation_divergence/src:${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
+"${PYTHON_BIN}" -c 'import os, sys; import sklearn; print(f"python={sys.executable}"); print("conda_env=" + os.environ.get("CONDA_DEFAULT_ENV", "<inactive>")); print(f"sklearn={sklearn.__version__}"); print(f"sklearn_path={sklearn.__file__}")'
 
 run_raw() {
   "${PYTHON_BIN}" -m functional_divergence.raw_residual_experiment "$@"
@@ -44,6 +47,7 @@ case "${MODE}" in
       extra=(--rank 16 --folds 5 --bootstrap 2000)
     fi
     for subset in gsm8k math olympiadbench omnimath; do
+      echo "[$(date '+%F %T')] dataset=${subset} mode=${MODE}"
       manifest="${data_root}/${subset}/selected/${EXACT_MANIFEST_NAME}"
       if [[ ! -f "${manifest}" ]]; then
         echo "missing verified raw-residual manifest: ${manifest}" >&2

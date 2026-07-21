@@ -22,3 +22,15 @@ def test_exact_pilot_samples_pairs_from_llama_filtered_full_manifests() -> None:
     assert 'data_root="${REPO_ROOT}/data/exact/processbench_observer_llama31_full"' in script
     assert "--response-generator llama3.1-8b" in script
     assert "extra=(--max-pairs 20" in script
+
+
+def test_remote_runner_checks_the_active_python_environment_and_runs_foreground() -> None:
+    runner = Path(__file__).resolve().parents[1] / "run_raw_remote.sh"
+    script = runner.read_text(encoding="utf-8")
+
+    assert '"${PYTHON_BIN}" -c' in script
+    assert "import sklearn" in script
+    assert "sys.executable" in script
+    assert "sklearn.__file__" in script
+    assert "PYTHONUNBUFFERED=1" in script
+    assert "screen -dmS" not in script

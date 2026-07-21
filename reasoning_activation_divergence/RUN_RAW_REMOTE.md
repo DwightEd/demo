@@ -1,120 +1,88 @@
-# Raw residual-stream remote runs
+# 远端真实残差流实验
 
-## What “full” and “pilot” mean
+## 数据范围
 
-There are two data families on the remote box.
-
-### Canonical ProcessBench full
-
-```text
-data/features/full_gsm8k.npz
-data/hidden/gsm8k/gsm8k-<row>.npy
-```
-
-- 395 ProcessBench observer chains;
-- first-error labels and step ranges are in `full_gsm8k.npz`;
-- each hidden shard is response-token state `[R,4,4096]`, layers
-  `[10,14,18,22]`, fp16 on disk;
-- depths are sparse, so depth operators mean intervals 10→14→18→22, not
-  individual transformer blocks;
-- “canonical pilot” below means the first 20 matched pairs from this full
-  artifact. It is a compute smoke test, not a separate dataset.
-
-### Exact observer pilot/full
+主实验读取：
 
 ```text
 data/exact/processbench_observer_llama31_full/<subset>/selected/trace.raw_residual_stream.npz
 ```
 
-- `pilot` analysis uses at most 20 matched pairs selected from the full audited
-  manifest after response-generator filtering. This avoids a one-class pilot
-  extraction while keeping the same real-data population as the full run;
-- `full` is the scaled extraction for GSM8K, MATH, OlympiadBench and Omni-MATH;
-- each `trace.npz` points to per-chain response-token state `.npy` files;
-- the loader requires
-  `response_token_state_snapshot_kind=raw_residual_stream` and fails closed for
-  unverified/final-normalized snapshots;
-- selected depths may still be sparse. Always read the preflight
-  `depth_semantics` and `layers` fields before interpreting results.
+四个 `<subset>` 为 `gsm8k`、`math`、`olympiadbench`、`omnimath`。程序只保留
+`response_generator` 匹配 `llama3.1-8b` 的记录，并对标签、token ranges、shard
+路径使用同一个行掩码。manifest 必须显式声明
+`response_token_state_snapshot_kind=raw_residual_stream`，否则立即失败。
 
-The exact experiment runner intentionally reads
-`selected/trace.raw_residual_stream.npz`, the provenance-audited manifest. It
-does not fall back to the original unmarked `trace.npz`. Override
-`EXACT_MANIFEST_NAME` only to select another manifest that itself declares
-`response_token_state_snapshot_kind=raw_residual_stream`.
+当前 selected 规模为：GSM8K 400、MATH 1000、OlympiadBench 1000、OmniMath
+1000；其中 Llama-3.1-8B generator cohort 分别为 61、139、164、162，共 526 条。
 
-Both exact modes also pass `--response-generator llama3.1-8b`. The loader
-applies that filter as one row-aligned mask to labels, token ranges and state
-shard paths, so activations cannot be detached from the responses that produced
-them. See [REAL_RAW_RESIDUAL_METHOD.md](REAL_RAW_RESIDUAL_METHOD.md) for the
-method and per-function call-path documentation.
+## 为什么安装过 sklearn 仍可能报缺包
 
-These are benchmark-observer residual streams. They are not the unknown original
-generator's internal states. Stored states support empirical local transport and
-rotation analyses, but not an autograd Jacobian without loading and replaying the
-model.
+发布包名是 `scikit-learn`，Python 导入名是 `sklearn`。conda 安装会持久写入
+对应环境的 `site-packages`，不会在退出 shell 后消失。报错几乎总是因为运行实验的
+`python` 不是安装包时使用的 `research` 环境解释器。
 
-## Update and test
+先激活并验证：
+
+```bash
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate research
+
+which python
+python -c 'import sys, sklearn; print(sys.executable); print(sklearn.__version__); print(sklearn.__file__)'
+python -m pip show scikit-learn
+```
+
+`sys.executable` 应指向类似 `.../anaconda3/envs/research/bin/python`，而
+`sklearn.__file__` 应位于同一个环境目录。始终使用 `python -m pip`，避免裸
+`pip` 与 `python` 来自不同环境。
+
+若该环境确实没有项目依赖，在已激活的 `research` 环境中执行：
 
 ```bash
 cd /share/home/tm902089733300000/a903202310/lys/research/demo
-git pull --ff-only origin main
-
-python -m pip install -e 'reasoning_activation_divergence[test]'
-export PYTHONPATH="$PWD/reasoning_activation_divergence/src:$PWD"
-python -m pytest reasoning_activation_divergence/tests -q
+python -m pip install -e './reasoning_activation_divergence[test]'
 ```
 
-The editable install is required. It installs scikit-learn as a first-class
-dependency used by both the raw layer-time operators and the task-probe Fisher
-analysis; there is no dependency-free fallback implementation.
+这会安装真实实现所需的 `scikit-learn` 和 `tqdm`。项目没有任何缺包退化实现。
 
-If the checkout is instead `/gz-data/research/demo`, use that directory; the
-script derives `REPO_ROOT` from its own location.
-
-## Recommended sequence
+## 前台运行全部四个子数据集
 
 ```bash
 cd /share/home/tm902089733300000/a903202310/lys/research/demo
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate research
 
-# 1. Confirm canonical manifest, raw shard and layer shape.
-bash reasoning_activation_divergence/run_raw_remote.sh canonical-preflight
-
-# 2. Twenty matched pairs; verifies runtime and output schema.
-bash reasoning_activation_divergence/run_raw_remote.sh canonical-pilot
-
-# 3. Full 395-chain GSM8K observer analysis.
-bash reasoning_activation_divergence/run_raw_remote.sh canonical-full
-```
-
-For the newer exact extraction:
-
-```bash
-bash reasoning_activation_divergence/run_raw_remote.sh exact-pilot
+PYTHON_BIN="$CONDA_PREFIX/bin/python" \
 bash reasoning_activation_divergence/run_raw_remote.sh exact-full
 ```
 
-Override the interpreter or checkout root when needed:
+这是普通前台进程：不使用 `screen`、`nohup` 或 `&`。终端会依次显示：
 
-```bash
-PYTHON_BIN=/path/to/conda/env/bin/python \
-REPO_ROOT=/gz-data/research/demo \
-bash /gz-data/research/demo/reasoning_activation_divergence/run_raw_remote.sh canonical-full
+- 当前 Python、conda 环境、sklearn 版本与安装路径；
+- 当前子数据集和 preflight JSON；
+- matched-pair shard 加载进度条；
+- cross-validation fold 进度条；
+- statistics 和 artifact-writing 阶段提示；
+- 最终结果 JSON。
+
+中断终端或按 `Ctrl-C` 会停止实验。输出分别位于：
+
+```text
+outputs/raw_layer_time/exact_full/gsm8k/
+outputs/raw_layer_time/exact_full/math/
+outputs/raw_layer_time/exact_full/olympiadbench/
+outputs/raw_layer_time/exact_full/omnimath/
 ```
 
-## Direct command
+## 先跑低成本真实数据 pilot
+
+如果需要先验证环境和进度显示：
 
 ```bash
-export PYTHONPATH="$PWD/reasoning_activation_divergence/src:$PWD"
-python -m functional_divergence.raw_residual_experiment \
-  --input data/features/full_gsm8k.npz \
-  --hidden-dir data/hidden/gsm8k \
-  --output-dir outputs/raw_layer_time/canonical_gsm8k_full \
-  --offsets=-2,-1,0,1 \
-  --layers 10,14,18,22 \
-  --rank 16 --folds 5 --bootstrap 2000 --seed 17
+PYTHON_BIN="$CONDA_PREFIX/bin/python" \
+bash reasoning_activation_divergence/run_raw_remote.sh exact-pilot
 ```
 
-Outputs are `results.json`, `pair_scores.csv`, and `metric_comparison.png`.
-Check `representation_scope`, `snapshot_kind`, `depth_semantics`, actual
-`projection_rank`, and `max_component_overlap` before reading AUROC values.
+pilot 仍来自 full audited manifest 中的真实 Llama cohort，只限制最多 20 个匹配对；
+它不是代理指标数据，也不是另一套一类 pilot manifest。

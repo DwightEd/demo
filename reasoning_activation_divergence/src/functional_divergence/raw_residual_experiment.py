@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 from pathlib import Path
 from typing import Any, Iterable
 
-import numpy as np
-
-from .core import paired_auc_difference, paired_summary
-from .layer_time import crossfit_layer_time_scores
-from .layer_time_experiment import _pair_rows, _write_plot
-from .output import versioned_paths
-from .raw_residual import inspect_raw_residual_source, load_matched_raw_residual
+from .config import RunConfig, SourceConfig
+from .raw_residual import inspect_raw_residual_source
+from .progress import NullProgress, ProgressReporter, TqdmProgress
+from .runner import ExperimentRunner
 
 
 def run_raw_residual_experiment(
@@ -29,81 +25,31 @@ def run_raw_residual_experiment(
     seed: int = 17,
     ridge_alpha: float = 1.0,
     response_generator: str | None = None,
+    progress: ProgressReporter | None = None,
 ) -> dict[str, Any]:
-    """Run the joint operator-field analysis on raw response-token residual shards."""
-    source = Path(input_path)
-    data = load_matched_raw_residual(
-        source,
-        hidden_dir=hidden_dir,
-        offsets=offsets,
-        layers=layers,
-        max_pairs=max_pairs,
+    """Compatibility facade around the typed application service."""
+    source = SourceConfig(
+        manifest=Path(input_path),
+        hidden_dir=None if hidden_dir is None else Path(hidden_dir),
         response_generator=response_generator,
     )
-    scores, diagnostics = crossfit_layer_time_scores(
-        data,
+    config = RunConfig(
+        offsets=tuple(offsets),
+        layers=layers if isinstance(layers, str) else tuple(layers),
+        max_pairs=max_pairs,
         rank=rank,
-        n_splits=n_splits,
+        folds=n_splits,
+        bootstrap=n_boot,
         seed=seed,
         ridge_alpha=ridge_alpha,
     )
-    metrics = {
-        name: paired_summary(values, data.labels, data.pair_ids, n_boot=n_boot, seed=seed + index)
-        for index, (name, values) in enumerate(scores.items())
-    }
-    comparisons = {
-        "plaquette_minus_radial": paired_auc_difference(
-            scores["plaquette_observed_disagreement"],
-            scores["radial_edge_change"],
-            data.labels,
-            data.pair_ids,
-            n_boot=n_boot,
-            seed=seed + 101,
-        ),
-        "plaquette_minus_time_residual": paired_auc_difference(
-            scores["plaquette_observed_disagreement"],
-            scores["time_operator_residual"],
-            data.labels,
-            data.pair_ids,
-            n_boot=n_boot,
-            seed=seed + 102,
-        ),
-    }
-    dataset = {
-        **data.metadata,
-        "n_pairs": int(np.unique(data.pair_ids).size),
-        "time_offsets": data.time_offsets.tolist(),
-        "layer_ids": data.layer_ids.tolist(),
-        "hidden_dim": int(data.states.shape[-1]),
-        "diagnostics": diagnostics,
-        "metrics": metrics,
-        "comparisons": comparisons,
-    }
-    result = {
-        "schema_version": "raw_residual_layer_time_operator_v1",
-        "method": "component-grouped cross-fitted projected operator field on raw residual-stream shards",
-        "evidence_boundary": (
-            "empirical local operators on stored residual states; not autograd model Jacobians"
-        ),
-        "seed": int(seed),
-        "n_boot": int(n_boot),
-        "requested_rank": int(rank),
-        "ridge_alpha": float(ridge_alpha),
-        "dataset": dataset,
-    }
-    output = Path(output_dir)
-    output.mkdir(parents=True, exist_ok=True)
-    encoded = json.dumps(result, indent=2)
-    for path in versioned_paths(output / "results.json"):
-        path.write_text(encoded, encoding="utf-8")
-    rows = _pair_rows(source, data, scores)
-    for path in versioned_paths(output / "pair_scores.csv"):
-        with path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-            writer.writeheader()
-            writer.writerows(rows)
-    _write_plot([dataset], versioned_paths(output / "metric_comparison.png"))
-    return result
+    runner = ExperimentRunner(
+        source,
+        config,
+        output_dir,
+        progress=progress or NullProgress(),
+    )
+    return runner.run().to_dict()
 
 
 def _parse_ints(value: str) -> tuple[int, ...]:
@@ -166,6 +112,7 @@ def main() -> None:
         seed=args.seed,
         ridge_alpha=args.ridge_alpha,
         response_generator=args.response_generator,
+        progress=TqdmProgress(),
     )
     print(json.dumps(result, indent=2))
 

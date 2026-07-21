@@ -5,6 +5,7 @@ import json
 import numpy as np
 
 from functional_divergence.raw_residual_experiment import run_raw_residual_experiment
+from functional_divergence.progress import RecordingProgress
 
 
 def _write_canonical_fixture(root, n_pairs: int = 6):
@@ -48,6 +49,7 @@ def test_raw_experiment_runs_high_dimensional_hidden_states_and_writes_outputs(t
     manifest, hidden = _write_canonical_fixture(tmp_path, n_pairs=10)
     output = tmp_path / "raw_results"
 
+    progress = RecordingProgress()
     result = run_raw_residual_experiment(
         input_path=manifest,
         hidden_dir=hidden,
@@ -58,6 +60,7 @@ def test_raw_experiment_runs_high_dimensional_hidden_states_and_writes_outputs(t
         n_boot=50,
         ridge_alpha=1e-3,
         seed=7,
+        progress=progress,
     )
 
     assert result["schema_version"] == "raw_residual_layer_time_operator_v1"
@@ -68,3 +71,8 @@ def test_raw_experiment_runs_high_dimensional_hidden_states_and_writes_outputs(t
     assert (output / "pair_scores.csv").is_file()
     saved = json.loads((output / "results.json").read_text(encoding="utf-8"))
     assert saved["dataset"]["source_format"] == "canonical_full_hidden_shards_v1"
+    stages = [event[1] for event in progress.events if event[0] == "stage"]
+    assert stages == ["load", "analyze", "statistics", "write"]
+    loops = [event[1] for event in progress.events if event[0] == "start"]
+    assert "matched pairs" in loops
+    assert "cross-validation folds" in loops
