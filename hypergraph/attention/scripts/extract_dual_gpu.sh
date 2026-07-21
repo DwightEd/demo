@@ -17,7 +17,7 @@ QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-0}"
 STORAGE_DTYPE="${STORAGE_DTYPE:-float32}"
 DTYPE="${DTYPE:-auto}"
 ARCHIVE_COMPRESSION="${ARCHIVE_COMPRESSION:-none}"
-MAX_SEQ_LEN="${MAX_SEQ_LEN:-2048}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-0}"
 MAX_ATTENTION_GIB="${MAX_ATTENTION_GIB:-24}"
 REPLAY_MODE="${REPLAY_MODE:-observer}"
 PROMPT_STYLE="${PROMPT_STYLE:-plain}"
@@ -41,6 +41,10 @@ if [[ ! -d "${MODEL}" ]]; then
 fi
 if ! [[ "${QUERY_CHUNK_SIZE}" =~ ^[0-9]+$ ]]; then
   printf 'QUERY_CHUNK_SIZE must be a non-negative integer\n' >&2
+  exit 2
+fi
+if ! [[ "${MAX_SEQ_LEN}" =~ ^[0-9]+$ ]]; then
+  printf 'MAX_SEQ_LEN must be a non-negative integer (0 disables the user cap)\n' >&2
   exit 2
 fi
 if [[ "${GPU0}" == "${GPU1}" ]]; then

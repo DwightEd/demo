@@ -51,6 +51,8 @@ Method environment variables and defaults:
 Runtime environment variables:
   PYTHON_BIN=python              GPU0=0 GPU1=1 TRAIN_GPUS=0,1
   QUERY_CHUNK_SIZE=0             STORAGE_DTYPE=float32
+  MAX_SEQ_LEN=0                 0 disables the user cap; model context still applies
+  MAX_ATTENTION_GIB=24          dense tensor allocation guard, not a token cap
   REPLAY_MODE=observer           PROMPT_STYLE=plain
   GENERATOR_MODEL=             empty selects the all-generator observer cohort
   TRACE_EXTRACTION_LIMIT=      override extraction-side limit for explicit caches
@@ -183,7 +185,7 @@ QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-0}"
 STORAGE_DTYPE="${STORAGE_DTYPE:-float32}"
 DTYPE="${DTYPE:-auto}"
 ARCHIVE_COMPRESSION="${ARCHIVE_COMPRESSION:-none}"
-MAX_SEQ_LEN="${MAX_SEQ_LEN:-2048}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-0}"
 MAX_ATTENTION_GIB="${MAX_ATTENTION_GIB:-24}"
 REPLAY_MODE="${REPLAY_MODE:-observer}"
 PROMPT_STYLE="${PROMPT_STYLE:-plain}"
@@ -242,6 +244,8 @@ done
   die "this attention-only entrypoint requires NODE_FEATURE_MODE=attention_diagonal"
 [[ "${QUERY_CHUNK_SIZE}" =~ ^[0-9]+$ ]] || \
   die "QUERY_CHUNK_SIZE must be a non-negative integer"
+[[ "${MAX_SEQ_LEN}" =~ ^[0-9]+$ ]] || \
+  die "MAX_SEQ_LEN must be a non-negative integer (0 disables the user cap)"
 [[ "${QUERY_CHUNK_SIZE}" == "0" ]] || \
   die "the strict pipeline requires QUERY_CHUNK_SIZE=0; cached chunks changed the real-model threshold topology"
 

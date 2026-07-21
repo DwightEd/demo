@@ -30,6 +30,7 @@ from hypergraph.attention.extract import (
     resolve_loaded_commit,
     response_and_char_spans,
     select_dataset_shard,
+    validate_sequence_length,
     verify_chunked_equivalence,
 )
 
@@ -484,6 +485,7 @@ def test_processbench_record_preserves_step_granularity_and_memory_estimate():
 def test_accelerated_extraction_configuration_is_strict_and_shards_are_disjoint():
     code_hashes = extraction_code_sha256()
     assert "hypergraph/attention/extract.py" in code_hashes
+    assert "hypergraph/attention/selective_capture.py" in code_hashes
     assert "hypergraph/attention/trace_contract.py" in code_hashes
     assert "utils/step_boundaries.py" in code_hashes
     assert "hypergraph/attention/data.py" not in code_hashes
@@ -825,8 +827,10 @@ def test_strict_response_pipeline_uses_exact_full_forward_by_default():
 
     assert 'MODE="${MODE:-model_parallel}"' in extractor
     assert 'QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-0}"' in extractor
+    assert 'MAX_SEQ_LEN="${MAX_SEQ_LEN:-0}"' in extractor
     assert 'MODE="${MODE:-model_parallel}"' in pipeline
     assert 'QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-0}"' in pipeline
+    assert 'MAX_SEQ_LEN="${MAX_SEQ_LEN:-0}"' in pipeline
     assert "QUERY_CHUNK_SIZE must be a non-negative integer" in pipeline
     assert "strict pipeline requires QUERY_CHUNK_SIZE=0" in pipeline
     assert "EXTRACTION_CODE_SHA256 TRAINING_CODE_SHA256" in pipeline
@@ -853,6 +857,180 @@ def test_strict_response_pipeline_uses_exact_full_forward_by_default():
     assert "all_processbench_pipeline_request_v2" in all_datasets
     assert '"preflight_sha256": preflight_sha256' in all_datasets
     assert '"generator_test_aggregate"' in all_datasets
+
+
+def test_extraction_has_no_artificial_sequence_cap_by_default():
+    args = build_extraction_parser().parse_args(
+        [
+            "--input",
+            "/data/gsm8k.json",
+            "--output_dir",
+            "/tmp/traces",
+            "--model",
+            "/models/llama",
+        ]
+    )
+    assert args.max_seq_len == 0
+
+    validate_sequence_length(4096, max_seq_len=0, model_context_limit=131072)
+    with pytest.raises(ValueError, match="configured max_seq_len"):
+        validate_sequence_length(4096, max_seq_len=2048, model_context_limit=131072)
+    with pytest.raises(ValueError, match="model context window"):
+        validate_sequence_length(131073, max_seq_len=0, model_context_limit=131072)
+
+
+def test_extraction_progress_uses_tqdm(monkeypatch):
+    from hypergraph.attention import extract as extraction
+
+    observed = {}
+
+    def fake_tqdm(iterable, **kwargs):
+        observed.update(kwargs)
+        return iterable
+
+    monkeypatch.setattr(extraction, "tqdm", fake_tqdm)
+    rows = [(0, {"id": "sample"})]
+    assert list(
+        extraction._extraction_progress(rows, shard_index=0, num_shards=2)
+    ) == rows
+    assert observed["desc"] == "extract shard 1/2"
+    assert observed["unit"] == "trace"
+    assert observed["dynamic_ncols"] is True
+
+
+def test_full_forward_captures_only_requested_decoder_layers():
+    torch = pytest.importorskip("torch")
+    from types import SimpleNamespace
+
+    class SelfAttention(torch.nn.Module):
+        def __init__(self, layer_index):
+            super().__init__()
+            self.layer_index = int(layer_index)
+            self.output_attention_flags = []
+
+        def forward(self, hidden_states, *, output_attentions=False, **kwargs):
+            del kwargs
+            self.output_attention_flags.append(bool(output_attentions))
+            tokens = int(hidden_states.shape[1])
+            attention = (
+                torch.full(
+                    (1, 3, tokens, tokens),
+                    float(self.layer_index + 1),
+                    dtype=hidden_states.dtype,
+                    device=hidden_states.device,
+                )
+                if output_attentions
+                else None
+            )
+            return hidden_states + float(self.layer_index + 1), attention
+
+    class DecoderLayer(torch.nn.Module):
+        def __init__(self, layer_index):
+            super().__init__()
+            self.self_attn = SelfAttention(layer_index)
+
+        def forward(self, hidden_states, *, output_attentions=False, **kwargs):
+            updated, _ = self.self_attn(
+                hidden_states,
+                output_attentions=output_attentions,
+                **kwargs,
+            )
+            return (updated,)
+
+    class SelectiveModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList([DecoderLayer(i) for i in range(4)])
+            self.top_level_attention_flags = []
+
+        def forward(
+            self,
+            *,
+            input_ids,
+            attention_mask,
+            output_attentions,
+            output_hidden_states,
+            use_cache,
+            return_dict,
+        ):
+            del attention_mask, output_hidden_states, use_cache, return_dict
+            self.top_level_attention_flags.append(bool(output_attentions))
+            hidden = input_ids.to(dtype=torch.float32)[..., None]
+            for layer in self.layers:
+                hidden = layer(
+                    hidden, output_attentions=bool(output_attentions)
+                )[0]
+            return SimpleNamespace(attentions=None, hidden_states=None)
+
+    model = SelectiveModel()
+    trace = extract_trace(
+        model,
+        torch,
+        {
+            "token_ids": np.arange(5, dtype=np.int64),
+            "attention_mask": np.ones(5, dtype=np.int64),
+        },
+        device="cpu",
+        attention_layers=(1, 3),
+        attention_heads=(0, 2),
+        activation_layer=None,
+        storage_dtype="float32",
+        query_chunk_size=0,
+    )
+
+    assert model.top_level_attention_flags == [False]
+    assert [layer.self_attn.output_attention_flags for layer in model.layers] == [
+        [False],
+        [True],
+        [False],
+        [True],
+    ]
+    assert trace["attention"].shape == (2, 2, 5, 5)
+    assert np.all(trace["attention"][0] == 2.0)
+    assert np.all(trace["attention"][1] == 4.0)
+
+
+def test_selected_capture_matches_full_huggingface_llama_attention():
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    config = transformers.LlamaConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=3,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+    )
+    config._attn_implementation = "eager"
+    model = transformers.LlamaModel(config).eval()
+    token_ids = np.asarray([1, 7, 3, 9, 2], dtype=np.int64)
+    tokenized = {
+        "token_ids": token_ids,
+        "attention_mask": np.ones_like(token_ids),
+    }
+    selected = extract_trace(
+        model,
+        torch,
+        tokenized,
+        device="cpu",
+        attention_layers=(1,),
+        attention_heads=(0, 2),
+        activation_layer=None,
+        storage_dtype="float32",
+        query_chunk_size=0,
+    )["attention"]
+    with torch.inference_mode():
+        full = model(
+            input_ids=torch.as_tensor(token_ids, dtype=torch.long)[None],
+            attention_mask=torch.ones((1, len(token_ids)), dtype=torch.long),
+            output_attentions=True,
+            use_cache=False,
+            return_dict=True,
+        )
+    expected = full.attentions[1][0, [0, 2]].float().numpy()
+    np.testing.assert_allclose(selected[0], expected, atol=0, rtol=0)
 
 
 def test_dual_gpu_wrapper_options_match_extraction_cli():

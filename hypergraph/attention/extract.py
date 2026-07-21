@@ -13,9 +13,10 @@ or cross-model passes are explicitly marked as observer traces.
 
 Dense attention is intentionally a first implementation target because it is
 auditable and exactly reproduces the original thresholding rule.  It is also
-quadratic in sequence length.  The CLI estimates the forward-pass attention
-output tensor lower bound (not peak eager memory) and refuses unexpectedly
-large samples unless explicitly allowed.
+quadratic in sequence length.  Exact full-sequence forwards use self-attention
+hooks to retain only requested attention layers on CPU; the CLI estimates the
+remaining tensor lower bounds (not total eager peak memory) and refuses
+unexpectedly large samples unless explicitly allowed.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from .trace_contract import (
     VERIFIED_MODEL_COMMIT_SOURCES,
@@ -37,6 +39,10 @@ from .trace_contract import (
     commit_hashes_match,
     is_immutable_commit_hash,
     model_identity_matches,
+)
+from .selective_capture import (
+    full_forward_with_selected_attention,
+    resolve_attention_modules,
 )
 from utils.step_boundaries import trim_trailing_generation_tokens
 
@@ -630,20 +636,21 @@ def _write_extraction_manifest(
     os.replace(temporary, destination)
 
 
-def _print_extraction_progress(
-    *, processed: int, total: int, shard_index: int, num_shards: int
-) -> None:
-    """Emit a log-friendly progress bar after each atomic checkpoint."""
+def _extraction_progress(
+    rows: Iterable[Tuple[int, Mapping[str, Any]]],
+    *,
+    shard_index: int,
+    num_shards: int,
+):
+    """Wrap extraction rows in a throttled interactive progress display."""
 
-    width = 28
-    ratio = 1.0 if total <= 0 else min(max(float(processed) / float(total), 0.0), 1.0)
-    filled = int(round(width * ratio))
-    bar = "#" * filled + "-" * (width - filled)
-    percent = 100.0 * ratio
-    print(
-        f"[extract shard {int(shard_index) + 1}/{int(num_shards)}] "
-        f"[{bar}] {int(processed)}/{int(total)} ({percent:5.1f}%)",
-        flush=True,
+    return tqdm(
+        rows,
+        desc=f"extract shard {int(shard_index) + 1}/{int(num_shards)}",
+        unit="trace",
+        dynamic_ncols=True,
+        mininterval=0.2,
+        smoothing=0.1,
     )
 
 
@@ -772,6 +779,7 @@ def extraction_code_sha256() -> Dict[str, str]:
     package = Path(__file__).resolve().parent
     paths = [
         package / "extract.py",
+        package / "selective_capture.py",
         package / "trace_contract.py",
         repository / "utils" / "step_boundaries.py",
     ]
@@ -897,6 +905,48 @@ def _resolved_model_device_map(model, fallback: str) -> Dict[str, str]:
     return {"model": str(fallback)}
 
 
+def _model_context_limit(config) -> Optional[int]:
+    """Return the architecture's declared context window when available."""
+
+    for name in (
+        "max_position_embeddings",
+        "n_positions",
+        "max_sequence_length",
+        "seq_length",
+    ):
+        value = getattr(config, name, None)
+        if isinstance(value, (int, np.integer)) and int(value) > 0:
+            return int(value)
+    return None
+
+
+def validate_sequence_length(
+    sequence_length: int,
+    *,
+    max_seq_len: int,
+    model_context_limit: Optional[int],
+) -> None:
+    """Reject truncation or an actual architecture overflow, never silently clip."""
+
+    length = int(sequence_length)
+    configured_limit = int(max_seq_len)
+    if length < 1:
+        raise ValueError("sequence length must be positive")
+    if configured_limit < 0:
+        raise ValueError("max_seq_len cannot be negative")
+    if configured_limit > 0 and length > configured_limit:
+        raise ValueError(
+            f"sequence length {length} exceeds configured max_seq_len={configured_limit}; "
+            "set --max_seq_len 0 to disable the artificial cap"
+        )
+    if model_context_limit is not None and length > int(model_context_limit):
+        raise ValueError(
+            f"sequence length {length} exceeds the model context window "
+            f"({int(model_context_limit)} tokens); truncation is forbidden because it "
+            "would corrupt response and step labels"
+        )
+
+
 def extract_trace(
     model,
     torch,
@@ -937,28 +987,42 @@ def extract_trace(
         attention_mask = torch.as_tensor(
             mask_values, dtype=torch.long, device=device
         )[None]
-        with torch.inference_mode():
-            output = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_attentions=True,
-                output_hidden_states=want_hidden,
-                use_cache=False,
-                return_dict=True,
-            )
-        if output.attentions is None:
-            raise RuntimeError(
-                "model returned no attentions; load it with attn_implementation='eager'"
-            )
-        selected_attention = torch.stack(
-            [
-                output.attentions[layer][0, list(attention_heads)]
-                .detach()
-                .to("cpu", dtype=storage_torch_dtype)
-                for layer in attention_layers
-            ],
-            dim=0,
-        ).numpy()
+        output, selected_attention, _ = full_forward_with_selected_attention(
+            model,
+            torch,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            attention_layers=attention_layers,
+            attention_heads=attention_heads,
+            storage_torch_dtype=storage_torch_dtype,
+            want_hidden=want_hidden,
+        )
+        if output is None:
+            # Compatibility fallback for architectures whose decoder stack cannot
+            # be located. The memory preflight accounts for all returned layers.
+            with torch.inference_mode():
+                output = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_attentions=True,
+                    output_hidden_states=want_hidden,
+                    use_cache=False,
+                    return_dict=True,
+                )
+            if output.attentions is None:
+                raise RuntimeError(
+                    "model returned no attentions; load it with "
+                    "attn_implementation='eager'"
+                )
+            selected_attention = torch.stack(
+                [
+                    output.attentions[layer][0, list(attention_heads)]
+                    .detach()
+                    .to("cpu", dtype=storage_torch_dtype)
+                    for layer in attention_layers
+                ],
+                dim=0,
+            ).numpy()
         result: Dict[str, np.ndarray] = {"attention": selected_attention}
         if activation_layer is not None:
             if output.hidden_states is None or not 0 <= int(activation_layer) < len(
@@ -1176,7 +1240,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="optional hidden_states index (embedding=0, first block=1)",
     )
-    parser.add_argument("--max_seq_len", type=int, default=2048)
+    parser.add_argument(
+        "--max_seq_len",
+        type=int,
+        default=0,
+        help=(
+            "optional user safety cap; 0 disables the artificial cap while the "
+            "model's declared context window remains enforced"
+        ),
+    )
     parser.add_argument(
         "--max_attention_gib",
         type=float,
@@ -1303,8 +1375,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.limit is not None and int(args.limit) < 1:
         parser.error("--limit must be positive")
-    if int(args.max_seq_len) < 1:
-        parser.error("--max_seq_len must be positive")
+    if int(args.max_seq_len) < 0:
+        parser.error("--max_seq_len cannot be negative")
     if not math.isfinite(float(args.max_attention_gib)) or float(args.max_attention_gib) <= 0:
         parser.error("--max_attention_gib must be finite and positive")
     if int(args.query_chunk_size) < 0:
@@ -1426,6 +1498,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     attention_heads = parse_indices(
         args.attention_heads, num_heads, name="attention_heads"
     )
+    attention_modules, decoder_layer_path = resolve_attention_modules(
+        model, attention_layers
+    )
+    selective_attention_capture = attention_modules is not None
+    attention_capture_mode = (
+        "selected_self_attention_hooks_v1"
+        if selective_attention_capture
+        else "all_model_attention_outputs_fallback_v1"
+    )
+    model_context_limit = _model_context_limit(model.config)
     if args.activation_layer is not None and not 0 <= args.activation_layer <= num_layers:
         raise SystemExit(f"activation_layer must lie in 0..{num_layers}")
 
@@ -1455,6 +1537,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
         "dtype": resolved_dtype,
         "attention_implementation": "eager",
+        "attention_capture_mode": attention_capture_mode,
+        "decoder_layer_path": decoder_layer_path,
+        "model_context_limit": model_context_limit,
         "model_class": str(args.model_class),
         "code_sha256": extraction_code_sha256(),
         "torch_version": str(torch.__version__),
@@ -1510,7 +1595,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     manifest: List[Dict[str, Any]] = []
-    for index, raw_row in indexed_rows:
+    completed_count = 0
+    skipped_count = 0
+    progress = _extraction_progress(
+        indexed_rows,
+        shard_index=int(args.shard_index),
+        num_shards=int(args.num_shards),
+    )
+    for index, raw_row in progress:
         try:
             record = canonical_record(raw_row, index)
             if args.replay_mode == "same_generator":
@@ -1593,11 +1685,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 response_token_ids=visible_response_ids,
             )
             sequence_length = len(tokenized["token_ids"])
-            if sequence_length > int(args.max_seq_len):
-                raise ValueError(
-                    f"sequence length {sequence_length} exceeds max_seq_len={args.max_seq_len}; "
-                    "truncation is forbidden because it would corrupt step labels"
-                )
+            validate_sequence_length(
+                sequence_length,
+                max_seq_len=int(args.max_seq_len),
+                model_context_limit=model_context_limit,
+            )
             uses_query_chunks = bool(
                 int(args.query_chunk_size) > 0
                 and int(args.query_chunk_size) < sequence_length
@@ -1608,8 +1700,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if int(args.query_chunk_size) <= 0
                 else min(sequence_length, int(args.query_chunk_size))
             )
+            retained_forward_layers = (
+                1
+                if selective_attention_capture and not uses_query_chunks
+                else num_layers
+            )
             estimated_forward_gib = estimate_attention_block_gib(
-                num_layers,
+                retained_forward_layers,
                 num_heads,
                 query_block,
                 sequence_length,
@@ -1728,6 +1825,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "tokenizer_name": np.asarray(extraction_config["tokenizer_name"]),
                 "extraction_dtype": np.asarray(resolved_dtype),
                 "attention_storage_dtype": np.asarray(args.storage_dtype),
+                "attention_capture_mode": np.asarray(attention_capture_mode),
                 "extraction_fingerprint": np.asarray(extraction_fingerprint),
                 "extraction_method_json": np.asarray(extraction_method_json),
                 "extraction_scope_fingerprint": np.asarray(
@@ -1810,6 +1908,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "estimated_dense_trace_gib": estimated_trace_gib,
                     "estimated_equivalence_attention_gib": estimated_equivalence_gib,
                     "estimated_activation_gib": estimated_activation_gib,
+                    "attention_capture_mode": attention_capture_mode,
                     "extraction_fingerprint": extraction_fingerprint,
                     "extraction_scope_fingerprint": extraction_scope_fingerprint,
                     "extraction_forward_mode": (
@@ -1820,6 +1919,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "status": "ok",
                 }
             )
+            completed_count += 1
             _write_extraction_manifest(
                 output_dir / "manifest.json",
                 extraction_config=extraction_config,
@@ -1827,11 +1927,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 extraction_scope_fingerprint=extraction_scope_fingerprint,
                 traces=manifest,
             )
-            _print_extraction_progress(
-                processed=len(manifest),
-                total=len(indexed_rows),
-                shard_index=int(args.shard_index),
-                num_shards=int(args.num_shards),
+            progress.set_postfix(
+                ok=completed_count,
+                skipped=skipped_count,
+                refresh=False,
             )
             del trace
             if torch.cuda.is_available():
@@ -1844,6 +1943,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "error": f"{type(exc).__name__}: {exc}",
             }
             manifest.append(failure)
+            skipped_count += 1
             _write_extraction_manifest(
                 output_dir / "manifest.json",
                 extraction_config=extraction_config,
@@ -1851,14 +1951,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 extraction_scope_fingerprint=extraction_scope_fingerprint,
                 traces=manifest,
             )
-            _print_extraction_progress(
-                processed=len(manifest),
-                total=len(indexed_rows),
-                shard_index=int(args.shard_index),
-                num_shards=int(args.num_shards),
+            progress.set_postfix(
+                ok=completed_count,
+                skipped=skipped_count,
+                refresh=False,
             )
             if not args.skip_invalid:
                 raise
+
+    progress.close()
 
     _write_extraction_manifest(
         output_dir / "manifest.json",
@@ -1867,7 +1968,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         extraction_scope_fingerprint=extraction_scope_fingerprint,
         traces=manifest,
     )
-    completed = sum(item["status"] == "ok" for item in manifest)
+    completed = completed_count
     if completed == 0:
         raise SystemExit(
             f"extracted 0/{len(manifest)} valid traces; inspect manifest.json before retrying"

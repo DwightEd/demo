@@ -46,8 +46,16 @@ For each dataset, extraction defaults to `MODE=model_parallel` with
 
 - the observer model is balanced over physical GPUs 0 and 1;
 - attention comes from an exact full-sequence teacher-forcing forward;
+- only the requested decoder layer is retained through a temporary self-attention hook;
 - `hypergraph.attention.shards` verifies the resulting trace scope and writes
   `shard_audit.json`.
+
+`MAX_SEQ_LEN` defaults to `0`, meaning there is no user-imposed token cap and
+no truncation. The extractor still rejects a sequence that exceeds the model's
+declared context window. Dense trace storage remains quadratic, so
+`MAX_ATTENTION_GIB` is an independent allocation guard rather than a sequence
+length limit. Interactive extraction is rendered by `tqdm` with elapsed time,
+rate, and ETA.
 
 Cached query chunks are not part of the strict pipeline. On the real
 Llama-3.1-8B checkpoint they changed edges selected at the `0.01` topology

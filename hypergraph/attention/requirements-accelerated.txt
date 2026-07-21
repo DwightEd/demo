@@ -2,3 +2,4 @@
 accelerate>=0.33,<2
 safetensors>=0.4,<1
 transformers>=4.44,<5
+tqdm>=4.66,<5
