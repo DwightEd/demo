@@ -1,5 +1,5 @@
 # Install PyTorch separately with the CUDA wheel matching the server driver.
-accelerate>=0.33,<2
+numpy>=1.26,<3
 safetensors>=0.4,<1
-transformers>=4.44,<5
+transformers>=4.57,<5
 tqdm>=4.66,<5

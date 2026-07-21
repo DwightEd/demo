@@ -1,11 +1,22 @@
-# Research Output Manifest
+# CCT-HG Manifest
 
-> Auto-maintained for the scoped `hypergraph/attention` research subproject.
-
-| Timestamp | Skill | File | Stage | Description |
-|-----------|-------|------|-------|-------------|
-| 2026-07-20 01:43 | /experiment-audit | audits/EXPERIMENT_AUDIT.md | implementation | latest integrity audit |
-| 2026-07-20 01:43 | /experiment-audit | audits/EXPERIMENT_AUDIT.json | implementation | latest machine-readable audit |
-| 2026-07-20 01:43 | /research-review | audits/RESEARCH_REVIEW.md | review | latest method and claims review |
-| 2026-07-21 00:56 | /research-pipeline | OBSERVER_PROVENANCE_AND_MATCHED_GENERATOR_PLAN.md | implementation | latest observer provenance and matched-generator refactor plan |
-| 2026-07-21 01:58 | /research-pipeline | OBSERVER_PROVENANCE_IMPLEMENTATION_REPORT.md | implementation | latest implementation, verification, and remaining-claims report |
+| File | Responsibility |
+|---|---|
+| `CCT_REFACTOR_PLAN.md` | falsifiable research and refactor contract |
+| `README.md` | method, architecture, commands, and validation requirements |
+| `evaluation.py` | response and first-error localization reports |
+| `splitting.py` | typed problem-disjoint holdout assignment |
+| `cct/contracts.py` | numerical domain contracts |
+| `cct/processbench.py` | typed ProcessBench parsing and exact token alignment |
+| `cct/hf_backend.py` | compact Llama-family mechanism extraction |
+| `cct/contribution.py` | output-effective transport decomposition |
+| `cct/geometry.py` | prompt-conditioned bundle and transverse escape |
+| `cct/hypergraph.py` | intervention-calibrated pair/hyperedge construction |
+| `cct/pipeline.py` | mechanism-to-trace assembly |
+| `cct/data.py` | versioned pickle-free causal trace repository |
+| `cct/model.py` | directed causal hypergraph detector |
+| `cct/hazard.py` | discrete first-error survival objective |
+| `cct/training.py` | survival training and final held-out evaluation |
+| `cct/controls.py` | topology and geometry controls |
+| `cct/baselines.py` | length/step nuisance baseline |
+| `cct/cli.py` | extraction, inspection, training, and benchmark commands |
