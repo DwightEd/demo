@@ -4,6 +4,9 @@
 > `functional_divergence.raw_residual_experiment` 直接读取 per-chain hidden
 > shards；下面的 `geometry_audit.npz` 内容仅保留为早期代理实验记录。
 
+原始残差流主路径只依赖 NumPy/SciPy/Matplotlib。`scikit-learn` 仅属于早期
+task-probe Fisher 管线的可选 `legacy` 依赖，不再阻塞 raw preflight 或实验。
+
 本子项目研究推理首错附近的激活变化是否不仅是径向放大，还包含有功能的方向变化。当前包含两条互补管线：
 
 1. 跨事件 affine transport residual 与任务错误探针 pullback Fisher；
