@@ -1,5 +1,16 @@
 # Attention-row HyperCHARM：忠实迁移与可控创新
 
+## Artifact Layout
+
+- `data/attention_cohorts/`: generator-filtered ProcessBench text cohorts.
+- `data/attention_traces/`: per-response attention and hidden-state NPZ traces.
+- `results/attention_hypergraph/`: checkpoints, predictions, metrics, and reports.
+- `results/job_logs/`: interactive pipeline logs created by the documented commands.
+
+For repositories that still use the retired `outputs/` layout, run
+`bash hypergraph/attention/scripts/migrate_artifacts_layout.sh` once. The
+migration refuses to overwrite or merge an existing destination.
+
 这个子目录重新实现原 `hypergraph-hallucination` 的核心方法，而不是继续把
 hidden-kNN 当作原 attention 超图：**完整 prompt+response 序列中的一个 token
 就是一个节点；一个 response query 在某个 layer/head 上超过阈值的历史 token
@@ -251,7 +262,7 @@ nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv
 ```bash
 export INPUT=/absolute/path/to/processbench.json
 export MODEL=/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct
-export OUTPUT_ROOT="$PWD/outputs/attention_traces/llama31_8b_pilot4"
+export OUTPUT_ROOT="$PWD/data/attention_traces/llama31_8b_pilot4"
 LIMIT=4 MODE=model_parallel QUERY_CHUNK_SIZE=0 \
   bash hypergraph/attention/scripts/extract_dual_gpu.sh
 tail -n 50 "$OUTPUT_ROOT"/logs/balanced.log
@@ -260,7 +271,7 @@ tail -n 50 "$OUTPUT_ROOT"/logs/balanced.log
 pilot 通过后，用新的输出目录跑完整数据；不设置 `LIMIT`：
 
 ```bash
-export OUTPUT_ROOT="$PWD/outputs/attention_traces/llama31_8b_full"
+export OUTPUT_ROOT="$PWD/data/attention_traces/llama31_8b_full"
 MODE=model_parallel QUERY_CHUNK_SIZE=0 \
   bash hypergraph/attention/scripts/extract_dual_gpu.sh
 ```
@@ -269,7 +280,7 @@ MODE=model_parallel QUERY_CHUNK_SIZE=0 \
 完整序列 attention 前向有足够显存；下面展示如何显式调整两张卡和 CPU 的内存预算：
 
 ```bash
-export OUTPUT_ROOT="$PWD/outputs/attention_traces/llama31_8b_balanced_pilot4"
+export OUTPUT_ROOT="$PWD/data/attention_traces/llama31_8b_balanced_pilot4"
 LIMIT=4 MODE=model_parallel QUERY_CHUNK_SIZE=0 GPU_MEMORY=22GiB CPU_MEMORY=64GiB \
   bash hypergraph/attention/scripts/extract_dual_gpu.sh
 ```
@@ -301,7 +312,7 @@ bash hypergraph/attention/scripts/run_single_layer_response_pipeline.sh \
 ```
 
 若完整的 audited trace 已经存在，脚本直接从其中筛选目标 generator，不重复前向；若完整缓存
-不存在，脚本先在 `outputs/attention_cohorts/` 物化带原始行号报告的 matched-generator JSON，
+不存在，脚本先在 `data/attention_cohorts/` 物化带原始行号报告的 matched-generator JSON，
 再只对这些样本前向。去掉 `--generator-model` 才是单独命名的 all-generator observer 辅助实验。
 主入口会要求 generator tag 与 observer 目录名（仅允许明确的 `Meta-Llama-*`/`Llama-*` 别名）
 一致，但本地模型目录没有可验证的权重内容摘要。因此该实验应称为 **generator-tag-matched
@@ -323,8 +334,8 @@ bash hypergraph/attention/scripts/run_single_layer_response_pipeline.sh --help
 ```
 
 默认 no-cap attention-only 输出分别位于
-`outputs/attention_traces/<dataset>_llama31_layer<layer>_nocap` 与
-`outputs/attention_hypergraph/<dataset>_response_layer<layer>_matched_Llama-3.1-8B-Instruct_node_attention_nocap_fixed_original`；
+`data/attention_traces/<dataset>_llama31_layer<layer>_nocap` 与
+`results/attention_hypergraph/<dataset>_response_layer<layer>_matched_Llama-3.1-8B-Instruct_node_attention_nocap_fixed_original`；
 all-generator observer 使用 `_observer_all` 后缀。若必须新抽 matched cohort，trace 目录也使用
 对应 `_matched_...` 后缀。每个数据集直接写出：
 
@@ -385,18 +396,18 @@ python -m hypergraph.attention.train inspect \
   "$OUTPUT_ROOT/shard0" "$OUTPUT_ROOT/shard1" \
   --objective response_bce --allow-observer-traces \
   --generator-model Llama-3.1-8B-Instruct \
-  --limit 20 --output outputs/attention_preflight.json
+  --limit 20 --output results/attention_preflight.json
 
 CUDA_VISIBLE_DEVICES=0 python -m hypergraph.attention.train train \
   "$OUTPUT_ROOT/shard0" "$OUTPUT_ROOT/shard1" \
   --objective step_bce --split-mode group_cv --folds 5 --fold-index 0 \
   --propagation-mode receiver --preprocessing none --allow-observer-traces \
-  --output outputs/attention_step_fold0_seed17 &
+  --output results/attention_step_fold0_seed17 &
 CUDA_VISIBLE_DEVICES=1 python -m hypergraph.attention.train train \
   "$OUTPUT_ROOT/shard0" "$OUTPUT_ROOT/shard1" \
   --objective step_bce --split-mode group_cv --folds 5 --fold-index 1 \
   --propagation-mode receiver --preprocessing none --allow-observer-traces \
-  --output outputs/attention_step_fold1_seed17 &
+  --output results/attention_step_fold1_seed17 &
 wait
 ```
 
@@ -425,7 +436,7 @@ cd D:\projects\research\demo
 python -m hypergraph.attention.train inspect D:\path\to\attention_traces `
   --objective response_bce --allow-observer-traces `
   --generator-model Llama-3.1-8B-Instruct `
-  --limit 20 --output outputs\attention_preflight.json
+  --limit 20 --output results\attention_preflight.json
 ```
 
 `inspect` 同时执行数据对齐、causal-attention 检查、真实构图和 schema 校验，并报告
@@ -473,7 +484,7 @@ accuracy、response F1 和 false-alarm rate，并导出每个 step 的 probabili
 
 ```powershell
 python -m hypergraph.attention.train build D:\path\to\attention_traces `
-  --output outputs\faithful_attention_graphs
+  --output results\faithful_attention_graphs
 ```
 
 输出是每条 trace 一个 framework-neutral graph NPZ，以及 `manifest.json`；图内保留
@@ -487,7 +498,7 @@ python -m hypergraph.attention.train build D:\path\to\attention_traces `
 python -m hypergraph.attention.train train D:\path\to\attention_traces `
   --objective token_bce --propagation-mode receiver --preprocessing none `
   --split-mode explicit `
-  --output outputs\faithful_token_seed17
+  --output results\faithful_token_seed17
 ```
 
 按题目分组的首错 step 训练：
@@ -496,7 +507,7 @@ python -m hypergraph.attention.train train D:\path\to\attention_traces `
 python -m hypergraph.attention.train train D:\path\to\attention_traces `
   --objective step_bce --propagation-mode receiver --preprocessing none `
   --split-mode group_cv --folds 5 --fold-index 0 `
-  --output outputs\faithful_step_fold0
+  --output results\faithful_step_fold0
 ```
 
 token/首错定位默认拒绝两类完整-response 泄漏：对称传播会把未来 receiver 的超边消息
@@ -661,7 +672,7 @@ problem-level bootstrap；尚未完成的真实数据实验不构成效果提升
 ```powershell
 python -m hypergraph.attention.train train D:\path\to\attention_traces `
   --config configs\faithful.json --objective step_bce `
-  --output outputs\faithful_step_fold0
+  --output results\faithful_step_fold0
 ```
 
 `inputs`、`objective`、`output`、`command` 和 `config` 禁止由 JSON 改写，必须显式写在

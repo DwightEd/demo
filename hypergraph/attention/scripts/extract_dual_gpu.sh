@@ -11,7 +11,7 @@ set -Eeuo pipefail
 : "${INPUT:?Set INPUT to an absolute ProcessBench JSON or JSONL path}"
 
 MODEL="${MODEL:-/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/attention_traces/llama31_8b_observer}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-data/attention_traces/llama31_8b_observer}"
 MODE="${MODE:-model_parallel}"
 QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-0}"
 STORAGE_DTYPE="${STORAGE_DTYPE:-float32}"

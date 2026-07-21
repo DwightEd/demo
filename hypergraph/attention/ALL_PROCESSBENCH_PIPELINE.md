@@ -6,7 +6,7 @@ foreground and streams extraction and training progress.
 ## Attention-Only Baseline
 
 ```bash
-mkdir -p outputs/job_logs
+mkdir -p results/job_logs
 
 MODEL=/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct \
 GPU0=0 GPU1=1 TRAIN_GPUS=0 PYTHONUNBUFFERED=1 \
@@ -14,7 +14,7 @@ bash hypergraph/attention/scripts/run_all_processbench_response_pipeline.sh \
   --layer 14 \
   --seed 17 \
   --generator-model Llama-3.1-8B-Instruct \
-  2>&1 | tee outputs/job_logs/all_processbench_layer14_attention.log
+  2>&1 | tee results/job_logs/all_processbench_layer14_attention.log
 ```
 
 This is the closest ProcessBench adaptation of the local original method:
@@ -37,10 +37,11 @@ NODE_FEATURE_MODE=diagonal_plus_activation MAX_SEQ_LEN=0 \
 MODEL=/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct \
 GPU0=0 GPU1=1 TRAIN_GPUS=0 PYTHONUNBUFFERED=1 \
 bash hypergraph/attention/scripts/run_all_processbench_response_pipeline.sh \
+  --datasets gsm8k,math,olympiadbench,omnimath \
   --layer 14 \
   --seed 17 \
   --generator-model Llama-3.1-8B-Instruct \
-  2>&1 | tee outputs/job_logs/all_processbench_layer14_attention_hidden.log
+  2>&1 | tee results/job_logs/all_processbench_layer14_attention_hidden.log
 ```
 
 `ACTIVATION_LAYER` is a Hugging Face `hidden_states` index. In hidden-node modes
@@ -65,10 +66,10 @@ Trace paths encode the sequence and node-content policy:
 
 ```text
 attention-only, no cap:
-  outputs/attention_traces/<dataset>_llama31_layer14_nocap/
+  data/attention_traces/<dataset>_llama31_layer14_nocap/
 
 hidden_states[15], no cap:
-  outputs/attention_traces/<dataset>_llama31_layer14_nocap_hidden_hs15/
+  data/attention_traces/<dataset>_llama31_layer14_nocap_hidden_hs15/
 ```
 
 Consequently, an old cache whose request says `max_seq_len=2048` is never reused
@@ -98,7 +99,7 @@ or test partition fails closed because AUROC would be undefined.
 Attention-only, no-cap, matched-generator output:
 
 ```text
-outputs/attention_hypergraph/
+results/attention_hypergraph/
   <dataset>_response_layer14_matched_Llama-3.1-8B-Instruct_node_attention_nocap_fixed_original/
     fixed_seed17/results.json
     aggregate_results.json
@@ -121,6 +122,19 @@ It reports each dataset's final test AUROC/AUPRC and their unweighted macro
 average. Old `fold*_seed*`, `pooled_oof_results.json`, and
 `predictions_pooled_oof_seed_ensemble.csv` files belong to the retired protocol
 and are not read by this entry point.
+
+## One-Time Migration From The Old Layout
+
+Existing traces and completed runs do not need to be recomputed. After pulling
+the layout change, run once:
+
+```bash
+bash hypergraph/attention/scripts/migrate_artifacts_layout.sh
+```
+
+The migration is fail-closed: it moves only the three hypergraph-owned
+directories and refuses to merge when a destination already exists. It does
+not touch residual-flow data, unrelated `outputs/` content, or source datasets.
 
 Every run remains bound to its source hashes, trace request, extraction manifest,
 graph configuration, node mode, hidden-state index, sequence policy, and split

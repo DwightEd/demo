@@ -92,7 +92,8 @@ ProcessBench 同一子集包含多个 generator。现有实现把 `generator_mod
 
 ## 4. 非目标
 
-- 不删除或改写服务器现有 `outputs/attention_traces/gsm8k_llama31_layer14`。
+- 旧服务器缓存由 `scripts/migrate_artifacts_layout.sh` 原样移动到
+  `data/attention_traces/`；迁移不改写 trace 内容。
 - 不通过篡改 `.npz` 中的 `generator_model` 绕过校验。
 - 不把 observer 结果表述成原生成模型的因果机制。
 - 本轮不改变超边阈值、传播算子、pooling 或网络容量。

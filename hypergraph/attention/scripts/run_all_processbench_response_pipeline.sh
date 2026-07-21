@@ -158,7 +158,7 @@ if [[ -n "${GENERATOR_MODEL}" ]]; then
   cohort_suffix="_matched_${generator_slug}"
 fi
 run_suffix="${limit_suffix}${cohort_suffix}${node_variant_suffix}${seq_policy_suffix}_fixed_original"
-SUMMARY_ROOT="${REPO_ROOT}/outputs/attention_hypergraph/all_processbench_response_layer${LAYER}${run_suffix}"
+SUMMARY_ROOT="${REPO_ROOT}/results/attention_hypergraph/all_processbench_response_layer${LAYER}${run_suffix}"
 
 "${PYTHON_BIN:-python}" - "${SUMMARY_ROOT}" "${LAYER}" "${SEEDS}" \
   "${SPLIT_SEED}" "${VAL_RATIO}" "${TEST_RATIO}" "${THRESHOLD}" \
@@ -298,7 +298,7 @@ metric_names = ("auroc", "aupr", "accuracy_0.5")
 per_dataset = {}
 compatibility_records = {}
 for dataset in datasets:
-    root = repo / "outputs" / "attention_hypergraph" / f"{dataset}_response_layer{layer}{suffix}"
+    root = repo / "results" / "attention_hypergraph" / f"{dataset}_response_layer{layer}{suffix}"
     aggregate_path = root / "aggregate_results.json"
     preflight_path = root / "preflight.json"
     gate_path = root / "pipeline_request.json"

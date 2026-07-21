@@ -4,6 +4,7 @@ __pycache__/
 .env
 /data/
 outputs/
+results/
 .ipynb_checkpoints/
 tmp_*.txt
 md/literature/**/texts/

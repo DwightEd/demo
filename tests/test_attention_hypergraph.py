@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -842,8 +846,6 @@ def test_dual_gpu_script_keeps_worker_identity_options_protected():
 
 
 def test_strict_response_pipeline_uses_exact_full_forward_by_default():
-    from pathlib import Path
-
     extractor = Path(
         "hypergraph/attention/scripts/extract_dual_gpu.sh"
     ).read_text(encoding="utf-8")
@@ -867,7 +869,7 @@ def test_strict_response_pipeline_uses_exact_full_forward_by_default():
     assert 'ACTIVATION_LAYER="${ACTIVATION_LAYER:-$((LAYER + 1))}"' in pipeline
     assert 'SEQ_POLICY_SUFFIX="_nocap"' in pipeline
     assert 'TRACE_VARIANT_SUFFIX="${SEQ_POLICY_SUFFIX}${ACTIVATION_TRACE_SUFFIX}"' in pipeline
-    assert 'FULL_DATASET_TRACE_ROOT="${REPO_ROOT}/outputs/attention_traces/${DATASET_TAG}_llama31_layer${LAYER}${TRACE_VARIANT_SUFFIX}"' in pipeline
+    assert 'FULL_DATASET_TRACE_ROOT="${REPO_ROOT}/data/attention_traces/${DATASET_TAG}_llama31_layer${LAYER}${TRACE_VARIANT_SUFFIX}"' in pipeline
     assert 'EXTRACT_ACTIVATION_ARGS+=(--activation_layer "${ACTIVATION_LAYER}")' in pipeline
     assert '"activation_layer=${ACTIVATION_LAYER}"' in pipeline
     assert "hidden-state mismatch" in pipeline
@@ -897,6 +899,8 @@ def test_strict_response_pipeline_uses_exact_full_forward_by_default():
     assert 'NODE_FEATURE_MODE="${NODE_FEATURE_MODE:-attention_diagonal}"' in all_datasets
     assert 'node_variant_suffix="_node_attention_hidden_hs${ACTIVATION_LAYER}"' in all_datasets
     assert 'seq_policy_suffix="_nocap"' in all_datasets
+    assert 'SUMMARY_ROOT="${REPO_ROOT}/results/attention_hypergraph/' in all_datasets
+    assert 'root = repo / "results" / "attention_hypergraph"' in all_datasets
     assert "all_processbench_fixed_holdout_request_v1" in all_datasets
     assert '"preflight_sha256": preflight_sha256' in all_datasets
     assert 'SPLIT_MODE="${SPLIT_MODE:-fixed_holdout}"' in pipeline
@@ -921,6 +925,75 @@ def test_strict_response_pipeline_uses_exact_full_forward_by_default():
     assert '"edge_attributes": ["attention_mean", "attention_max", "flattened_head_normalized"]' in all_datasets
     assert "fold${fold}" not in pipeline
     assert "pooled_oof_test" not in pipeline
+
+
+def test_artifact_layout_separates_intermediate_data_from_results():
+    root = Path(__file__).resolve().parents[1]
+    single = (root / "hypergraph/attention/scripts/run_single_layer_response_pipeline.sh").read_text()
+    dual = (root / "hypergraph/attention/scripts/extract_dual_gpu.sh").read_text()
+    migration = (root / "hypergraph/attention/scripts/migrate_artifacts_layout.sh").read_text()
+
+    assert '${REPO_ROOT}/data/attention_cohorts' in single
+    assert '${REPO_ROOT}/data/attention_traces' in single
+    assert '${REPO_ROOT}/results/attention_hypergraph' in single
+    assert 'data/attention_traces/llama31_8b_observer' in dual
+    assert 'outputs/attention_cohorts' in migration
+    assert 'data/attention_cohorts' in migration
+    assert 'outputs/attention_traces' in migration
+    assert 'data/attention_traces' in migration
+    assert 'outputs/attention_hypergraph' in migration
+    assert 'results/attention_hypergraph' in migration
+    assert 'destination already exists; refusing to merge automatically' in migration
+
+
+def test_artifact_layout_migration_moves_only_owned_directories(tmp_path):
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is unavailable")
+
+    root = Path(__file__).resolve().parents[1]
+    script = root / "hypergraph/attention/scripts/migrate_artifacts_layout.sh"
+    owned = {
+        "outputs/attention_cohorts": "data/attention_cohorts",
+        "outputs/attention_traces": "data/attention_traces",
+        "outputs/attention_hypergraph": "results/attention_hypergraph",
+    }
+    for source in owned:
+        source_path = tmp_path / source
+        source_path.mkdir(parents=True)
+        (source_path / "sentinel.txt").write_text(source, encoding="utf-8")
+    unrelated = tmp_path / "outputs/residual_flow"
+    unrelated.mkdir(parents=True)
+    (unrelated / "keep.txt").write_text("keep", encoding="utf-8")
+
+    environment = dict(os.environ, REPO_ROOT_OVERRIDE=str(tmp_path))
+    subprocess.run([bash, str(script)], check=True, env=environment, capture_output=True)
+
+    for source, destination in owned.items():
+        assert not (tmp_path / source).exists()
+        assert (tmp_path / destination / "sentinel.txt").read_text(encoding="utf-8") == source
+    assert (unrelated / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_artifact_layout_migration_refuses_destination_collision(tmp_path):
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is unavailable")
+
+    root = Path(__file__).resolve().parents[1]
+    script = root / "hypergraph/attention/scripts/migrate_artifacts_layout.sh"
+    (tmp_path / "outputs/attention_cohorts").mkdir(parents=True)
+    (tmp_path / "outputs/attention_traces").mkdir(parents=True)
+    (tmp_path / "data/attention_cohorts").mkdir(parents=True)
+    environment = dict(os.environ, REPO_ROOT_OVERRIDE=str(tmp_path))
+
+    completed = subprocess.run(
+        [bash, str(script)], env=environment, capture_output=True, text=True
+    )
+    assert completed.returncode != 0
+    assert "refusing to merge automatically" in completed.stderr
+    assert (tmp_path / "outputs/attention_cohorts").is_dir()
+    assert (tmp_path / "outputs/attention_traces").is_dir()
 
 
 def test_extraction_has_no_artificial_sequence_cap_by_default():

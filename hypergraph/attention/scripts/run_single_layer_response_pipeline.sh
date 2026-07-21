@@ -327,7 +327,7 @@ if [[ -n "${GENERATOR_MODEL}" ]]; then
   GENERATOR_SLUG="${GENERATOR_MODEL//\//-}"
   COHORT_SUFFIX="_matched_${GENERATOR_SLUG}"
 fi
-FULL_DATASET_TRACE_ROOT="${REPO_ROOT}/outputs/attention_traces/${DATASET_TAG}_llama31_layer${LAYER}${TRACE_VARIANT_SUFFIX}"
+FULL_DATASET_TRACE_ROOT="${REPO_ROOT}/data/attention_traces/${DATASET_TAG}_llama31_layer${LAYER}${TRACE_VARIANT_SUFFIX}"
 DEFAULT_TRACE_ROOT="${FULL_DATASET_TRACE_ROOT}${LIMIT_SUFFIX}"
 TRACE_EXTRACTION_LIMIT="${TRACE_EXTRACTION_LIMIT-${LIMIT}}"
 [[ -z "${TRACE_EXTRACTION_LIMIT}" || "${TRACE_EXTRACTION_LIMIT}" =~ ^[1-9][0-9]*$ ]] || \
@@ -348,7 +348,7 @@ elif [[ -n "${GENERATOR_MODEL}" ]]; then
     TRACE_ROOT="${FULL_DATASET_TRACE_ROOT}"
     TRACE_EXTRACTION_LIMIT=""
   else
-    COHORT_ROOT="${COHORT_ROOT:-${REPO_ROOT}/outputs/attention_cohorts}"
+    COHORT_ROOT="${COHORT_ROOT:-${REPO_ROOT}/data/attention_cohorts}"
     COHORT_INPUT="${COHORT_ROOT}/${DATASET_TAG}_matched_${GENERATOR_SLUG}.json"
     COHORT_REPORT_PATH="${COHORT_INPUT}.report.json"
     "${PYTHON_BIN}" -m hypergraph.attention.cohort \
@@ -357,14 +357,14 @@ elif [[ -n "${GENERATOR_MODEL}" ]]; then
       --report "${COHORT_REPORT_PATH}" \
       --generator-model "${GENERATOR_MODEL}" >/dev/null
     INPUT="$(realpath "${COHORT_INPUT}")"
-    TRACE_ROOT="${REPO_ROOT}/outputs/attention_traces/${DATASET_TAG}_llama31_layer${LAYER}${TRACE_VARIANT_SUFFIX}${LIMIT_SUFFIX}${COHORT_SUFFIX}"
+    TRACE_ROOT="${REPO_ROOT}/data/attention_traces/${DATASET_TAG}_llama31_layer${LAYER}${TRACE_VARIANT_SUFFIX}${LIMIT_SUFFIX}${COHORT_SUFFIX}"
     TRACE_INPUT_MODE="materialized_matched_generator"
   fi
 else
   TRACE_ROOT="${DEFAULT_TRACE_ROOT}"
 fi
 PROTOCOL_SUFFIX="_fixed_original"
-RUN_ROOT="${RUN_ROOT:-${REPO_ROOT}/outputs/attention_hypergraph/${DATASET_TAG}_response_layer${LAYER}${LIMIT_SUFFIX}${COHORT_SUFFIX}${NODE_VARIANT_SUFFIX}${SEQ_POLICY_SUFFIX}${PROTOCOL_SUFFIX}}"
+RUN_ROOT="${RUN_ROOT:-${REPO_ROOT}/results/attention_hypergraph/${DATASET_TAG}_response_layer${LAYER}${LIMIT_SUFFIX}${COHORT_SUFFIX}${NODE_VARIANT_SUFFIX}${SEQ_POLICY_SUFFIX}${PROTOCOL_SUFFIX}}"
 
 read -r SOURCE_INPUT_SHA256 INPUT_SHA256 EXTRACTION_CODE_SHA256 TRAINING_CODE_SHA256 < <("${PYTHON_BIN}" - "${SOURCE_INPUT}" "${INPUT}" <<'PY'
 import hashlib
