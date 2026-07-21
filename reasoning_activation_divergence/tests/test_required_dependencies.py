@@ -6,14 +6,14 @@ import subprocess
 import sys
 
 
-def test_raw_cli_imports_when_sklearn_is_unavailable() -> None:
+def test_raw_cli_requires_sklearn() -> None:
     source_root = Path(__file__).resolve().parents[1] / "src"
     code = """
 import builtins
 real_import = builtins.__import__
 def blocked_import(name, *args, **kwargs):
     if name == 'sklearn' or name.startswith('sklearn.'):
-        raise ModuleNotFoundError("blocked sklearn for raw-path regression test")
+        raise ModuleNotFoundError("blocked sklearn for required-dependency regression test")
     return real_import(name, *args, **kwargs)
 builtins.__import__ = blocked_import
 import functional_divergence.raw_residual_experiment
@@ -29,4 +29,5 @@ import functional_divergence.raw_residual_experiment
         check=False,
     )
 
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode != 0
+    assert "blocked sklearn for required-dependency regression test" in completed.stderr

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
+from sklearn.linear_model import LogisticRegression, Ridge
 
 
 EPS = 1e-12
@@ -185,13 +186,6 @@ def crossfit_transport_fisher(
     ridge_alpha: float = 10.0,
     probe_c: float = 0.25,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    try:
-        from sklearn.linear_model import LogisticRegression, Ridge
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError(
-            "the legacy task-probe Fisher analysis requires scikit-learn; "
-            "the raw residual-stream CLI does not"
-        ) from exc
     n = data.labels.size
     scores = {
         "state_change_l2": np.full(n, np.nan),

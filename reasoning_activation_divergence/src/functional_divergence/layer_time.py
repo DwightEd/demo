@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
+from sklearn.linear_model import Ridge
+from sklearn.utils.extmath import randomized_svd
 
 from .core import DEFAULT_METRICS, EPS, _component_ids, connected_component_folds
 
@@ -103,16 +105,12 @@ def _fit_shared_projection(
         raise ValueError("projection rank must be positive")
     centered = flat - center
     if selected_rank < min(centered.shape):
-        rng = np.random.default_rng(int(seed))
-        sketch_rank = min(selected_rank + 8, min(centered.shape))
-        sketch = rng.normal(size=(centered.shape[1], sketch_rank))
-        range_values = centered @ sketch
-        for _ in range(2):
-            stable_range, _ = np.linalg.qr(range_values, mode="reduced")
-            range_values = centered @ (centered.T @ stable_range)
-        orthogonal, _ = np.linalg.qr(range_values, mode="reduced")
-        compressed = orthogonal.T @ centered
-        _, _, vt = np.linalg.svd(compressed, full_matrices=False)
+        _, _, vt = randomized_svd(
+            centered,
+            n_components=selected_rank,
+            n_iter=4,
+            random_state=int(seed),
+        )
     else:
         _, _, vt = np.linalg.svd(centered, full_matrices=False)
     basis = vt[:selected_rank].T
@@ -127,20 +125,9 @@ def _project_states(states: np.ndarray, center: np.ndarray, basis: np.ndarray, s
 
 
 def _fit_affine(source: np.ndarray, target: np.ndarray, ridge_alpha: float) -> AffineMap:
-    source = np.asarray(source, dtype=np.float64)
-    target = np.asarray(target, dtype=np.float64)
-    source_mean = np.mean(source, axis=0)
-    target_mean = np.mean(target, axis=0)
-    centered_source = source - source_mean
-    centered_target = target - target_mean
-    gram = centered_source.T @ centered_source
-    gram.flat[:: gram.shape[0] + 1] += float(ridge_alpha)
-    cross = centered_source.T @ centered_target
-    try:
-        matrix = np.linalg.solve(gram, cross)
-    except np.linalg.LinAlgError:
-        matrix = np.linalg.pinv(gram) @ cross
-    return AffineMap(matrix=matrix, offset=target_mean - source_mean @ matrix)
+    model = Ridge(alpha=float(ridge_alpha), fit_intercept=True)
+    model.fit(source, target)
+    return AffineMap(matrix=np.asarray(model.coef_).T, offset=np.asarray(model.intercept_))
 
 
 def _fit_operator_field(states: np.ndarray, ridge_alpha: float) -> tuple[list[list[AffineMap]], list[list[AffineMap]]]:

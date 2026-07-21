@@ -48,17 +48,14 @@ model.
 cd /share/home/tm902089733300000/a903202310/lys/research/demo
 git pull --ff-only origin main
 
+python -m pip install -e 'reasoning_activation_divergence[test]'
 export PYTHONPATH="$PWD/reasoning_activation_divergence/src:$PWD"
-python -m pytest \
-  reasoning_activation_divergence/tests/test_optional_dependencies.py \
-  reasoning_activation_divergence/tests/test_layer_time.py \
-  reasoning_activation_divergence/tests/test_layer_time_experiment.py \
-  reasoning_activation_divergence/tests/test_raw_residual.py \
-  reasoning_activation_divergence/tests/test_raw_residual_experiment.py -q
+python -m pytest reasoning_activation_divergence/tests -q
 ```
 
-This raw-path test set does not require scikit-learn. The older task-probe Fisher
-tests are optional and require `pip install -e 'reasoning_activation_divergence[legacy,test]'`.
+The editable install is required. It installs scikit-learn as a first-class
+dependency used by both the raw layer-time operators and the task-probe Fisher
+analysis; there is no dependency-free fallback implementation.
 
 If the checkout is instead `/gz-data/research/demo`, use that directory; the
 script derives `REPO_ROOT` from its own location.
