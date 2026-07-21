@@ -1,158 +1,128 @@
 # All-ProcessBench Two-GPU Response Pipeline
 
-The audited all-dataset entry point runs in the foreground and streams progress:
+The audited entry point runs GSM8K, MATH, OlympiadBench, and OmniMath in the
+foreground and streams extraction and training progress.
+
+## Attention-Only Baseline
 
 ```bash
 mkdir -p outputs/job_logs
-PYTHONUNBUFFERED=1 bash hypergraph/attention/scripts/run_all_processbench_response_pipeline.sh \
+
+MODEL=/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct \
+GPU0=0 GPU1=1 TRAIN_GPUS=0 PYTHONUNBUFFERED=1 \
+bash hypergraph/attention/scripts/run_all_processbench_response_pipeline.sh \
   --layer 14 \
-  --folds 5 \
-  --seeds 17 \
+  --seed 17 \
   --generator-model Llama-3.1-8B-Instruct \
-  2>&1 | tee outputs/job_logs/all_processbench_layer14.log
+  2>&1 | tee outputs/job_logs/all_processbench_layer14_attention.log
 ```
 
-This is the generator-tag-matched reconstructed-observer main experiment. The wrapper
-accepts only the explicit `Meta-Llama-*`/`Llama-*` naming alias, but a local path does
-not prove an exact weight revision. Remove
-`--generator-model` only for the separately reported all-generator observer
-experiment. Existing complete all-generator traces are filtered and reused; when no
-complete cache exists, the wrapper first materializes an audited generator cohort and
-forwards only the matching rows.
+This is the closest ProcessBench adaptation of the local original method:
 
-Do not append `&` or wrap this command in `nohup` when interactive progress is
-required. Extraction reports sample progress for the active extraction worker, and
-training streams each epoch record while preserving the same output in log files.
+- every token is a node;
+- node content is the 32-dimensional self-attention diagonal from the selected
+  Llama layer;
+- response attention rows from topology head 0 create hyperedges;
+- source selection uses `tau=0.05`, positive top-16 fallback only when no source
+  crosses the threshold, and at least two sources before adding the receiver;
+- every hyperedge has exactly three attributes: attention mean, attention max,
+  and normalized flattened stored-head index.
 
-It runs these ProcessBench subsets independently:
+## Hidden-State Node Variants
 
-```text
-gsm8k
-math
-olympiadbench
-omnimath
-```
-
-Each name resolves to:
-
-```text
-data/hf_datasets/ProcessBench/<dataset>.json
-```
-
-## GPU Scheduling
-
-For each dataset, extraction defaults to `MODE=model_parallel` with
-`QUERY_CHUNK_SIZE=0`:
-
-- the observer model is balanced over physical GPUs 0 and 1;
-- attention comes from an exact full-sequence teacher-forcing forward;
-- only the requested decoder layer is retained through a temporary self-attention hook;
-- `hypergraph.attention.shards` verifies the resulting trace scope and writes
-  `shard_audit.json`.
-
-`MAX_SEQ_LEN` defaults to `0`, meaning there is no user-imposed token cap and
-no truncation. The extractor still rejects a sequence that exceeds the model's
-declared context window. Dense trace storage remains quadratic, so
-`MAX_ATTENTION_GIB` is an independent allocation guard rather than a sequence
-length limit. Interactive extraction is rendered by `tqdm` with elapsed time,
-rate, and ETA.
-
-Cached query chunks are not part of the strict pipeline. On the real
-Llama-3.1-8B checkpoint they changed edges selected at the `0.01` topology
-threshold, despite satisfying the synthetic tensor contract.
-
-Training then schedules at most two fold jobs concurrently:
-
-- one fold on physical GPU 0;
-- one fold on physical GPU 1;
-- the next pair starts only after the current wave finishes.
-
-Datasets run sequentially. Override physical device identifiers with:
+To concatenate hidden state with the attention-diagonal node feature:
 
 ```bash
-GPU0=0 GPU1=1 TRAIN_GPUS=0,1 \
+NODE_FEATURE_MODE=diagonal_plus_activation MAX_SEQ_LEN=0 \
+MODEL=/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct \
+GPU0=0 GPU1=1 TRAIN_GPUS=0 PYTHONUNBUFFERED=1 \
 bash hypergraph/attention/scripts/run_all_processbench_response_pipeline.sh \
-  --layer 14
+  --layer 14 \
+  --seed 17 \
+  --generator-model Llama-3.1-8B-Instruct \
+  2>&1 | tee outputs/job_logs/all_processbench_layer14_attention_hidden.log
 ```
+
+`ACTIVATION_LAYER` is a Hugging Face `hidden_states` index. In hidden-node modes
+it defaults to `layer + 1`; therefore `--layer 14` stores `hidden_states[15]`, the
+output after zero-based decoder block 14. Override it explicitly only for a
+pre-registered input-state versus output-state ablation.
+
+Use `NODE_FEATURE_MODE=activation_only` to set each node to hidden state alone.
+In both hidden variants, attention still defines topology and the three
+hyperedge attributes remain unchanged. Hidden modes are innovations rather than
+faithful reproductions. They also increase input dimension and parameter count,
+so they must be compared with feature-only, parameter-matched, and length-control
+baselines before attributing gains to hypergraph reasoning.
+
+## Sequence And Cache Policy
+
+`MAX_SEQ_LEN=0` disables the user-imposed token cap. It does not disable the
+model's context window or the independent `MAX_ATTENTION_GIB` allocation guard.
+Truncation is forbidden.
+
+Trace paths encode the sequence and node-content policy:
+
+```text
+attention-only, no cap:
+  outputs/attention_traces/<dataset>_llama31_layer14_nocap/
+
+hidden_states[15], no cap:
+  outputs/attention_traces/<dataset>_llama31_layer14_nocap_hidden_hs15/
+```
+
+Consequently, an old cache whose request says `max_seq_len=2048` is never reused
+as an uncapped cache. The old directory is preserved; the new run writes a
+separate `_nocap` directory without requiring deletion or manual renaming.
+
+Extraction uses both GPUs in `model_parallel` mode. The response-level graph
+model is small and a single fixed run trains on `TRAIN_GPUS`' first device. Do
+not append `&` or use `nohup` when interactive `tqdm` progress is required.
+
+## Evaluation Protocol
+
+ProcessBench does not provide the original project's external RAGTruth train and
+test directories. Each subset therefore receives one deterministic,
+problem-disjoint 70/10/20 train/validation/test split:
+
+- split seed 17 fixes the data partition;
+- validation AUPRC selects the best epoch;
+- the held-out test is evaluated exactly once;
+- no five-fold OOF aggregation is performed.
+
+The split manifest stores all trace and problem IDs. A single-class validation
+or test partition fails closed because AUROC would be undefined.
 
 ## Outputs
 
-Per-dataset traces:
+Attention-only, no-cap, matched-generator output:
 
 ```text
-outputs/attention_traces/<dataset>_llama31_layer14/
+outputs/attention_hypergraph/
+  <dataset>_response_layer14_matched_Llama-3.1-8B-Instruct_node_attention_nocap_fixed_original/
+    fixed_seed17/results.json
+    aggregate_results.json
+    predictions_test.csv
+    split_manifest.json
 ```
 
-Per-dataset held-out results:
+Combined hidden output replaces `_node_attention_` with
+`_node_attention_hidden_hs15_`; hidden-only output uses `_node_hidden_hs15_`.
+
+The four-dataset report follows the same suffix and contains:
 
 ```text
-outputs/attention_hypergraph/<dataset>_response_layer14_matched_Llama-3.1-8B-Instruct/aggregate_results.json
-outputs/attention_hypergraph/<dataset>_response_layer14_matched_Llama-3.1-8B-Instruct/pooled_oof_results.json
-outputs/attention_hypergraph/<dataset>_response_layer14_matched_Llama-3.1-8B-Instruct/predictions_pooled_oof_seed_ensemble.csv
-outputs/attention_hypergraph/<dataset>_response_layer14_observer_all/aggregate_results.json
+aggregate_results.json
+summary.md
+pipeline_request.json
 ```
 
-The old unsuffixed path is legacy. New all-generator results use `_observer_all`;
-matched-generator results use `_matched_<generator>` so the two
-experimental populations cannot overwrite each other.
+It reports each dataset's final test AUROC/AUPRC and their unweighted macro
+average. Old `fold*_seed*`, `pooled_oof_results.json`, and
+`predictions_pooled_oof_seed_ensemble.csv` files belong to the retired protocol
+and are not read by this entry point.
 
-Cross-dataset report:
-
-```text
-outputs/attention_hypergraph/all_processbench_response_layer14_matched_Llama-3.1-8B-Instruct/aggregate_results.json
-outputs/attention_hypergraph/all_processbench_response_layer14_matched_Llama-3.1-8B-Instruct/summary.md
-outputs/attention_hypergraph/all_processbench_response_layer14_observer_all/aggregate_results.json
-outputs/attention_hypergraph/all_processbench_response_layer14_observer_all/summary.md
-```
-
-The primary per-dataset result is `pooled_oof_test.seed_ensemble`: each trace is
-predicted exactly once by its held-out fold for each seed, probabilities are averaged
-per trace across seeds, and one final AUROC/AUPRC is computed. `test_aggregate` remains
-the mean/std/min/max of individual fold runs and is a variability diagnostic, not the
-final test AUROC. The primary cross-dataset result is the unweighted macro average of
-the four dataset-level pooled OOF metrics. Each per-dataset JSON also contains
-`generator_test_aggregate`; undefined single-class generator/fold metrics remain
-explicit rather than being silently pooled into the overall score.
-
-The default five-fold protocol is problem-disjoint. For fold `k`, fold `k` is test,
-fold `(k+1) mod 5` is validation, and the remaining three folds are training data.
-After all five runs, every problem has appeared in test exactly once per seed. This is
-used because the ProcessBench traces in this pipeline do not provide a reusable
-official train/validation/test partition. If an official split is present, training
-refuses to repartition it by default.
-
-To aggregate already completed folds without extracting or training again:
-
-```bash
-python hypergraph/attention/aggregate_oof.py \
-  --run-root outputs/attention_hypergraph/gsm8k_response_layer14_matched_Llama-3.1-8B-Instruct \
-  --folds 5 \
-  --seeds 17
-```
-
-Completed audited traces and completed fold runs are reused. Before reuse, manifests
-are freshly audited and preflight runs the same cohort gate as training. The legacy
-monolithic code hash remains untouched as historical provenance; extraction and
-training hashes are separate for new requests. A partial directory is rejected rather
-than overwritten. The cross-dataset aggregator verifies that every `preflight.json`
-matches the SHA256 bound by its per-dataset `pipeline_request.json`, and then requires
-the observer/template/axis/graph plus current validation/training-code signatures to
-agree across datasets. Legacy/v2 request schemas remain recorded per dataset but do
-not create a false incompatibility when the trace-embedded representation provenance
-itself agrees.
-
-Preserve each trace directory together with its `pipeline_request.json`,
-`shard_audit.json`, and any matched-cohort `.report.json`. Bare NPZ files are not a
-self-contained audit package. The preflight is a cohort/provenance/graph gate only; it
-does not prove fold class coverage, successful optimization, causal recovery of the
-original generation, or control of response-length confounding.
-
-The failed legacy run `gsm8k_response_layer14` is not reused by either new suffix. If
-you want it out of the way, preserve it with a timestamped backup rather than deleting
-the completed trace cache:
-
-```bash
-stamp="$(date +%Y%m%d_%H%M%S)"
-mv -- outputs/attention_hypergraph/gsm8k_response_layer14 \
-  "outputs/attention_hypergraph/gsm8k_response_layer14_failed_${stamp}"
-```
+Every run remains bound to its source hashes, trace request, extraction manifest,
+graph configuration, node mode, hidden-state index, sequence policy, and split
+seed. A partial or semantically different cache fails closed rather than being
+silently mixed into the experiment.

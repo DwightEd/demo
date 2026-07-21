@@ -208,7 +208,8 @@ commit 与 token 轴匹配，teacher forcing 也没有复现原采样 kernel、K
 `--max_attention_gib` 时停止；这不是 eager forward 峰值显存估计，低于阈值仍可能 OOM。
 只有另外核实模型、activation 与临时张量显存预算后才使用
 `--allow_large_attention`。`--activation_layer` 是可选创新，忠实 attention-only
-基线不需要保存 hidden。trace 默认以 float32 保存 attention；缓存兼容性门禁仍在
+基线不需要保存 hidden。hidden-node 模式默认令 `activation_layer=layer+1`，例如零基 block
+14 对应 `hidden_states[15]`，即该 block 的输出。trace 默认以 float32 保存 attention；缓存兼容性门禁仍在
 `0.01` 检查数值翻转以复用既有 exact-full-forward trace，而正式构图在 `tau=0.05`
 重新选择成员。只有经过边稳定性审计后才使用
 `--storage_dtype float16` 节省磁盘。
@@ -321,9 +322,9 @@ reconstructed observer**，不能称为 exact-weight same-generator replay。
 bash hypergraph/attention/scripts/run_single_layer_response_pipeline.sh --help
 ```
 
-默认输出分别位于
-`outputs/attention_traces/<dataset>_llama31_layer<layer>` 与
-`outputs/attention_hypergraph/<dataset>_response_layer<layer>_matched_Llama-3.1-8B-Instruct_fixed_original`；
+默认 no-cap attention-only 输出分别位于
+`outputs/attention_traces/<dataset>_llama31_layer<layer>_nocap` 与
+`outputs/attention_hypergraph/<dataset>_response_layer<layer>_matched_Llama-3.1-8B-Instruct_node_attention_nocap_fixed_original`；
 all-generator observer 使用 `_observer_all` 后缀。若必须新抽 matched cohort，trace 目录也使用
 对应 `_matched_...` 后缀。每个数据集直接写出：
 
@@ -339,6 +340,22 @@ fail closed，避免新旧配置静默混合。默认 symmetric propagation 与 
 **整条回答生成完成后的离线 response 检测**，脚本会显式传入许可并写入结果配置；若要做
 prefix-causal 版本，运行前设置
 `PROPAGATION_MODE=receiver PREPROCESSING=none`。
+
+把 block 输出 hidden state 加入节点内容时使用：
+
+```bash
+NODE_FEATURE_MODE=diagonal_plus_activation MAX_SEQ_LEN=0 \
+bash hypergraph/attention/scripts/run_single_layer_response_pipeline.sh \
+  --layer 14 --dataset omnimath \
+  --generator-model Llama-3.1-8B-Instruct
+```
+
+此时节点为 `[32-D attention diagonal; hidden_states[15]]`；设
+`NODE_FEATURE_MODE=activation_only` 则只使用 hidden。两种模式仍由 attention 构图，
+`he_attr` 始终是 mean/max/flattened-head 三维。trace 与结果分别增加
+`_hidden_hs15` 和 `_node_attention_hidden_hs15`（或 `_node_hidden_hs15`）后缀，因而不会与
+attention-only 缓存混用。`MAX_SEQ_LEN=0` 还会写入独立 `_nocap` 目录；旧的 2048-cap
+缓存不会被静默视为无上限缓存。
 
 这里仍保留完整 dense trace，所以节省的是 GPU 峰值而不是最终的 (O(LHN^2)) CPU/磁盘量。
 Llama-3.1-8B 的 32 层 × 32 头、2048 token、float32 trace 下界约为 16 GiB/样本；“完整数据”

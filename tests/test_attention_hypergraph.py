@@ -254,6 +254,12 @@ def test_length_attributes_are_opt_in_not_part_of_the_faithful_baseline():
 def test_hidden_content_and_attention_diagonal_are_independent_node_feature_controls():
     attention, token_ids, response_idx = _trace()
     activation = np.arange(15, dtype=np.float32).reshape(5, 3)
+    attention_only = build_attention_hypergraph(
+        attention,
+        token_ids,
+        response_idx,
+        config=AttentionHypergraphConfig(node_feature_mode="attention_diagonal"),
+    )
     hidden_only = build_attention_hypergraph(
         attention,
         token_ids,
@@ -272,6 +278,12 @@ def test_hidden_content_and_attention_diagonal_are_independent_node_feature_cont
     )
     assert combined.x.shape == (5, 4)
     np.testing.assert_array_equal(combined.x[:, 1:], activation)
+    assert hidden_only.he_attr.shape[1] == 3
+    assert combined.he_attr.shape[1] == 3
+    np.testing.assert_array_equal(hidden_only.he_index, attention_only.he_index)
+    np.testing.assert_array_equal(combined.he_index, attention_only.he_index)
+    np.testing.assert_allclose(hidden_only.he_attr, attention_only.he_attr)
+    np.testing.assert_allclose(combined.he_attr, attention_only.he_attr)
     with pytest.raises(ValueError, match="requires aligned activation"):
         build_attention_hypergraph(
             attention,
@@ -851,6 +863,14 @@ def test_strict_response_pipeline_uses_exact_full_forward_by_default():
     assert 'MODE="${MODE:-model_parallel}"' in pipeline
     assert 'QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-0}"' in pipeline
     assert 'MAX_SEQ_LEN="${MAX_SEQ_LEN:-0}"' in pipeline
+    assert 'ACTIVATION_LAYER="${ACTIVATION_LAYER:-}"' in pipeline
+    assert 'ACTIVATION_LAYER="${ACTIVATION_LAYER:-$((LAYER + 1))}"' in pipeline
+    assert 'SEQ_POLICY_SUFFIX="_nocap"' in pipeline
+    assert 'TRACE_VARIANT_SUFFIX="${SEQ_POLICY_SUFFIX}${ACTIVATION_TRACE_SUFFIX}"' in pipeline
+    assert 'FULL_DATASET_TRACE_ROOT="${REPO_ROOT}/outputs/attention_traces/${DATASET_TAG}_llama31_layer${LAYER}${TRACE_VARIANT_SUFFIX}"' in pipeline
+    assert 'EXTRACT_ACTIVATION_ARGS+=(--activation_layer "${ACTIVATION_LAYER}")' in pipeline
+    assert '"activation_layer=${ACTIVATION_LAYER}"' in pipeline
+    assert "hidden-state mismatch" in pipeline
     assert "QUERY_CHUNK_SIZE must be a non-negative integer" in pipeline
     assert "strict pipeline requires QUERY_CHUNK_SIZE=0" in pipeline
     assert "EXTRACTION_CODE_SHA256 TRAINING_CODE_SHA256" in pipeline
@@ -874,6 +894,9 @@ def test_strict_response_pipeline_uses_exact_full_forward_by_default():
     assert '--mode "${MODE}"' in all_datasets
     assert '--generator-model "${GENERATOR_MODEL}"' in all_datasets
     assert 'cohort_suffix="_observer_all"' in all_datasets
+    assert 'NODE_FEATURE_MODE="${NODE_FEATURE_MODE:-attention_diagonal}"' in all_datasets
+    assert 'node_variant_suffix="_node_attention_hidden_hs${ACTIVATION_LAYER}"' in all_datasets
+    assert 'seq_policy_suffix="_nocap"' in all_datasets
     assert "all_processbench_fixed_holdout_request_v1" in all_datasets
     assert '"preflight_sha256": preflight_sha256' in all_datasets
     assert 'SPLIT_MODE="${SPLIT_MODE:-fixed_holdout}"' in pipeline
@@ -885,6 +908,7 @@ def test_strict_response_pipeline_uses_exact_full_forward_by_default():
     assert 'TOP_K="${TOP_K:-16}"' in pipeline
     assert 'MIN_SOURCES="${MIN_SOURCES:-2}"' in pipeline
     assert 'TOPOLOGY_HEADS="${TOPOLOGY_HEADS:-0}"' in pipeline
+    assert "keeps the original 3-D hyperedge attributes" in pipeline
     assert '--selected-heads "${TOPOLOGY_HEADS}"' in pipeline
     assert '--split-mode fixed_holdout' in pipeline
     assert '"partition_group_ids"' not in pipeline  # written by train.py, not fabricated in shell
@@ -892,7 +916,9 @@ def test_strict_response_pipeline_uses_exact_full_forward_by_default():
     assert '"final_test": dict(test)' in fixed_aggregate
     assert '"generator_final_test"' in all_datasets
     assert '"macro_final_test"' in all_datasets
-    assert '"node_features": "self-attention diagonal over all extracted heads"' in all_datasets
+    assert '"node_feature_mode": node_feature_mode' in all_datasets
+    assert '"activation_layer": None if not activation_layer else int(activation_layer)' in all_datasets
+    assert '"edge_attributes": ["attention_mean", "attention_max", "flattened_head_normalized"]' in all_datasets
     assert "fold${fold}" not in pipeline
     assert "pooled_oof_test" not in pipeline
 

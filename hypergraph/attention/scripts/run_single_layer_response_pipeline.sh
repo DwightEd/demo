@@ -43,6 +43,7 @@ Method environment variables and defaults:
   TOPOLOGY_HEADS=0               node features still retain all extracted heads
   PROPAGATION_MODE=symmetric     INCIDENCE_WEIGHT_MODE=uniform
   EDGE_ATTR_MODE=faithful        NODE_FEATURE_MODE=attention_diagonal
+  ACTIVATION_LAYER=              hidden_states index; defaults to layer+1 in hidden modes
   MESSAGE_OPERATOR=hypergraph    PREPROCESSING=per_graph_zscore
   POOLING=mean                   MODEL_LAYERS=2
   HIDDEN_DIM=128                 EPOCHS=50
@@ -70,6 +71,9 @@ Important semantics:
   - response token logits are mean-pooled and trained with response_bce;
   - extracting only --layer ID also restricts attention-diagonal node features
     to that layer. Training-time --selected-layers alone is not strict single-layer.
+  - NODE_FEATURE_MODE=activation_only uses post-block hidden states as token nodes;
+    diagonal_plus_activation concatenates the 32-D diagonal with that hidden state.
+    Both keep the original 3-D attention hyperedge attributes unchanged.
 EOF
 }
 
@@ -205,6 +209,7 @@ PROPAGATION_MODE="${PROPAGATION_MODE:-symmetric}"
 INCIDENCE_WEIGHT_MODE="${INCIDENCE_WEIGHT_MODE:-uniform}"
 EDGE_ATTR_MODE="${EDGE_ATTR_MODE:-faithful}"
 NODE_FEATURE_MODE="${NODE_FEATURE_MODE:-attention_diagonal}"
+ACTIVATION_LAYER="${ACTIVATION_LAYER:-}"
 MESSAGE_OPERATOR="${MESSAGE_OPERATOR:-hypergraph}"
 PREPROCESSING="${PREPROCESSING:-per_graph_zscore}"
 POOLING="${POOLING:-mean}"
@@ -259,14 +264,45 @@ done
 [[ "${TEST_RATIO}" =~ ^0?\.[0-9]+$ ]] || die "TEST_RATIO must be a decimal in (0,1)"
 [[ "${TOPOLOGY_HEADS}" == "all" || "${TOPOLOGY_HEADS}" =~ ^[0-9]+(,[0-9]+)*$ ]] || \
   die "TOPOLOGY_HEADS must be all or a comma-separated list of non-negative head ids"
-[[ "${NODE_FEATURE_MODE}" == "attention_diagonal" ]] || \
-  die "this attention-only entrypoint requires NODE_FEATURE_MODE=attention_diagonal"
+[[ "${EDGE_ATTR_MODE}" == "faithful" ]] || \
+  die "this entrypoint keeps the original 3-D hyperedge attributes; use train.py directly for extended attributes"
 [[ "${QUERY_CHUNK_SIZE}" =~ ^[0-9]+$ ]] || \
   die "QUERY_CHUNK_SIZE must be a non-negative integer"
 [[ "${MAX_SEQ_LEN}" =~ ^[0-9]+$ ]] || \
   die "MAX_SEQ_LEN must be a non-negative integer (0 disables the user cap)"
 [[ "${QUERY_CHUNK_SIZE}" == "0" ]] || \
   die "the strict pipeline requires QUERY_CHUNK_SIZE=0; cached chunks changed the real-model threshold topology"
+
+case "${NODE_FEATURE_MODE}" in
+  attention_diagonal)
+    [[ -z "${ACTIVATION_LAYER}" ]] || \
+      die "ACTIVATION_LAYER must be empty for NODE_FEATURE_MODE=attention_diagonal"
+    NODE_VARIANT_SUFFIX="_node_attention"
+    ;;
+  activation_only|diagonal_plus_activation)
+    ACTIVATION_LAYER="${ACTIVATION_LAYER:-$((LAYER + 1))}"
+    [[ "${ACTIVATION_LAYER}" =~ ^[1-9][0-9]*$ ]] || \
+      die "ACTIVATION_LAYER must be a positive hidden_states index"
+    if [[ "${NODE_FEATURE_MODE}" == "activation_only" ]]; then
+      NODE_VARIANT_SUFFIX="_node_hidden_hs${ACTIVATION_LAYER}"
+    else
+      NODE_VARIANT_SUFFIX="_node_attention_hidden_hs${ACTIVATION_LAYER}"
+    fi
+    ;;
+  *)
+    die "NODE_FEATURE_MODE must be attention_diagonal, activation_only, or diagonal_plus_activation"
+    ;;
+esac
+if [[ "${MAX_SEQ_LEN}" == "0" ]]; then
+  SEQ_POLICY_SUFFIX="_nocap"
+else
+  SEQ_POLICY_SUFFIX="_maxseq${MAX_SEQ_LEN}"
+fi
+ACTIVATION_TRACE_SUFFIX=""
+if [[ -n "${ACTIVATION_LAYER}" ]]; then
+  ACTIVATION_TRACE_SUFFIX="_hidden_hs${ACTIVATION_LAYER}"
+fi
+TRACE_VARIANT_SUFFIX="${SEQ_POLICY_SUFFIX}${ACTIVATION_TRACE_SUFFIX}"
 
 cd "${REPO_ROOT}"
 if [[ -n "${GENERATOR_MODEL}" ]]; then
@@ -291,7 +327,7 @@ if [[ -n "${GENERATOR_MODEL}" ]]; then
   GENERATOR_SLUG="${GENERATOR_MODEL//\//-}"
   COHORT_SUFFIX="_matched_${GENERATOR_SLUG}"
 fi
-FULL_DATASET_TRACE_ROOT="${REPO_ROOT}/outputs/attention_traces/${DATASET_TAG}_llama31_layer${LAYER}"
+FULL_DATASET_TRACE_ROOT="${REPO_ROOT}/outputs/attention_traces/${DATASET_TAG}_llama31_layer${LAYER}${TRACE_VARIANT_SUFFIX}"
 DEFAULT_TRACE_ROOT="${FULL_DATASET_TRACE_ROOT}${LIMIT_SUFFIX}"
 TRACE_EXTRACTION_LIMIT="${TRACE_EXTRACTION_LIMIT-${LIMIT}}"
 [[ -z "${TRACE_EXTRACTION_LIMIT}" || "${TRACE_EXTRACTION_LIMIT}" =~ ^[1-9][0-9]*$ ]] || \
@@ -321,14 +357,14 @@ elif [[ -n "${GENERATOR_MODEL}" ]]; then
       --report "${COHORT_REPORT_PATH}" \
       --generator-model "${GENERATOR_MODEL}" >/dev/null
     INPUT="$(realpath "${COHORT_INPUT}")"
-    TRACE_ROOT="${REPO_ROOT}/outputs/attention_traces/${DATASET_TAG}_llama31_layer${LAYER}${LIMIT_SUFFIX}${COHORT_SUFFIX}"
+    TRACE_ROOT="${REPO_ROOT}/outputs/attention_traces/${DATASET_TAG}_llama31_layer${LAYER}${TRACE_VARIANT_SUFFIX}${LIMIT_SUFFIX}${COHORT_SUFFIX}"
     TRACE_INPUT_MODE="materialized_matched_generator"
   fi
 else
   TRACE_ROOT="${DEFAULT_TRACE_ROOT}"
 fi
 PROTOCOL_SUFFIX="_fixed_original"
-RUN_ROOT="${RUN_ROOT:-${REPO_ROOT}/outputs/attention_hypergraph/${DATASET_TAG}_response_layer${LAYER}${LIMIT_SUFFIX}${COHORT_SUFFIX}${PROTOCOL_SUFFIX}}"
+RUN_ROOT="${RUN_ROOT:-${REPO_ROOT}/outputs/attention_hypergraph/${DATASET_TAG}_response_layer${LAYER}${LIMIT_SUFFIX}${COHORT_SUFFIX}${NODE_VARIANT_SUFFIX}${SEQ_POLICY_SUFFIX}${PROTOCOL_SUFFIX}}"
 
 read -r SOURCE_INPUT_SHA256 INPUT_SHA256 EXTRACTION_CODE_SHA256 TRAINING_CODE_SHA256 < <("${PYTHON_BIN}" - "${SOURCE_INPUT}" "${INPUT}" <<'PY'
 import hashlib
@@ -427,6 +463,9 @@ printf 'topology:                %s, threshold=%s, fallback_top_k=%s, min_source
   "${SOURCE_SELECTION}" "${THRESHOLD}" "${TOP_K}" "${MIN_SOURCES}" "${TOPOLOGY_HEADS}"
 printf 'propagation/incidence:   %s / %s\n' "${PROPAGATION_MODE}" "${INCIDENCE_WEIGHT_MODE}"
 printf 'node/operator:           %s / %s\n' "${NODE_FEATURE_MODE}" "${MESSAGE_OPERATOR}"
+printf 'hidden-state index:      %s\n' "${ACTIVATION_LAYER:-disabled}"
+printf 'sequence policy:         max_seq_len=%s (%s)\n' \
+  "${MAX_SEQ_LEN}" "${SEQ_POLICY_SUFFIX#_}"
 printf 'split:                   %s seed=%s train/val/test=%.3f/%.3f/%.3f\n' \
   "${SPLIT_MODE}" "${SPLIT_SEED}" \
   "$("${PYTHON_BIN}" -c "print(1-float('${VAL_RATIO}')-float('${TEST_RATIO}'))")" \
@@ -439,6 +478,12 @@ fi
 
 TRACE_CONFIG_PATH="${TRACE_ROOT}/pipeline_request.json"
 TRACE_SOURCE_ARGS=()
+TRACE_ACTIVATION_ARGS=()
+EXTRACT_ACTIVATION_ARGS=()
+if [[ -n "${ACTIVATION_LAYER}" ]]; then
+  TRACE_ACTIVATION_ARGS+=("activation_layer=${ACTIVATION_LAYER}")
+  EXTRACT_ACTIVATION_ARGS+=(--activation_layer "${ACTIVATION_LAYER}")
+fi
 if [[ -n "${COHORT_REPORT_PATH}" ]]; then
   TRACE_SOURCE_ARGS+=(
     "source_input=${SOURCE_INPUT}"
@@ -467,6 +512,7 @@ read -r TRACE_GATE_MODE TRACE_REQUEST_SHA256 LEGACY_METHOD_CODE_SHA256 < <(
   "replay_mode=${REPLAY_MODE}" \
   "prompt_style=${PROMPT_STYLE}" \
   "chunk_equivalence_threshold=${TRACE_EQUIVALENCE_THRESHOLD}" \
+  "${TRACE_ACTIVATION_ARGS[@]}" \
   "${TRACE_SOURCE_ARGS[@]}"
 )
 printf 'trace request gate:       %s (%s)\n' \
@@ -496,6 +542,7 @@ else
     bash "${SCRIPT_DIR}/extract_dual_gpu.sh" \
       --attention_layers "${LAYER}" \
       --attention_heads all \
+      "${EXTRACT_ACTIVATION_ARGS[@]}" \
       --chunk-equivalence-threshold "${TRACE_EQUIVALENCE_THRESHOLD}"
 fi
 
@@ -520,23 +567,36 @@ printf 'Re-auditing extraction manifests before cache use...\n'
 "${PYTHON_BIN}" -m hypergraph.attention.shards "${TRACE_INPUTS[@]}" >/dev/null
 printf 'fresh shard/manifest audit passed\n'
 
-"${PYTHON_BIN}" - "${LAYER}" "${TRACE_INPUTS[@]}" <<'PY'
+"${PYTHON_BIN}" - "${LAYER}" "${ACTIVATION_LAYER}" "${TRACE_INPUTS[@]}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 expected = [int(sys.argv[1])]
-for directory in map(Path, sys.argv[2:]):
+expected_activation = None if not sys.argv[2] else int(sys.argv[2])
+for directory in map(Path, sys.argv[3:]):
     manifest_path = directory / "manifest.json"
     if not manifest_path.is_file():
         raise SystemExit(f"missing extraction manifest: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    observed = manifest.get("extraction_config", {}).get("attention_layers")
+    extraction = manifest.get("extraction_config", {})
+    observed = extraction.get("attention_layers")
     if observed != expected:
         raise SystemExit(
             f"not a strict single-layer trace: {manifest_path} has {observed}, expected {expected}"
         )
-print("strict single-layer manifest gate passed:", expected)
+    observed_activation = extraction.get("activation_layer")
+    if observed_activation != expected_activation:
+        raise SystemExit(
+            f"hidden-state mismatch: {manifest_path} has activation_layer="
+            f"{observed_activation}, expected {expected_activation}"
+        )
+print(
+    "strict single-layer manifest gate passed:",
+    expected,
+    "activation_layer=",
+    expected_activation,
+)
 PY
 
 if is_true "${EXTRACT_ONLY}"; then
@@ -624,6 +684,8 @@ guard_config "${RUN_CONFIG_PATH}" \
   "cohort_suffix=${COHORT_SUFFIX}" \
   "selection_limit=${LIMIT}" \
   "trace_extraction_limit=${TRACE_EXTRACTION_LIMIT}" \
+  "max_seq_len=${MAX_SEQ_LEN}" \
+  "activation_layer=${ACTIVATION_LAYER}" \
   "threshold=${THRESHOLD}" \
   "top_k=${TOP_K}" \
   "source_selection=${SOURCE_SELECTION}" \

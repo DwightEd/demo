@@ -37,12 +37,16 @@ Method/runtime environment variables:
   SPLIT_SEED=17 VAL_RATIO=0.1 TEST_RATIO=0.2
   THRESHOLD=0.05 SOURCE_SELECTION=threshold_fallback_topk TOP_K=16 MIN_SOURCES=2
   TOPOLOGY_HEADS=0
+  NODE_FEATURE_MODE=attention_diagonal ACTIVATION_LAYER=
+  MAX_SEQ_LEN=0  # no user-imposed token cap
   PYTHON_BIN=python GPU0=0 GPU1=1 TRAIN_GPUS=0,1
 
 The original code's three values are hyperedge attributes
 (attention mean, attention max, normalized head id). Node features are the
 self-attention diagonal over every extracted head; selecting TOPOLOGY_HEADS=0
 only restricts which attention rows create hyperedges.
+Set NODE_FEATURE_MODE=activation_only or diagonal_plus_activation to add
+post-block hidden states to token nodes. The 3-D hyperedge attributes do not change.
 EOF
 }
 
@@ -66,6 +70,9 @@ SOURCE_SELECTION="${SOURCE_SELECTION:-threshold_fallback_topk}"
 TOP_K="${TOP_K:-16}"
 MIN_SOURCES="${MIN_SOURCES:-2}"
 TOPOLOGY_HEADS="${TOPOLOGY_HEADS:-0}"
+NODE_FEATURE_MODE="${NODE_FEATURE_MODE:-attention_diagonal}"
+ACTIVATION_LAYER="${ACTIVATION_LAYER:-}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-0}"
 
 while (($#)); do
   case "$1" in
@@ -91,6 +98,8 @@ command -v realpath >/dev/null 2>&1 || die "realpath is required"
 [[ -z "${LIMIT}" || "${LIMIT}" =~ ^[1-9][0-9]*$ ]] || die "--limit must be positive"
 [[ "${MODE}" == "model_parallel" || "${MODE}" == "data_parallel" ]] || \
   die "--mode must be model_parallel or data_parallel"
+[[ "${MAX_SEQ_LEN}" =~ ^[0-9]+$ ]] || \
+  die "MAX_SEQ_LEN must be a non-negative integer"
 [[ -z "${GENERATOR_MODEL}" || "${GENERATOR_MODEL}" =~ ^[A-Za-z0-9._-]+$ ]] || \
   die "--generator-model contains unsafe characters"
 [[ -z "${TRACE_ROOT:-}" && -z "${RUN_ROOT:-}" ]] || \
@@ -111,6 +120,32 @@ for index in "${!DATASET_VALUES[@]}"; do
 done
 [[ -d "${MODEL}" ]] || die "model directory does not exist: ${MODEL}"
 
+case "${NODE_FEATURE_MODE}" in
+  attention_diagonal)
+    [[ -z "${ACTIVATION_LAYER}" ]] || \
+      die "ACTIVATION_LAYER must be empty for NODE_FEATURE_MODE=attention_diagonal"
+    node_variant_suffix="_node_attention"
+    ;;
+  activation_only|diagonal_plus_activation)
+    ACTIVATION_LAYER="${ACTIVATION_LAYER:-$((LAYER + 1))}"
+    [[ "${ACTIVATION_LAYER}" =~ ^[1-9][0-9]*$ ]] || \
+      die "ACTIVATION_LAYER must be a positive hidden_states index"
+    if [[ "${NODE_FEATURE_MODE}" == "activation_only" ]]; then
+      node_variant_suffix="_node_hidden_hs${ACTIVATION_LAYER}"
+    else
+      node_variant_suffix="_node_attention_hidden_hs${ACTIVATION_LAYER}"
+    fi
+    ;;
+  *)
+    die "NODE_FEATURE_MODE must be attention_diagonal, activation_only, or diagonal_plus_activation"
+    ;;
+esac
+if [[ "${MAX_SEQ_LEN}" == "0" ]]; then
+  seq_policy_suffix="_nocap"
+else
+  seq_policy_suffix="_maxseq${MAX_SEQ_LEN}"
+fi
+
 cd "${REPO_ROOT}"
 MODEL="$(realpath "${MODEL}")"
 limit_suffix=""
@@ -122,12 +157,13 @@ if [[ -n "${GENERATOR_MODEL}" ]]; then
   generator_slug="${GENERATOR_MODEL//\//-}"
   cohort_suffix="_matched_${generator_slug}"
 fi
-run_suffix="${limit_suffix}${cohort_suffix}_fixed_original"
+run_suffix="${limit_suffix}${cohort_suffix}${node_variant_suffix}${seq_policy_suffix}_fixed_original"
 SUMMARY_ROOT="${REPO_ROOT}/outputs/attention_hypergraph/all_processbench_response_layer${LAYER}${run_suffix}"
 
 "${PYTHON_BIN:-python}" - "${SUMMARY_ROOT}" "${LAYER}" "${SEEDS}" \
   "${SPLIT_SEED}" "${VAL_RATIO}" "${TEST_RATIO}" "${THRESHOLD}" \
   "${SOURCE_SELECTION}" "${TOP_K}" "${MIN_SOURCES}" "${TOPOLOGY_HEADS}" \
+  "${NODE_FEATURE_MODE}" "${ACTIVATION_LAYER}" "${MAX_SEQ_LEN}" \
   "${MODE}" "${LIMIT}" "${GENERATOR_MODEL}" "${MODEL}" \
   "${ALL_PIPELINE}" "${SINGLE_PIPELINE}" "${DATASET_VALUES[@]}" <<'PY'
 import hashlib
@@ -149,13 +185,16 @@ request = {
     "top_k": sys.argv[9],
     "min_sources": sys.argv[10],
     "topology_heads": sys.argv[11],
-    "mode": sys.argv[12],
-    "limit": sys.argv[13],
-    "generator_model": sys.argv[14],
-    "observer_model": sys.argv[15],
-    "all_wrapper_sha256": hashlib.sha256(Path(sys.argv[16]).read_bytes()).hexdigest(),
-    "single_wrapper_sha256": hashlib.sha256(Path(sys.argv[17]).read_bytes()).hexdigest(),
-    "datasets": sys.argv[18:],
+    "node_feature_mode": sys.argv[12],
+    "activation_layer": sys.argv[13],
+    "max_seq_len": sys.argv[14],
+    "mode": sys.argv[15],
+    "limit": sys.argv[16],
+    "generator_model": sys.argv[17],
+    "observer_model": sys.argv[18],
+    "all_wrapper_sha256": hashlib.sha256(Path(sys.argv[19]).read_bytes()).hexdigest(),
+    "single_wrapper_sha256": hashlib.sha256(Path(sys.argv[20]).read_bytes()).hexdigest(),
+    "datasets": sys.argv[21:],
 }
 path = root / "pipeline_request.json"
 root.mkdir(parents=True, exist_ok=True)
@@ -189,6 +228,10 @@ printf 'model seed:      %s\n' "${SEEDS}"
 printf 'split:           seed=%s val=%s test=%s\n' "${SPLIT_SEED}" "${VAL_RATIO}" "${TEST_RATIO}"
 printf 'graph:           %s tau=%s fallback_top_k=%s min_sources=%s topology_heads=%s\n' \
   "${SOURCE_SELECTION}" "${THRESHOLD}" "${TOP_K}" "${MIN_SOURCES}" "${TOPOLOGY_HEADS}"
+printf 'nodes:           %s activation_layer=%s\n' \
+  "${NODE_FEATURE_MODE}" "${ACTIVATION_LAYER:-disabled}"
+printf 'sequence:        max_seq_len=%s (%s)\n' \
+  "${MAX_SEQ_LEN}" "${seq_policy_suffix#_}"
 printf 'generator:       %s\n' "${GENERATOR_MODEL:-all generators}"
 printf 'extraction:      %s, exact full forward\n' "${MODE}"
 printf 'extract GPUs:    %s, %s\n\n' "${GPU0:-0}" "${GPU1:-1}"
@@ -211,6 +254,8 @@ for dataset in "${DATASET_VALUES[@]}"; do
   SPLIT_SEED="${SPLIT_SEED}" VAL_RATIO="${VAL_RATIO}" TEST_RATIO="${TEST_RATIO}" \
   THRESHOLD="${THRESHOLD}" SOURCE_SELECTION="${SOURCE_SELECTION}" \
   TOP_K="${TOP_K}" MIN_SOURCES="${MIN_SOURCES}" TOPOLOGY_HEADS="${TOPOLOGY_HEADS}" \
+  NODE_FEATURE_MODE="${NODE_FEATURE_MODE}" ACTIVATION_LAYER="${ACTIVATION_LAYER}" \
+  MAX_SEQ_LEN="${MAX_SEQ_LEN}" \
     bash "${SINGLE_PIPELINE}" "${args[@]}"
 done
 
@@ -218,6 +263,7 @@ done
   "${run_suffix}" "${cohort_suffix}" "${GENERATOR_MODEL}" "${SEEDS}" \
   "${SPLIT_SEED}" "${VAL_RATIO}" "${TEST_RATIO}" "${THRESHOLD}" \
   "${SOURCE_SELECTION}" "${TOP_K}" "${MIN_SOURCES}" "${TOPOLOGY_HEADS}" \
+  "${NODE_FEATURE_MODE}" "${ACTIVATION_LAYER}" "${MAX_SEQ_LEN}" \
   "${LIMIT}" "${DATASET_VALUES[@]}" <<'PY'
 import hashlib
 import json
@@ -242,8 +288,11 @@ source_selection = sys.argv[12]
 top_k = sys.argv[13]
 min_sources = sys.argv[14]
 topology_heads = sys.argv[15]
-limit = sys.argv[16]
-datasets = sys.argv[17:]
+node_feature_mode = sys.argv[16]
+activation_layer = sys.argv[17]
+max_seq_len = sys.argv[18]
+limit = sys.argv[19]
+datasets = sys.argv[20:]
 metric_names = ("auroc", "aupr", "accuracy_0.5")
 
 per_dataset = {}
@@ -290,6 +339,9 @@ for dataset in datasets:
         "top_k": top_k,
         "min_sources": min_sources,
         "topology_heads": topology_heads,
+        "node_feature_mode": node_feature_mode,
+        "activation_layer": activation_layer,
+        "max_seq_len": max_seq_len,
         "seeds": model_seed,
         "preflight_sha256": preflight_sha256,
     }
@@ -351,13 +403,22 @@ summary = {
     "split_seed": int(split_seed),
     "generator_model": generator_model,
     "method_contract": {
-        "node_features": "self-attention diagonal over all extracted heads",
+        "node_feature_mode": node_feature_mode,
+        "activation_layer": None if not activation_layer else int(activation_layer),
+        "node_features": (
+            "self-attention diagonal over all extracted heads"
+            if node_feature_mode == "attention_diagonal"
+            else "post-block hidden state"
+            if node_feature_mode == "activation_only"
+            else "self-attention diagonal concatenated with post-block hidden state"
+        ),
         "edge_attributes": ["attention_mean", "attention_max", "flattened_head_normalized"],
         "source_selection": source_selection,
         "fallback_top_k": int(top_k),
         "min_sources_before_center": int(min_sources),
         "topology_heads": topology_heads,
         "threshold": float(threshold),
+        "max_seq_len": int(max_seq_len),
     },
     "datasets": datasets,
     "per_dataset": per_dataset,
@@ -375,6 +436,9 @@ rows = [
     "# All-ProcessBench Fixed Held-Out Test",
     "",
     f"- Layer: `{layer}`",
+    f"- Node features: `{node_feature_mode}`; hidden_states index: "
+    f"`{activation_layer or 'disabled'}`",
+    f"- Sequence policy: `max_seq_len={max_seq_len}`",
     f"- Generator cohort: `{generator_model or 'all generators'}`",
     f"- Split seed: `{split_seed}`; model seed: `{model_seed}`",
     "- Model selection uses validation AUPRC; each held-out test is evaluated once.",
