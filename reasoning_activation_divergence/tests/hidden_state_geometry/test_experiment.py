@@ -226,3 +226,42 @@ def test_production_plugin_runs_through_generic_runner_on_raw_shards(tmp_path):
         "summary"
     ]["increments"]
     assert result["method"]["name"] == "raw_functional_probe"
+
+
+def test_full_tensor_ridge_runs_through_the_same_generic_runner(tmp_path):
+    sources = tuple(
+        _source(tmp_path / "data", domain, index)
+        for index, domain in enumerate(("gsm8k", "math", "olympiad", "omnimath"))
+    )
+
+    result = run_hidden_geometry_experiment(
+        sources=sources,
+        output_dir=tmp_path / "full_tensor_ridge",
+        response_generator="llama3.1-8b",
+        observer_model="llama3.1-8b",
+        tasks=("whole_chain",),
+        method_name="full_tensor_ridge",
+        method_config={
+            "pca_dim": 2,
+            "time_basis": 2,
+            "layer_basis": 2,
+            "positions_per_chain": 2,
+            "l2_grid": [0.01],
+            "max_iter": 300,
+        },
+        n_boot=5,
+        seed=11,
+    )
+
+    task = result["tasks"]["whole_chain"]
+    assert result["method"]["name"] == "full_tensor_ridge"
+    assert set(task["summary"]["increments"]) == {
+        "output_summary_given_nuisance_nll",
+        "hidden_given_nuisance_nll",
+        "hidden_given_output_summary_nll",
+    }
+    assert task["fold_diagnostics"][0]["flattened_hidden_dim"] == 8
+    assert (
+        task["fold_diagnostics"][0]["comparison_design"]
+        == "outer_lodo_fixed_l2_full_tensor_ridge"
+    )

@@ -9,6 +9,21 @@ def group_balanced_weights(groups: np.ndarray) -> np.ndarray:
     return weights / weights.mean()
 
 
+def domain_group_balanced_weights(
+    domains: np.ndarray, groups: np.ndarray
+) -> np.ndarray:
+    domain = np.asarray(domains)
+    group = np.asarray(groups)
+    if domain.ndim != 1 or group.shape != domain.shape or len(domain) == 0:
+        raise ValueError("domains and groups must be aligned non-empty vectors")
+    weights = np.zeros(len(domain), dtype=np.float64)
+    for value in np.unique(domain):
+        mask = domain == value
+        within_domain = group_balanced_weights(group[mask])
+        weights[mask] = within_domain / within_domain.sum()
+    return weights / weights.mean()
+
+
 class FiniteStandardizer:
     def __init__(self) -> None:
         self.center_: np.ndarray | None = None

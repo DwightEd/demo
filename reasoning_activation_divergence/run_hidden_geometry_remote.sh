@@ -60,8 +60,24 @@ case "${MODE}" in
       --l2 1.0 --restarts 3 --max-iter 500 --null-repeats 3 --bootstrap 2000 \
       --output-dir "${OUTPUT_ROOT}/full_${RUN_TAG}"
     ;;
+  ridge-smoke)
+    ridge_config='{"pca_dim":8,"time_basis":3,"layer_basis":3,"positions_per_chain":16,"l2_grid":[0.0001,0.001,0.01,0.1],"max_iter":300}'
+    "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+      "${common[@]}" --tasks whole_chain,strict_prefix \
+      --method full_tensor_ridge --method-config-json "${ridge_config}" \
+      --max-records-per-domain 32 --bootstrap 200 \
+      --output-dir "${OUTPUT_ROOT}/ridge_smoke_${RUN_TAG}"
+    ;;
+  ridge-full)
+    ridge_config='{"pca_dim":16,"time_basis":3,"layer_basis":3,"positions_per_chain":32,"l2_grid":[0.00001,0.0001,0.001,0.01,0.1,1.0],"max_iter":500}'
+    "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+      "${common[@]}" --tasks whole_chain,strict_prefix \
+      --method full_tensor_ridge --method-config-json "${ridge_config}" \
+      --max-records-per-domain 0 --bootstrap 2000 \
+      --output-dir "${OUTPUT_ROOT}/ridge_full_${RUN_TAG}"
+    ;;
   *)
-    echo "usage: $0 preflight|smoke|full" >&2
+    echo "usage: $0 preflight|smoke|full|ridge-smoke|ridge-full" >&2
     exit 2
     ;;
 esac

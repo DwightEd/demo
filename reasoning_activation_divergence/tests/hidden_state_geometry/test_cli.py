@@ -66,3 +66,15 @@ def test_cli_preserves_plugin_default_config_unless_json_is_explicit(tmp_path):
     )
     assert isinstance(raw, RawFunctionalConfig)
     assert raw.pca_dim == 8
+
+
+def test_remote_runner_exposes_foreground_full_tensor_ridge_modes():
+    runner = Path(__file__).resolve().parents[2] / "run_hidden_geometry_remote.sh"
+    script = runner.read_text(encoding="utf-8")
+
+    assert "ridge-smoke)" in script
+    assert "ridge-full)" in script
+    assert "--method full_tensor_ridge" in script
+    assert "nohup" not in script
+    assert "screen -dmS" not in script
+    assert "tmux" not in script
