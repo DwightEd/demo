@@ -18,6 +18,11 @@ cross-validation fold 只使用训练集中的全正确样本拟合：
 这些是存储 residual states 上的经验局部算子，不是 autograd Jacobian，也不是
 model-native logits Fisher。
 
+另有 `hidden_state_geometry` 子系统，不拟合“正常流形”，而是直接检验完整 raw hidden
+trajectory 在 entropy/NLL 输出摘要之外是否提供跨数据集判别增量。它把 whole-chain
+retrospective 分析与 strict-prefix prospective 分析严格分开，见
+[HIDDEN_STATE_GEOMETRY_METHOD.md](HIDDEN_STATE_GEOMETRY_METHOD.md)。
+
 ## 工程结构
 
 ```text
@@ -31,6 +36,7 @@ reporting.py    JSON、CSV、figure artifact writer
 runner.py       单一实验应用服务
 progress.py     tqdm/测试进度接口
 raw_residual_experiment.py  CLI 与兼容入口
+hidden_state_geometry/     可插拔 hidden 方法、通用任务、LODO 与 artifact runner
 ```
 
 manifest 元数据不会作为大字典贯穿调用链。`SourceProvenance` 与
@@ -48,6 +54,9 @@ manifest 元数据不会作为大字典贯穿调用链。`SourceProvenance` 与
 设计与迁移边界见 [REFACTOR_PLAN.md](REFACTOR_PLAN.md)，研究方法见
 [REAL_RAW_RESIDUAL_METHOD.md](REAL_RAW_RESIDUAL_METHOD.md)，远端前台运行见
 [RUN_RAW_REMOTE.md](RUN_RAW_REMOTE.md)。
+
+新 hidden 判别实验的远端前台命令见
+[RUN_HIDDEN_GEOMETRY_REMOTE.md](RUN_HIDDEN_GEOMETRY_REMOTE.md)。
 
 ## 验证
 
