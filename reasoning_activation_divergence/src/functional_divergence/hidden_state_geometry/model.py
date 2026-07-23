@@ -15,13 +15,24 @@ class RegularizedLogistic:
         self.max_iter = int(max_iter)
         self.parameters_: np.ndarray | None = None
         self.converged_: bool = False
+        self.iterations_: int | None = None
+        self.objective_: float | None = None
+        self.gradient_inf_norm_: float | None = None
+        self.message_: str | None = None
 
     def fit(
         self,
         values: np.ndarray,
         labels: np.ndarray,
         sample_weight: np.ndarray | None = None,
+        initial_parameters: np.ndarray | None = None,
     ) -> "RegularizedLogistic":
+        self.parameters_ = None
+        self.converged_ = False
+        self.iterations_ = None
+        self.objective_ = None
+        self.gradient_inf_norm_ = None
+        self.message_ = None
         x = np.asarray(values, dtype=np.float64)
         y = np.asarray(labels, dtype=np.float64)
         if x.ndim != 2 or y.shape != (len(x),) or len(np.unique(y)) != 2:
@@ -48,9 +59,18 @@ class RegularizedLogistic:
             )
             return float(loss), gradient
 
-        prevalence = float(np.average(y, weights=weight))
-        start = np.zeros(x.shape[1] + 1, dtype=np.float64)
-        start[0] = np.log((prevalence + 1e-4) / (1.0 - prevalence + 1e-4))
+        if initial_parameters is None:
+            prevalence = float(np.average(y, weights=weight))
+            start = np.zeros(x.shape[1] + 1, dtype=np.float64)
+            start[0] = np.log((prevalence + 1e-4) / (1.0 - prevalence + 1e-4))
+        else:
+            start = np.asarray(initial_parameters, dtype=np.float64)
+            if start.shape != (x.shape[1] + 1,) or not np.isfinite(start).all():
+                raise ValueError(
+                    "initial_parameters must be finite and contain one intercept "
+                    "plus one coefficient per feature"
+                )
+            start = start.copy()
         result = minimize(
             objective,
             start,
@@ -58,12 +78,28 @@ class RegularizedLogistic:
             method="L-BFGS-B",
             options={"maxiter": self.max_iter, "ftol": 1e-10},
         )
+        objective_value = float(result.fun) if np.isfinite(result.fun) else float("nan")
+        gradient = np.asarray(result.jac, dtype=np.float64)
+        gradient_inf_norm = (
+            float(np.max(np.abs(gradient))) if gradient.size and np.isfinite(gradient).all()
+            else float("nan")
+        )
+        self.iterations_ = int(result.nit)
+        self.objective_ = objective_value
+        self.gradient_inf_norm_ = gradient_inf_norm
+        self.message_ = str(result.message)
         if (
             not result.success
-            or not np.isfinite(result.fun)
+            or not np.isfinite(objective_value)
+            or not np.isfinite(gradient_inf_norm)
             or not np.isfinite(result.x).all()
         ):
-            raise RuntimeError(f"static optimization did not converge: {result.message}")
+            raise RuntimeError(
+                "static optimization did not converge: "
+                f"l2={self.l2:.12g}, max_iter={self.max_iter}, nit={self.iterations_}, "
+                f"objective={self.objective_:.12g}, "
+                f"grad_inf={self.gradient_inf_norm_:.12g}, message={self.message_}"
+            )
         self.parameters_ = np.asarray(result.x, dtype=np.float64)
         self.converged_ = bool(result.success)
         return self

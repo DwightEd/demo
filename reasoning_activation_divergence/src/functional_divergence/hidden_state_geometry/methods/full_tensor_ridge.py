@@ -32,7 +32,7 @@ class FullTensorRidgeConfig:
     layer_basis: int = 3
     positions_per_chain: int = 32
     l2_grid: tuple[float, ...] = (1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0)
-    max_iter: int = 500
+    max_iter: int = 2000
     selection_tolerance: float = 1e-8
 
     def __post_init__(self) -> None:
@@ -79,6 +79,7 @@ class _FittedArm:
     model: RegularizedLogistic
     scaler: FiniteStandardizer
     probability: np.ndarray
+    optimizer: dict[str, float | int | str]
 
 
 def _domains(examples: tuple) -> np.ndarray:
@@ -146,6 +147,61 @@ def _grid_edge(value: float, grid: tuple[float, ...]) -> str:
     return "none"
 
 
+def _optimizer_diagnostics(model: RegularizedLogistic) -> dict[str, float | int | str]:
+    if (
+        model.iterations_ is None
+        or model.objective_ is None
+        or model.gradient_inf_norm_ is None
+        or model.message_ is None
+    ):
+        raise RuntimeError("converged ridge model is missing optimizer diagnostics")
+    return {
+        "iterations": model.iterations_,
+        "objective": model.objective_,
+        "gradient_inf_norm": model.gradient_inf_norm_,
+        "message": model.message_,
+    }
+
+
+def fit_ridge_path(
+    train: np.ndarray,
+    labels: np.ndarray,
+    sample_weight: np.ndarray,
+    l2_values: tuple[float, ...],
+    max_iter: int,
+    reporter: ProgressReporter | None = None,
+    description: str | None = None,
+) -> dict[float, RegularizedLogistic]:
+    """Fit a strong-to-weak convex ridge continuation path without fallbacks."""
+    path = tuple(sorted({float(value) for value in l2_values}, reverse=True))
+    if not path or any(not np.isfinite(value) or value <= 0 for value in path):
+        raise ValueError("ridge path needs finite positive l2 values")
+    fitted: dict[float, RegularizedLogistic] = {}
+    initial_parameters = None
+    progress = (
+        reporter.track(
+            path,
+            total=len(path),
+            description=description or "ridge path",
+        )
+        if reporter is not None
+        else path
+    )
+    for l2 in progress:
+        try:
+            model = RegularizedLogistic(l2=l2, max_iter=max_iter).fit(
+                train,
+                labels,
+                sample_weight,
+                initial_parameters=initial_parameters,
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(f"ridge path failed at l2={l2:.12g}") from exc
+        fitted[l2] = model
+        initial_parameters = model.coefficients
+    return fitted
+
+
 @register_method(
     "full_tensor_ridge",
     contrasts=(
@@ -199,21 +255,35 @@ class FullTensorRidge:
 
     def _fit_arm(
         self,
+        arm: str,
         train: np.ndarray,
         labels: np.ndarray,
         groups: np.ndarray,
         domains: np.ndarray,
         test: np.ndarray,
-        l2: float,
+        selected_l2: float,
+        reporter: ProgressReporter,
     ) -> _FittedArm:
         weights = domain_group_balanced_weights(domains, groups)
         scaler = FiniteStandardizer().fit(train, weights)
         train_scaled = scaler.transform(train)
         test_scaled = scaler.transform(test)
-        model = RegularizedLogistic(
-            l2=l2, max_iter=self.config.max_iter
-        ).fit(train_scaled, labels, weights)
-        return _FittedArm(model, scaler, model.predict_proba(test_scaled))
+        path = fit_ridge_path(
+            train_scaled,
+            labels,
+            weights,
+            tuple(value for value in self.config.l2_grid if value >= selected_l2),
+            self.config.max_iter,
+            reporter,
+            f"final {arm} ridge path to {selected_l2:.12g}",
+        )
+        model = path[selected_l2]
+        return _FittedArm(
+            model,
+            scaler,
+            model.predict_proba(test_scaled),
+            _optimizer_diagnostics(model),
+        )
 
     def _select_l2(
         self,
@@ -237,6 +307,7 @@ class FullTensorRidge:
             arm: {l2: [] for l2 in self.config.l2_grid}
             for arm in ARM_COMPONENTS
         }
+        inner_optimizer: dict[str, dict[str, dict[str, dict[str, float | int | str]]]] = {}
         projection_domains = {}
         splits = inner_lodo_splits(fold)
         for split_index, split in enumerate(splits):
@@ -283,25 +354,26 @@ class FullTensorRidge:
                 )
                 train_scaled = scaler.transform(train_designs[arm])
                 validation_scaled = scaler.transform(validation_designs[arm])
-                grid = reporter.track(
-                    self.config.l2_grid,
-                    total=len(self.config.l2_grid),
-                    description=f"{split.held_domain} {arm} ridge",
-                )
-                for l2 in grid:
-                    try:
-                        model = RegularizedLogistic(
-                            l2=l2, max_iter=self.config.max_iter
-                        ).fit(
-                            train_scaled,
-                            fold.train_labels[split.train],
-                            train_weights,
-                        )
-                    except RuntimeError as exc:
-                        raise RuntimeError(
-                            f"{arm} failed for inner held domain "
-                            f"{split.held_domain}, l2={l2}"
-                        ) from exc
+                try:
+                    path = fit_ridge_path(
+                        train_scaled,
+                        fold.train_labels[split.train],
+                        train_weights,
+                        self.config.l2_grid,
+                        self.config.max_iter,
+                        reporter,
+                        f"{split.held_domain} {arm} ridge",
+                    )
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        f"{arm} failed for inner held domain {split.held_domain}"
+                    ) from exc
+                inner_optimizer.setdefault(split.held_domain, {})[arm] = {
+                    f"{l2:.12g}": _optimizer_diagnostics(model)
+                    for l2, model in path.items()
+                }
+                for l2 in self.config.l2_grid:
+                    model = path[l2]
                     probability = model.predict_proba(validation_scaled)
                     scores[arm][l2].append(
                         _binary_nll(
@@ -341,6 +413,7 @@ class FullTensorRidge:
                 "projection_train_domains": projection_domains,
                 "score": "equal-inner-domain mean of group-balanced NLL",
                 "tie_break": "largest l2 within selection_tolerance",
+                "optimizer": inner_optimizer,
             },
         )
 
@@ -359,12 +432,14 @@ class FullTensorRidge:
         )
         for arm in arms:
             fitted[arm] = self._fit_arm(
+                arm,
                 train_designs[arm],
                 fold.train_labels,
                 fold.train_groups,
                 train_domains,
                 test_designs[arm],
                 selected_l2[arm],
+                reporter,
             )
 
         tensor_shape = encoded.train.rows.hidden.shape[1:]
@@ -445,6 +520,9 @@ class FullTensorRidge:
                 ),
                 "converged": {
                     arm: result.model.converged_ for arm, result in fitted.items()
+                },
+                "final_optimizer": {
+                    arm: result.optimizer for arm, result in fitted.items()
                 },
             },
             factors=factors,

@@ -129,3 +129,19 @@ results.json
 model_factors.npz
   <task>.fold_<k>.output_plus_hidden.hidden_tensor_coefficient
 ```
+
+## Convergence protocol
+
+Every ridge fit must genuinely converge; an incomplete L-BFGS iterate is never
+scored, saved, or replaced by a baseline. For each arm the regularization grid
+is fitted as a strong-to-weak continuation path: the largest L2 solution warm
+starts the next smaller L2, and so on. Inner-domain selection records every
+path point; final fitting repeats the path from the largest configured L2 down
+to the selected value. The default and both remote commands use a finite
+`max_iter=2000` budget, rather than retries without a stopping bound.
+
+`results.json` exposes `fold_diagnostics[*].final_optimizer` and
+`fold_diagnostics[*].selection.optimizer`. Each entry includes the L-BFGS
+iteration count, objective, infinity norm of the analytic gradient, and solver
+message. A failed fit reports L2, iteration budget, actual iterations,
+objective, gradient norm, and the solver message.

@@ -61,7 +61,7 @@ case "${MODE}" in
       --output-dir "${OUTPUT_ROOT}/full_${RUN_TAG}"
     ;;
   ridge-smoke)
-    ridge_config='{"pca_dim":8,"time_basis":3,"layer_basis":3,"positions_per_chain":16,"l2_grid":[0.0001,0.001,0.01,0.1],"max_iter":300}'
+    ridge_config='{"pca_dim":8,"time_basis":3,"layer_basis":3,"positions_per_chain":16,"l2_grid":[0.0001,0.001,0.01,0.1],"max_iter":2000}'
     "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
       "${common[@]}" --tasks whole_chain,strict_prefix \
       --method full_tensor_ridge --method-config-json "${ridge_config}" \
@@ -69,7 +69,7 @@ case "${MODE}" in
       --output-dir "${OUTPUT_ROOT}/ridge_smoke_${RUN_TAG}"
     ;;
   ridge-full)
-    ridge_config='{"pca_dim":16,"time_basis":3,"layer_basis":3,"positions_per_chain":32,"l2_grid":[0.00001,0.0001,0.001,0.01,0.1,1.0],"max_iter":500}'
+    ridge_config='{"pca_dim":16,"time_basis":3,"layer_basis":3,"positions_per_chain":32,"l2_grid":[0.00001,0.0001,0.001,0.01,0.1,1.0],"max_iter":2000}'
     "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
       "${common[@]}" --tasks whole_chain,strict_prefix \
       --method full_tensor_ridge --method-config-json "${ridge_config}" \

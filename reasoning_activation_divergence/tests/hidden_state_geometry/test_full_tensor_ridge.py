@@ -4,14 +4,20 @@ import numpy as np
 import pytest
 from sklearn.metrics import roc_auc_score
 
+from functional_divergence.hidden_state_geometry.methods import (
+    full_tensor_ridge as ridge_module,
+)
 from functional_divergence.hidden_state_geometry.contracts import ChainSample
 from functional_divergence.hidden_state_geometry.method import FoldInput
+from functional_divergence.hidden_state_geometry.model import RegularizedLogistic
 from functional_divergence.hidden_state_geometry.methods import load_builtin_methods
 from functional_divergence.hidden_state_geometry.methods.full_tensor_ridge import (
     FullTensorRidgeConfig,
+    fit_ridge_path,
     inner_lodo_splits,
 )
 from functional_divergence.hidden_state_geometry.preprocessing import (
+    FiniteStandardizer,
     domain_group_balanced_weights,
 )
 from functional_divergence.hidden_state_geometry.registry import (
@@ -19,6 +25,111 @@ from functional_divergence.hidden_state_geometry.registry import (
     method_spec,
 )
 from functional_divergence.hidden_state_geometry.tasks import build_whole_chain_task
+
+
+def _correlated_ridge_data() -> tuple[np.ndarray, np.ndarray]:
+    """Fixed high-correlation problem that needs strong-to-weak continuation."""
+    rng = np.random.default_rng(1)
+    latent = rng.normal(size=(72, 10))
+    loading = rng.normal(size=(10, 96))
+    values = latent @ loading + 0.05 * rng.normal(size=(72, 96))
+    weights = np.ones(len(values), dtype=np.float64)
+    standardized = FiniteStandardizer().fit(values, weights).transform(values)
+    beta = rng.normal(size=96)
+    labels = (standardized @ beta + 0.5 * rng.normal(size=72) > 0).astype(np.int8)
+    return standardized, labels
+
+
+def test_ridge_path_uses_strong_to_weak_warm_starts(monkeypatch):
+    calls = []
+
+    class FakeRidge:
+        def __init__(self, *, l2, max_iter):
+            self.l2 = l2
+            self.max_iter = max_iter
+            self._coefficients = np.asarray([l2, max_iter], dtype=np.float64)
+
+        def fit(self, values, labels, sample_weight, initial_parameters=None):
+            del values, labels, sample_weight
+            calls.append((self.l2, initial_parameters))
+            return self
+
+        @property
+        def coefficients(self):
+            return self._coefficients.copy()
+
+    monkeypatch.setattr(ridge_module, "RegularizedLogistic", FakeRidge)
+    fitted = fit_ridge_path(
+        np.ones((4, 2)),
+        np.asarray([0, 1, 0, 1]),
+        np.ones(4),
+        (0.001, 0.1, 0.01),
+        77,
+    )
+
+    assert tuple(fitted) == (0.1, 0.01, 0.001)
+    assert [l2 for l2, _ in calls] == [0.1, 0.01, 0.001]
+    assert calls[0][1] is None
+    assert np.array_equal(calls[1][1], np.asarray([0.1, 77.0]))
+    assert np.array_equal(calls[2][1], np.asarray([0.01, 77.0]))
+
+
+def test_ridge_path_stops_after_the_first_failed_path_point(monkeypatch):
+    calls = []
+
+    class FakeRidge:
+        def __init__(self, *, l2, max_iter):
+            self.l2 = l2
+            self._coefficients = np.asarray([l2, max_iter], dtype=np.float64)
+
+        def fit(self, values, labels, sample_weight, initial_parameters=None):
+            del values, labels, sample_weight, initial_parameters
+            calls.append(self.l2)
+            if self.l2 == 0.01:
+                raise RuntimeError("synthetic optimizer failure")
+            return self
+
+        @property
+        def coefficients(self):
+            return self._coefficients.copy()
+
+    monkeypatch.setattr(ridge_module, "RegularizedLogistic", FakeRidge)
+
+    with pytest.raises(RuntimeError, match="ridge path failed at l2=0.01"):
+        fit_ridge_path(
+            np.ones((4, 2)),
+            np.asarray([0, 1, 0, 1]),
+            np.ones(4),
+            (0.1, 0.01, 0.001),
+            77,
+        )
+
+    assert calls == [0.1, 0.01]
+
+
+def test_ridge_path_matches_independent_convex_fits_with_a_generous_budget():
+    values, labels = _correlated_ridge_data()
+    l2_path = (0.1, 0.01, 0.001)
+    weights = np.ones(len(labels), dtype=np.float64)
+    fitted = fit_ridge_path(values, labels, weights, l2_path, 2000)
+    cold = {
+        l2: RegularizedLogistic(l2=l2, max_iter=2000).fit(values, labels, weights)
+        for l2 in l2_path
+    }
+
+    for l2 in l2_path:
+        assert np.isclose(
+            fitted[l2].objective_,
+            cold[l2].objective_,
+            rtol=1e-4,
+            atol=1e-6,
+        )
+        assert np.allclose(
+            fitted[l2].predict_proba(values),
+            cold[l2].predict_proba(values),
+            rtol=1e-5,
+            atol=2e-3,
+        )
 
 
 def _rank_two_fold(tmp_path) -> tuple[FoldInput, np.ndarray, np.ndarray]:
@@ -91,6 +202,7 @@ def test_full_tensor_ridge_is_an_independent_registered_method():
     )
 
     assert isinstance(method.config, FullTensorRidgeConfig)
+    assert FullTensorRidgeConfig().max_iter == 2000
     assert isinstance(
         create_method("full_tensor_ridge", None).config, FullTensorRidgeConfig
     )
@@ -198,6 +310,17 @@ def test_full_tensor_ridge_learns_a_nonseparable_functional_signal(tmp_path):
     assert set(result.diagnostics["selected_l2"]) == expected
     assert set(result.diagnostics["selected_at_grid_edge"]) == expected
     assert set(result.diagnostics["inner_cv_scores"]) == expected
+    assert set(result.diagnostics["final_optimizer"]) == expected
+    for diagnostics in result.diagnostics["final_optimizer"].values():
+        assert diagnostics["iterations"] >= 0
+        assert np.isfinite(diagnostics["objective"])
+        assert np.isfinite(diagnostics["gradient_inf_norm"])
+        assert isinstance(diagnostics["message"], str)
+    for held_domain in result.diagnostics["selection"]["optimizer"].values():
+        assert set(held_domain) == expected
+        for arm_path in held_domain.values():
+            assert set(arm_path) == {"0.0001", "0.01"}
+            assert all(item["iterations"] >= 0 for item in arm_path.values())
     for held_domain, fitted_domains in result.diagnostics["selection"][
         "projection_train_domains"
     ].items():

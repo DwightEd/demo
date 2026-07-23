@@ -1,12 +1,71 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from sklearn.metrics import roc_auc_score
 
+from functional_divergence.hidden_state_geometry import model as model_module
 from functional_divergence.hidden_state_geometry.model import (
     RankOneLogistic,
     RegularizedLogistic,
 )
+
+
+def test_regularized_logistic_rejects_invalid_warm_start_parameters():
+    values = np.arange(24, dtype=np.float64).reshape(8, 3)
+    labels = np.asarray([0, 1] * 4, dtype=np.int8)
+
+    with pytest.raises(ValueError, match="initial_parameters must be finite"):
+        RegularizedLogistic(l2=0.1).fit(
+            values, labels, initial_parameters=np.zeros(values.shape[1])
+        )
+    with pytest.raises(ValueError, match="initial_parameters must be finite"):
+        RegularizedLogistic(l2=0.1).fit(
+            values,
+            labels,
+            initial_parameters=np.full(values.shape[1] + 1, np.nan),
+        )
+
+
+def test_regularized_logistic_exposes_convergence_diagnostics():
+    rng = np.random.default_rng(29)
+    values = rng.normal(size=(40, 4))
+    labels = (values[:, 0] > 0).astype(np.int8)
+
+    model = RegularizedLogistic(l2=0.1, max_iter=500).fit(values, labels)
+
+    assert model.converged_
+    assert model.iterations_ is not None and model.iterations_ >= 0
+    assert model.objective_ is not None and np.isfinite(model.objective_)
+    assert model.gradient_inf_norm_ is not None
+    assert np.isfinite(model.gradient_inf_norm_)
+    assert isinstance(model.message_, str)
+
+
+def test_regularized_logistic_rejects_nonfinite_gradient_and_clears_old_fit(
+    monkeypatch,
+):
+    values = np.arange(24, dtype=np.float64).reshape(8, 3)
+    labels = np.asarray([0, 1] * 4, dtype=np.int8)
+    model = RegularizedLogistic(l2=0.1, max_iter=50).fit(values, labels)
+
+    class FakeResult:
+        success = True
+        fun = 0.25
+        x = np.zeros(values.shape[1] + 1)
+        jac = np.full(values.shape[1] + 1, np.nan)
+        nit = 7
+        message = "synthetic nonfinite gradient"
+
+    monkeypatch.setattr(model_module, "minimize", lambda *args, **kwargs: FakeResult())
+
+    with pytest.raises(RuntimeError, match="grad_inf=nan"):
+        model.fit(values, labels)
+
+    assert model.parameters_ is None
+    assert model.converged_ is False
+    assert model.gradient_inf_norm_ is not None
+    assert np.isnan(model.gradient_inf_norm_)
 
 
 def test_rank_one_probe_recovers_a_synthetic_tensor_signal():
