@@ -4,8 +4,9 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from ...progress import NullProgress, ProgressReporter
+from ...progress import NullProgress
 from ..config import RawFunctionalConfig
+from ..features import FunctionalFeatureBuilder
 from ..method import FoldInput, MethodFoldResult
 from ..model import RankOneLogistic, RegularizedLogistic
 from ..preprocessing import (
@@ -13,19 +14,6 @@ from ..preprocessing import (
     group_balanced_weights,
 )
 from ..registry import ContrastSpec, RandomizationSpec, register_method
-from ..representation import ChainBalancedPCA, FunctionalEncoder
-from ..tasks import load_visible_states, nuisance_features
-
-
-def _key(row) -> tuple[str, int]:
-    return row.sample.dataset, row.sample.chain_id
-
-
-@dataclass(frozen=True)
-class _EncodedRows:
-    nuisance: np.ndarray
-    output: np.ndarray
-    hidden: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -38,45 +26,6 @@ class _TensorArm:
     objective: float | None
     baseline_objective: float | None
     signal_restarts_converged: int
-
-
-def _projection_cache(rows, encoder, reporter: ProgressReporter, description: str):
-    latest = {}
-    for row in rows:
-        key = _key(row)
-        if key not in latest or row.visible_steps > latest[key].visible_steps:
-            latest[key] = row
-    cache = {}
-    tracked = reporter.track(latest.items(), total=len(latest), description=description)
-    for key, row in tracked:
-        cache[key] = encoder.projector.transform(load_visible_states(row))
-    return cache
-
-
-def _encode(rows, encoder, cache, reporter: ProgressReporter, description: str) -> _EncodedRows:
-    encoded = []
-    tracked = reporter.track(rows, total=len(rows), description=description)
-    for row in tracked:
-        projected = cache[_key(row)]
-        encoded.append(
-            (
-                nuisance_features(row)[1],
-                encoder.output_features(row),
-                encoder.hidden_tensor(row, projected=projected),
-            )
-        )
-    columns = tuple(np.stack(values, axis=0) for values in zip(*encoded))
-    return _EncodedRows(*columns)
-
-
-def _encode_nulls(rows, encoder, cache, reporter, description):
-    time, layer = [], []
-    tracked = reporter.track(rows, total=len(rows), description=description)
-    for row in tracked:
-        projected = cache[_key(row)]
-        time.append(encoder.hidden_tensor(row, null="time", projected=projected))
-        layer.append(encoder.hidden_tensor(row, null="layer", projected=projected))
-    return np.stack(time, axis=0), np.stack(layer, axis=0)
 
 
 @register_method(
@@ -175,31 +124,15 @@ class RawFunctionalProbe:
 
     def fit_predict(self, fold: FoldInput) -> MethodFoldResult:
         reporter = fold.progress or NullProgress()
-        reporter.stage("projection", fold.task_name)
-        projector = ChainBalancedPCA(
-            dim=self.config.pca_dim,
-            positions_per_chain=self.config.positions_per_chain,
-            seed=fold.seed,
-        ).fit(fold.train_examples, progress=reporter)
-        encoder = FunctionalEncoder(
-            projector,
+        encoded = FunctionalFeatureBuilder(
+            pca_dim=self.config.pca_dim,
             time_basis=self.config.time_basis,
             layer_basis=self.config.layer_basis,
-            null_seed=fold.seed,
-        )
-        reporter.stage("encode", fold.task_name)
-        train_cache = _projection_cache(
-            fold.train_examples, encoder, reporter, "train projected chains"
-        )
-        test_cache = _projection_cache(
-            fold.test_examples, encoder, reporter, "test projected chains"
-        )
-        train = _encode(
-            fold.train_examples, encoder, train_cache, reporter, "train examples"
-        )
-        test = _encode(
-            fold.test_examples, encoder, test_cache, reporter, "test examples"
-        )
+            positions_per_chain=self.config.positions_per_chain,
+            seed=fold.seed,
+        ).build(fold)
+        projector, encoder = encoded.projector, encoded.encoder
+        train, test = encoded.train.rows, encoded.test.rows
         combined_train = np.column_stack([train.nuisance, train.output])
         combined_test = np.column_stack([test.nuisance, test.output])
 
@@ -252,19 +185,15 @@ class RawFunctionalProbe:
             null_seed = fold.seed + 7919 * (repeat + 1)
             null_seeds.append(null_seed)
             null_encoder = replace(encoder, null_seed=null_seed)
-            train_nulls = _encode_nulls(
-                fold.train_examples,
+            train_nulls = encoded.train.null_hidden(
                 null_encoder,
-                train_cache,
-                reporter,
-                f"train null r{repeat}",
+                reporter=reporter,
+                description=f"train null r{repeat}",
             )
-            test_nulls = _encode_nulls(
-                fold.test_examples,
+            test_nulls = encoded.test.null_hidden(
                 null_encoder,
-                test_cache,
-                reporter,
-                f"test null r{repeat}",
+                reporter=reporter,
+                description=f"test null r{repeat}",
             )
             for name, train_null, test_null in zip(
                 ("time", "layer"), train_nulls, test_nulls

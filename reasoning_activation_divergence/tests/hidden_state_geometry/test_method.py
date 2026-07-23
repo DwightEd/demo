@@ -6,6 +6,7 @@ import numpy as np
 
 from functional_divergence.hidden_state_geometry.config import RawFunctionalConfig
 from functional_divergence.hidden_state_geometry.contracts import ChainSample
+from functional_divergence.hidden_state_geometry.features import FunctionalFeatureBuilder
 from functional_divergence.hidden_state_geometry.method import FoldInput
 from functional_divergence.hidden_state_geometry.methods import load_builtin_methods
 from functional_divergence.hidden_state_geometry.registry import create_method
@@ -60,6 +61,28 @@ def _fold(tmp_path, *, identical_hidden: bool) -> FoldInput:
         test_examples=tuple(task.examples[i] for i in test),
         seed=13,
     )
+
+
+def test_shared_feature_builder_fits_projection_on_outer_train_only(tmp_path):
+    fold = _fold(tmp_path, identical_hidden=False)
+    encoded = FunctionalFeatureBuilder(
+        pca_dim=2,
+        time_basis=2,
+        layer_basis=2,
+        positions_per_chain=4,
+        seed=fold.seed,
+    ).build(fold)
+
+    assert encoded.train.rows.hidden.shape == (24, 2, 2, 2)
+    assert encoded.test.rows.hidden.shape == (8, 2, 2, 2)
+    assert encoded.projector.training_rows == 24 * 4
+    assert {dataset for dataset, _ in encoded.projector.sampled_rows_per_chain} == {
+        "train"
+    }
+    nulls = encoded.train.null_hidden(
+        encoded.encoder, reporter=RecordingProgress(), description="train null"
+    )
+    assert all(values.shape == encoded.train.rows.hidden.shape for values in nulls)
 
 
 def test_raw_functional_method_is_a_plugin_and_returns_common_arms(tmp_path):
