@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 from ..progress import TqdmProgress
+from .console import format_preflight_summary, format_run_summary
 from .config import RawFunctionalConfig
 from .contracts import TraceSource
 from .experiment import inspect_hidden_geometry_sources, run_hidden_geometry_experiment
@@ -138,6 +139,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     if args.command == "preflight":
         result = inspect_hidden_geometry_sources(**common, progress=TqdmProgress())
+        print(format_preflight_summary(result))
     else:
         result = run_hidden_geometry_experiment(
             **common,
@@ -148,7 +150,7 @@ def main(argv: list[str] | None = None) -> None:
             n_boot=args.bootstrap,
             progress=TqdmProgress(),
         )
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+        print(format_run_summary(result, args.output_dir.expanduser().resolve()))
 
 
 if __name__ == "__main__":

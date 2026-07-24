@@ -145,3 +145,11 @@ to the selected value. The default and both remote commands use a finite
 iteration count, objective, infinity norm of the analytic gradient, and solver
 message. A failed fit reports L2, iteration budget, actual iterations,
 objective, gradient norm, and the solver message.
+
+## Foreground console output
+
+The foreground CLI prints only the output directory, run provenance, and
+domain-macro, problem-group-balanced AUROC/AUPRC/NLL for each arm. It also
+prints the conditional test problem-group bootstrap replicate count and each
+increment's conditional bootstrap confidence interval. Detailed fold and
+optimizer diagnostics remain available only in `results.json`.
