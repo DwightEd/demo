@@ -1,0 +1,7 @@
+# Keep the server's existing CUDA-enabled torch installation.
+numpy>=1.26,<3
+pytest>=8,<9
+safetensors>=0.4,<1
+transformers>=4.57,<5
+accelerate>=0.34,<2
+tqdm>=4.66,<5

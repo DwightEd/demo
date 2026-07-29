@@ -1,0 +1,90 @@
+{
+  "experiment": {
+    "name": "ragtruth_counterfactual_write_pilot",
+    "seed": 42,
+    "paired_split_key": "response_id"
+  },
+  "views": {
+    "required": ["factual", "counterfactual"],
+    "optional": ["paraphrase"],
+    "require_identical_response_token_ids": true,
+    "require_identical_provenance": true,
+    "require_identical_output_directions": true,
+    "require_validated_perturbations": true,
+    "counterfactual_kinds": [
+      "evidence_removal",
+      "evidence_replacement",
+      "contradiction",
+      "random_context"
+    ]
+  },
+  "extraction_contract": {
+    "topology": "attention_selected",
+    "attribution": "source_resolved_residual_write",
+    "expected_update_source": "independent_model_hook",
+    "lock_fields": [
+      "model_id",
+      "model_revision",
+      "tokenizer_id",
+      "tokenizer_revision",
+      "prompt_format_id",
+      "layer_id",
+      "extractor_id",
+      "projection_id",
+      "output_anchor_id",
+      "teacher_forcing_offset"
+    ]
+  },
+  "builder": {
+    "attention_threshold": 0.05,
+    "min_sources": 2,
+    "reconstruction_tolerance": 1e-06,
+    "evidence_role": 0
+  },
+  "one_class": {
+    "shrinkage": 0.1,
+    "max_features": 256,
+    "projection_seed": 0,
+    "components": [
+      "factual_response_state",
+      "factual_hypergraph_relation",
+      "context_response_state_delta",
+      "context_hypergraph_relation_delta"
+    ],
+    "reference_partition": "train_normal_only",
+    "reference_signal": "externally_verified_sample_level_correctness",
+    "output": "raw_score_and_empirical_reference_percentile"
+  },
+  "semi_supervised": {
+    "epochs": 20,
+    "learning_rate": 0.0005,
+    "weight_decay": 0.001,
+    "supervised_weight": 1.0,
+    "consistency_weight": 0.25,
+    "contrastive_weight": 0.25,
+    "contrastive_margin": 0.5,
+    "contrastive_eligibility": "explicit_boolean_token_mask",
+    "withheld_label_value": -1
+  },
+  "evaluation": {
+    "label_budgets": [0, 8, 32, 128],
+    "review_selection": {
+      "policy": "thresholded_decision_disagreement",
+      "threshold_source": "validation_partition"
+    },
+    "primary_metrics": ["token_auprc", "ece", "worst_group_auprc"],
+    "required_controls": [
+      "nuisance_only",
+      "hidden_mahalanobis",
+      "context_influence_only",
+      "matched_attention_only_graph",
+      "reproduced_attnhyper",
+      "reproduced_mvhtr",
+      "residual_feature_mlp",
+      "factor_gnn",
+      "role_preserving_rewire",
+      "write_norm_topology",
+      "write_mass_coverage_topology"
+    ]
+  }
+}
