@@ -115,6 +115,8 @@ counterfactual_residual_hypergraph/
 |   |-- training.py        # small transparent training loop
 |   |-- adapters.py        # adapted attention-only graph ablations
 |   |-- selection.py       # selective LLM-review queue policy
+|   |-- cohort.py          # balanced, problem-unique real-data selection
+|   |-- real_cct_audit.py  # split, graph, checkpoint, and prediction audit
 |   |-- synthetic.py       # deterministic CPU smoke data
 |   `-- cli.py
 `-- tests/
@@ -138,7 +140,7 @@ The smoke command writes `config.json`, `metrics.json`, `scores.json`, and
 `review_queue.json`. Synthetic metrics are contract checks, not scientific
 results.
 
-## RTX 4090 server smoke
+## RTX 4090 real-data baseline
 
 The repository includes one audited shell entry point for the declared server:
 
@@ -176,15 +178,35 @@ requirements intentionally omit `torch`; the script validates CUDA/BF16 first,
 pins the detected Torch version as a pip constraint, verifies that it did not
 change, and runs `pip check`.
 
-The `smoke` profile selects two GSM8K traces with at most 768 tokens and uses
-`top_sources=1`, `node_dim=32`. After that succeeds with safe GPU headroom, the
-larger engineering pilot is:
+The default `smoke` profile scans the whole GSM8K source instead of taking its
+ordered prefix. It deterministically selects 24 traces with at most 768 tokens:
+12 normal (`label=-1`) and 12 containing a first error (`label>=0`), with one
+trace per problem ID. It uses `top_sources=2`, `node_dim=32`, then performs a
+60/20/20 problem-disjoint split, trains a one-layer CCT-HG detector, and writes
+held-out metrics and a checkpoint. This is an evaluable engineering smoke, but
+24 traces are too few for a paper result. At the pre-specified
+`min_effect=min_synergy=0.01`, the smoke gate requires at least four
+intervention-supported higher-order edges overall and hyperedges in at least
+25% of training traces; otherwise it stops instead of silently reporting a
+sparse graph as a hypergraph result. The pilot raises the total-edge threshold
+to 12 while retaining 25% training-trace coverage. Setting
+`REQUIRE_HYPEREDGES=0` explicitly permits an engineering witness, but
+`summary.json` then downgrades the result to
+`real_processbench_cct_sparse_hyperedge_witness`,
+`real_processbench_cct_pair_graph_witness`, or
+`real_processbench_cct_no_edge_witness` when warranted.
+
+After that succeeds with safe GPU headroom, the larger engineering pilot is:
 
 ```bash
 PROFILE=pilot INSTALL_DEPS=0 bash scripts/run_remote_4090.sh
 ```
 
-The `pilot` profile uses eight traces, `top_sources=2`, and `node_dim=64`.
+The `pilot` profile uses 60 balanced, problem-unique traces, `top_sources=2`,
+`node_dim=64`, a two-layer detector, and 1,000 problem-bootstrap replicates.
+The auditable entry point intentionally does not run the optional CCT control
+suite yet: those transformed-cohort checkpoints still need independent
+provenance and replay validation before control comparisons can be reported.
 Environment variables can override every path and resource setting, for
 example:
 
@@ -208,15 +230,56 @@ The shell performs:
 3. dependency and source-tree fingerprints;
 4. the full CRWH test suite;
 5. the deterministic CRWH synthetic CPU pipeline;
-6. tokenizer-based selection of short ProcessBench records;
+6. tokenizer-based, response-label-balanced, problem-unique ProcessBench
+   selection using `label`, not `final_answer_correct`;
 7. real Llama-3.1-8B CCT extraction and trace inspection;
-8. a second free-GPU check immediately before model loading;
-9. fail-closed artifact validation and `_SUCCESS`/`_FAILED` markers.
+8. pair/hyperedge counts and a fail-closed audit that every train,
+   validation, and test partition contains both response classes;
+9. CCT-HG training with validation checkpoint selection and held-out test
+   evaluation;
+10. reload-and-reproduction validation of `model.safetensors`,
+    `checkpoint.json`, normalization, split, prediction, history, and metric
+    artifacts plus `_SUCCESS`/`_FAILED` markers.
+
+The main real artifacts are:
+
+```text
+outputs/remote_4090/<run-id>/
+|-- cohort-manifest.json
+|-- cct-graph-audit.json
+|-- cct-hypergraph-gate.json
+|-- cct-split-preflight.json
+|-- cct-real-result.json
+|-- source-tree.sha256
+|-- summary.json
+`-- cct-real-training/
+    |-- metrics.json
+    |-- model.safetensors
+    |-- checkpoint.json
+    |-- model.pt              # trusted-local compatibility only
+    |-- normalizer.npz
+    |-- split.json
+    |-- history.csv
+    |-- predictions_validation.csv
+    `-- predictions_test.csv
+```
+
+Inspect the newest completed run with:
+
+```bash
+RUN_DIR="$(find outputs/remote_4090 -mindepth 2 -maxdepth 2 \
+  -type f -name _SUCCESS -printf '%T@ %h\n' \
+  | sort -nr | head -n1 | cut -d' ' -f2-)"
+cat "${RUN_DIR}/summary.json"
+cat "${RUN_DIR}/cct-real-training/metrics.json"
+```
 
 This is deliberately **not** described as a real CRWH ProcessBench result. The
-real-model stage uses the existing CCT extractor to exercise the model/data/GPU
-compatibility path and the implemented Llama attention extraction code. A real
-paired-view CRWH run still requires:
+real output is a supervised, single-view CCT-HG baseline using constraint
+geometry and intervention-tested pair/hyperedges. It proves that real
+extraction, hypergraph training, held-out evaluation, and checkpointing work.
+It does not prove that the counterfactual multi-view semi/unsupervised CRWH
+method works. A real paired-view CRWH run still requires:
 
 - per-head writes shaped `[H,Q,N,R]` rather than CCT's head-aggregated
   `[Q,N,R]`;

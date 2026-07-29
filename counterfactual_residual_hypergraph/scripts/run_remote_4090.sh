@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# One audited server smoke:
+# One audited real-data server run:
 #   1. validate the declared model, ProcessBench source, Python, and free GPU;
 #   2. run the CRWH tests and deterministic synthetic pipeline;
-#   3. extract two real Llama/ProcessBench CCT traces and inspect them.
+#   3. select a balanced, problem-unique ProcessBench cohort;
+#   4. extract real Llama/ProcessBench CCT hypergraphs;
+#   5. train CCT-HG and evaluate problem-disjoint validation/test partitions.
 #
-# This script does not run a real paired-view CRWH ProcessBench experiment.
-# CRWH still needs a paired-view, per-head residual-write extractor before that
-# claim is valid. The real-model CCT stage is an extractor/GPU compatibility
-# witness, not a CRWH result.
+# The real result is a supervised, single-view CCT-HG baseline. This script
+# does not run a real paired-view CRWH ProcessBench experiment. CRWH still
+# needs a paired-view, per-head residual-write extractor before that claim is
+# valid; a CCT trace cannot be losslessly converted into a CRWH trace.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CRWH_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -28,6 +30,14 @@ ALLOW_BUSY_GPU="${ALLOW_BUSY_GPU:-0}"
 MIN_GPU_TOTAL_MIB="${MIN_GPU_TOTAL_MIB:-22000}"
 MIN_GPU_FREE_MIB="${MIN_GPU_FREE_MIB:-22000}"
 MIN_DISK_GIB="${MIN_DISK_GIB:-5}"
+SELECTION_SEED="${SELECTION_SEED:-17}"
+SPLIT_SEED="${SPLIT_SEED:-17}"
+TRAIN_SEED="${TRAIN_SEED:-17}"
+VALIDATION_RATIO="${VALIDATION_RATIO:-0.2}"
+TEST_RATIO="${TEST_RATIO:-0.2}"
+MIN_EFFECT="${MIN_EFFECT:-0.01}"
+MIN_SYNERGY="${MIN_SYNERGY:-0.01}"
+REQUIRE_HYPEREDGES="${REQUIRE_HYPEREDGES:-1}"
 
 require_absolute_path() {
   local variable_name="$1"
@@ -40,14 +50,30 @@ require_absolute_path() {
 
 case "${PROFILE}" in
   smoke)
-    LIMIT="${LIMIT:-2}"
-    TOP_SOURCES="${TOP_SOURCES:-1}"
+    LIMIT="${LIMIT:-24}"
+    TOP_SOURCES="${TOP_SOURCES:-2}"
     NODE_DIM="${NODE_DIM:-32}"
+    TRAIN_HIDDEN_DIM="${TRAIN_HIDDEN_DIM:-64}"
+    TRAIN_MODEL_LAYERS="${TRAIN_MODEL_LAYERS:-1}"
+    TRAIN_EPOCHS="${TRAIN_EPOCHS:-20}"
+    TRAIN_PATIENCE="${TRAIN_PATIENCE:-5}"
+    TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}"
+    BOOTSTRAP_REPLICATES="${BOOTSTRAP_REPLICATES:-200}"
+    MIN_TRAIN_HYPEREDGE_TRACE_COVERAGE="${MIN_TRAIN_HYPEREDGE_TRACE_COVERAGE:-0.25}"
+    MIN_TOTAL_HYPEREDGES="${MIN_TOTAL_HYPEREDGES:-4}"
     ;;
   pilot)
-    LIMIT="${LIMIT:-8}"
+    LIMIT="${LIMIT:-60}"
     TOP_SOURCES="${TOP_SOURCES:-2}"
     NODE_DIM="${NODE_DIM:-64}"
+    TRAIN_HIDDEN_DIM="${TRAIN_HIDDEN_DIM:-128}"
+    TRAIN_MODEL_LAYERS="${TRAIN_MODEL_LAYERS:-2}"
+    TRAIN_EPOCHS="${TRAIN_EPOCHS:-50}"
+    TRAIN_PATIENCE="${TRAIN_PATIENCE:-10}"
+    TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}"
+    BOOTSTRAP_REPLICATES="${BOOTSTRAP_REPLICATES:-1000}"
+    MIN_TRAIN_HYPEREDGE_TRACE_COVERAGE="${MIN_TRAIN_HYPEREDGE_TRACE_COVERAGE:-0.25}"
+    MIN_TOTAL_HYPEREDGES="${MIN_TOTAL_HYPEREDGES:-12}"
     ;;
   *)
     echo "PROFILE must be 'smoke' or 'pilot', got: ${PROFILE}" >&2
@@ -164,9 +190,29 @@ MAX_TOKENS=${MAX_TOKENS}
 MIN_GPU_TOTAL_MIB=${MIN_GPU_TOTAL_MIB}
 MIN_GPU_FREE_MIB=${MIN_GPU_FREE_MIB}
 MIN_DISK_GIB=${MIN_DISK_GIB}
+SELECTION_SEED=${SELECTION_SEED}
+SPLIT_SEED=${SPLIT_SEED}
+TRAIN_SEED=${TRAIN_SEED}
+VALIDATION_RATIO=${VALIDATION_RATIO}
+TEST_RATIO=${TEST_RATIO}
+MIN_EFFECT=${MIN_EFFECT}
+MIN_SYNERGY=${MIN_SYNERGY}
+REQUIRE_HYPEREDGES=${REQUIRE_HYPEREDGES}
+TRAIN_HIDDEN_DIM=${TRAIN_HIDDEN_DIM}
+TRAIN_MODEL_LAYERS=${TRAIN_MODEL_LAYERS}
+TRAIN_EPOCHS=${TRAIN_EPOCHS}
+TRAIN_PATIENCE=${TRAIN_PATIENCE}
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE}
+BOOTSTRAP_REPLICATES=${BOOTSTRAP_REPLICATES}
+MIN_TRAIN_HYPEREDGE_TRACE_COVERAGE=${MIN_TRAIN_HYPEREDGE_TRACE_COVERAGE}
+MIN_TOTAL_HYPEREDGES=${MIN_TOTAL_HYPEREDGES}
 RUN_DIR=${RUN_DIR}
 EOF
 
+if [[ "${REQUIRE_HYPEREDGES}" != "0" && "${REQUIRE_HYPEREDGES}" != "1" ]]; then
+  echo "REQUIRE_HYPEREDGES must be 0 or 1." >&2
+  exit 2
+fi
 stage "path_preflight"
 [[ -d "${CRWH_ROOT}/src/crwh" ]] || {
   echo "CRWH source directory is missing: ${CRWH_ROOT}/src/crwh" >&2
@@ -242,6 +288,98 @@ import sys
 print("python", sys.version)
 if sys.version_info < (3, 10):
     raise SystemExit("Python >= 3.10 is required")
+PY
+
+stage "experiment_contract"
+LIMIT="${LIMIT}" \
+TOP_SOURCES="${TOP_SOURCES}" \
+NODE_DIM="${NODE_DIM}" \
+MAX_TOKENS="${MAX_TOKENS}" \
+SELECTION_SEED="${SELECTION_SEED}" \
+SPLIT_SEED="${SPLIT_SEED}" \
+TRAIN_SEED="${TRAIN_SEED}" \
+VALIDATION_RATIO="${VALIDATION_RATIO}" \
+TEST_RATIO="${TEST_RATIO}" \
+MIN_EFFECT="${MIN_EFFECT}" \
+MIN_SYNERGY="${MIN_SYNERGY}" \
+REQUIRE_HYPEREDGES="${REQUIRE_HYPEREDGES}" \
+TRAIN_HIDDEN_DIM="${TRAIN_HIDDEN_DIM}" \
+TRAIN_MODEL_LAYERS="${TRAIN_MODEL_LAYERS}" \
+TRAIN_EPOCHS="${TRAIN_EPOCHS}" \
+TRAIN_PATIENCE="${TRAIN_PATIENCE}" \
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE}" \
+BOOTSTRAP_REPLICATES="${BOOTSTRAP_REPLICATES}" \
+MIN_TRAIN_HYPEREDGE_TRACE_COVERAGE="${MIN_TRAIN_HYPEREDGE_TRACE_COVERAGE}" \
+MIN_TOTAL_HYPEREDGES="${MIN_TOTAL_HYPEREDGES}" \
+"${PYTHON_BIN}" - <<'PY'
+import math
+import os
+
+
+def integer(name: str, *, minimum: int = 0) -> int:
+    raw = os.environ[name]
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise SystemExit(f"{name} must be an integer, got {raw!r}") from error
+    if str(value) != raw or value < minimum:
+        raise SystemExit(f"{name} must be an integer >= {minimum}, got {raw!r}")
+    return value
+
+
+def finite(name: str) -> float:
+    raw = os.environ[name]
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise SystemExit(
+            f"{name} must be a finite number, got {raw!r}"
+        ) from error
+    if not math.isfinite(value):
+        raise SystemExit(f"{name} must be finite, got {raw!r}")
+    return value
+
+
+limit = integer("LIMIT", minimum=6)
+if limit % 2:
+    raise SystemExit("LIMIT must be even for the balanced binary cohort")
+top_sources = integer("TOP_SOURCES", minimum=1)
+if os.environ["REQUIRE_HYPEREDGES"] == "1" and top_sources < 2:
+    raise SystemExit("TOP_SOURCES must be >=2 when REQUIRE_HYPEREDGES=1")
+for name in (
+    "NODE_DIM",
+    "MAX_TOKENS",
+    "TRAIN_HIDDEN_DIM",
+    "TRAIN_MODEL_LAYERS",
+    "TRAIN_EPOCHS",
+    "TRAIN_PATIENCE",
+    "TRAIN_BATCH_SIZE",
+    "BOOTSTRAP_REPLICATES",
+    "MIN_TOTAL_HYPEREDGES",
+):
+    integer(name, minimum=1)
+for name in ("SELECTION_SEED", "SPLIT_SEED", "TRAIN_SEED"):
+    integer(name, minimum=0)
+validation_ratio = finite("VALIDATION_RATIO")
+test_ratio = finite("TEST_RATIO")
+if (
+    validation_ratio <= 0.0
+    or test_ratio <= 0.0
+    or validation_ratio + test_ratio >= 1.0
+):
+    raise SystemExit(
+        "VALIDATION_RATIO and TEST_RATIO must be positive and sum to <1"
+    )
+if finite("MIN_EFFECT") < 0.0:
+    raise SystemExit("MIN_EFFECT must be non-negative")
+if finite("MIN_SYNERGY") <= 0.0:
+    raise SystemExit("MIN_SYNERGY must be positive")
+hyperedge_coverage = finite("MIN_TRAIN_HYPEREDGE_TRACE_COVERAGE")
+if not 0.0 < hyperedge_coverage <= 1.0:
+    raise SystemExit(
+        "MIN_TRAIN_HYPEREDGE_TRACE_COVERAGE must be in (0, 1]"
+    )
+print("experiment_contract=valid")
 PY
 
 stage "model_contract"
@@ -379,15 +517,21 @@ fi
 EXPECTED_TORCH_VERSION="${TORCH_VERSION_BEFORE}" "${PYTHON_BIN}" - <<'PY'
 import os
 
+import accelerate
 import numpy
 import pytest
+import safetensors
 import torch
+import tqdm
 import transformers
 
+print("accelerate", accelerate.__version__)
 print("numpy", numpy.__version__)
 print("pytest", pytest.__version__)
+print("safetensors", safetensors.__version__)
 print("torch", torch.__version__)
 print("torch_cuda", torch.version.cuda)
+print("tqdm", tqdm.__version__)
 print("transformers", transformers.__version__)
 print("cuda_available", torch.cuda.is_available())
 if torch.__version__ != os.environ["EXPECTED_TORCH_VERSION"]:
@@ -418,6 +562,7 @@ from pathlib import Path
 
 crwh_root = Path(os.environ["CRWH_ROOT"])
 cct_root = Path(os.environ["CCT_ROOT"])
+attention_root = cct_root.parent
 run_dir = Path(os.environ["RUN_DIR"])
 crwh_paths = []
 for relative in ("src", "tests", "configs", "scripts"):
@@ -459,8 +604,14 @@ cct_paths = [
     and "__pycache__" not in path.parts
     and path.suffix != ".pyc"
 ]
+cct_paths.extend(
+    attention_root / name
+    for name in ("splitting.py", "evaluation.py")
+)
+if any(not path.is_file() for path in cct_paths):
+    raise SystemExit("CCT/shared source witness contains a missing file")
 crwh_digest = tree_digest(crwh_root, crwh_paths)
-cct_digest = tree_digest(cct_root, cct_paths)
+cct_digest = tree_digest(attention_root, cct_paths)
 combined = hashlib.sha256(
     f"crwh:{crwh_digest}\ncct:{cct_digest}\n".encode("ascii")
 ).hexdigest()
@@ -479,7 +630,7 @@ if command -v git >/dev/null 2>&1 &&
   git -c safe.directory="${DEMO_ROOT}" -C "${DEMO_ROOT}" rev-parse HEAD \
     > "${RUN_DIR}/git-head.txt" 2>/dev/null; then
   git -c safe.directory="${DEMO_ROOT}" -C "${DEMO_ROOT}" \
-    status --short -- counterfactual_residual_hypergraph hypergraph/attention/cct \
+    status --short -- counterfactual_residual_hypergraph hypergraph/attention \
     > "${RUN_DIR}/git-status.txt"
 else
   echo "Git witness unavailable; source-tree.sha256 remains authoritative." |
@@ -522,29 +673,38 @@ if metrics.get("finite_scores") is not True:
 print("synthetic_metrics", json.dumps(metrics, sort_keys=True))
 PY
 
-stage "select_short_processbench_records"
+stage "select_balanced_processbench_cohort"
 SELECTED_INPUT="${RUN_DIR}/${SUBSET}_selected_${LIMIT}.jsonl"
+COHORT_MANIFEST="${RUN_DIR}/cohort-manifest.json"
 PB_INPUT="${PB_INPUT}" \
 MODEL_PATH="${MODEL_PATH}" \
 SELECTED_INPUT="${SELECTED_INPUT}" \
+COHORT_MANIFEST="${COHORT_MANIFEST}" \
 LIMIT="${LIMIT}" \
 MAX_TOKENS="${MAX_TOKENS}" \
+SELECTION_SEED="${SELECTION_SEED}" \
 "${PYTHON_BIN}" - <<'PY'
+import hashlib
 import json
 import os
+from dataclasses import dataclass
+from pathlib import Path
 
 from transformers import AutoTokenizer
 
+from crwh.cohort import select_balanced_unique
 from hypergraph.attention.cct.processbench import (
     PlainReasoningRenderer,
     ProcessBenchReader,
     TokenizerAligner,
 )
 
-source = os.environ["PB_INPUT"]
-destination = os.environ["SELECTED_INPUT"]
+source = Path(os.environ["PB_INPUT"])
+destination = Path(os.environ["SELECTED_INPUT"])
+manifest_path = Path(os.environ["COHORT_MANIFEST"])
 limit = int(os.environ["LIMIT"])
 max_tokens = int(os.environ["MAX_TOKENS"])
+seed = int(os.environ["SELECTION_SEED"])
 tokenizer = AutoTokenizer.from_pretrained(
     os.environ["MODEL_PATH"],
     use_fast=True,
@@ -552,42 +712,94 @@ tokenizer = AutoTokenizer.from_pretrained(
 )
 renderer = PlainReasoningRenderer()
 aligner = TokenizerAligner()
-selected = []
+
+
+@dataclass(frozen=True)
+class Candidate:
+    trace_id: str
+    problem_id: str
+    response_label: int
+    token_count: int
+    record: object
+
+
+candidates = []
+source_records = 0
+excluded_too_long = 0
 for record in ProcessBenchReader(source).records():
+    source_records += 1
     tokenized = aligner.tokenize(tokenizer, renderer.render(record))
     token_count = len(tokenized.input_ids)
     if token_count > max_tokens:
+        excluded_too_long += 1
         continue
-    selected.append(
-        {
+    candidates.append(
+        Candidate(
+            trace_id=record.trace_id,
+            problem_id=record.problem_id,
+            response_label=int(record.labels.first_error >= 0),
+            token_count=token_count,
+            record=record,
+        )
+    )
+
+selected = select_balanced_unique(candidates, limit=limit, seed=seed)
+response_class_counts = {
+    str(label): sum(item.response_label == label for item in selected)
+    for label in (0, 1)
+}
+with destination.open("w", encoding="utf-8") as stream:
+    for item in selected:
+        record = item.record
+        row = {
             "id": record.trace_id,
             "problem_id": record.problem_id,
             "problem": record.question,
             "steps": list(record.steps),
             "label": record.labels.first_error,
             "generator": record.generator_model,
-            "_token_count": token_count,
         }
-    )
-    print(
-        "selected",
-        record.trace_id,
-        "tokens",
-        token_count,
-        "steps",
-        len(record.steps),
-    )
-    if len(selected) == limit:
-        break
-if len(selected) != limit:
-    raise SystemExit(
-        f"Only found {len(selected)} records with <= {max_tokens} tokens; "
-        f"need {limit}"
-    )
-with open(destination, "w", encoding="utf-8") as stream:
-    for row in selected:
-        row.pop("_token_count")
         stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+        print(
+            "selected",
+            record.trace_id,
+            "class",
+            item.response_label,
+            "tokens",
+            item.token_count,
+            "steps",
+            len(record.steps),
+        )
+
+manifest = {
+    "source": str(source.resolve()),
+    "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    "source_records": source_records,
+    "eligible_records": len(candidates),
+    "excluded_too_long": excluded_too_long,
+    "max_tokens": max_tokens,
+    "selection_seed": seed,
+    "selection_policy": "balanced_response_label_problem_unique_sha256_rank",
+    "ground_truth": "ProcessBench label: -1=normal, >=0=first error step",
+    "selected_records": len(selected),
+    "selected_unique_problem_ids": len(
+        {item.problem_id for item in selected}
+    ),
+    "response_class_counts": response_class_counts,
+    "trace_ids": [item.trace_id for item in selected],
+    "problem_ids": [item.problem_id for item in selected],
+}
+manifest_path.write_text(
+    json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+    encoding="utf-8",
+)
+if manifest["selected_unique_problem_ids"] != limit:
+    raise SystemExit("balanced selection did not preserve unique problem IDs")
+if set(response_class_counts.values()) != {limit // 2}:
+    raise SystemExit(
+        f"balanced selection failed: response_class_counts={response_class_counts}"
+    )
+print("cohort_manifest", json.dumps(manifest, sort_keys=True))
 print("selected_input", destination)
 PY
 
@@ -603,6 +815,8 @@ cd "${DEMO_ROOT}"
   --top-sources "${TOP_SOURCES}" \
   --node-dim "${NODE_DIM}" \
   --projection-seed 17 \
+  --min-effect "${MIN_EFFECT}" \
+  --min-synergy "${MIN_SYNERGY}" \
   --dtype bfloat16 \
   --attention-implementation sdpa \
   --device cuda \
@@ -622,6 +836,47 @@ fi
   tee "${RUN_DIR}/cct-inspect.json"
 cp "${CCT_TRACES}"/extraction_config_*.json "${RUN_DIR}/"
 cp "${CCT_TRACES}"/extraction_failures_*.json "${RUN_DIR}/"
+cp "${COHORT_MANIFEST}" "${CCT_TRACES}/cohort-manifest.json"
+
+stage "real_cct_graph_and_split_audit"
+"${PYTHON_BIN}" -m crwh.real_cct_audit traces \
+  --traces "${CCT_TRACES}" \
+  --output-dir "${RUN_DIR}" \
+  --split-seed "${SPLIT_SEED}" \
+  --validation-ratio "${VALIDATION_RATIO}" \
+  --test-ratio "${TEST_RATIO}" \
+  --require-hyperedges "${REQUIRE_HYPEREDGES}" \
+  --min-train-hyperedge-trace-coverage "${MIN_TRAIN_HYPEREDGE_TRACE_COVERAGE}" \
+  --min-total-hyperedges "${MIN_TOTAL_HYPEREDGES}" \
+  --min-effect "${MIN_EFFECT}" \
+  --min-synergy "${MIN_SYNERGY}"
+
+stage "real_processbench_cct_graph_training"
+CCT_TRAIN_DIR="${RUN_DIR}/cct-real-training"
+"${PYTHON_BIN}" -m hypergraph.attention.cct train \
+  --traces "${CCT_TRACES}" \
+  --output "${CCT_TRAIN_DIR}" \
+  --hidden-dim "${TRAIN_HIDDEN_DIM}" \
+  --model-layers "${TRAIN_MODEL_LAYERS}" \
+  --epochs "${TRAIN_EPOCHS}" \
+  --patience "${TRAIN_PATIENCE}" \
+  --batch-size "${TRAIN_BATCH_SIZE}" \
+  --seed "${TRAIN_SEED}" \
+  --split-seed "${SPLIT_SEED}" \
+  --validation-ratio "${VALIDATION_RATIO}" \
+  --test-ratio "${TEST_RATIO}" \
+  --device cuda \
+  --bootstrap-replicates "${BOOTSTRAP_REPLICATES}" \
+  --source-tree-sha256-file "${RUN_DIR}/source-tree.sha256"
+cp "${COHORT_MANIFEST}" "${CCT_TRAIN_DIR}/cohort-manifest.json"
+
+stage "real_training_artifact_audit"
+"${PYTHON_BIN}" -m crwh.real_cct_audit training \
+  --training-dir "${CCT_TRAIN_DIR}" \
+  --traces "${CCT_TRACES}" \
+  --preflight "${RUN_DIR}/cct-split-preflight.json" \
+  --output "${RUN_DIR}/cct-real-result.json" \
+  --source-tree-sha256-file "${RUN_DIR}/source-tree.sha256"
 
 stage "summary"
 RUN_DIR="${RUN_DIR}" \
@@ -635,18 +890,54 @@ import os
 from pathlib import Path
 
 run_dir = Path(os.environ["RUN_DIR"])
+cohort = json.loads(
+    (run_dir / "cohort-manifest.json").read_text(encoding="utf-8")
+)
+graph_audit = json.loads(
+    (run_dir / "cct-graph-audit.json").read_text(encoding="utf-8")
+)
+hypergraph_gate = json.loads(
+    (run_dir / "cct-hypergraph-gate.json").read_text(encoding="utf-8")
+)
+result_kind = json.loads(
+    (run_dir / "cct-result-kind.json").read_text(encoding="utf-8")
+)["result_kind"]
+metrics = json.loads(
+    (run_dir / "cct-real-training" / "metrics.json").read_text(
+        encoding="utf-8"
+    )
+)
 summary = {
     "status": "success",
+    "result_kind": result_kind,
     "scope": [
         "CRWH tests",
         "CRWH synthetic CPU smoke",
-        "real Llama ProcessBench CCT extraction smoke",
+        "balanced real ProcessBench cohort selection",
+        "real Llama ProcessBench CCT graph extraction",
+        "problem-disjoint CCT graph training, validation, and test evaluation",
     ],
     "not_claimed": "real paired-view CRWH ProcessBench experiment",
+    "scientific_boundary": (
+        f"This is a supervised single-view {result_kind}. It is not the "
+        "counterfactual multi-view semi/unsupervised CRWH method. "
+        "Higher-order mechanism attribution additionally requires controls."
+    ),
     "profile": os.environ["PROFILE"],
     "model_path": os.environ["MODEL_PATH"],
     "processbench_input": os.environ["PB_INPUT"],
     "real_cct_traces": int(os.environ["TRACE_COUNT"]),
+    "cohort": {
+        "selection_policy": cohort["selection_policy"],
+        "response_class_counts": cohort["response_class_counts"],
+        "unique_problem_ids": cohort["selected_unique_problem_ids"],
+    },
+    "graph_audit": graph_audit,
+    "hypergraph_gate": hypergraph_gate,
+    "best_epoch": metrics["best_epoch"],
+    "validation": metrics["validation"],
+    "test": metrics["test"],
+    "training_artifacts": str(run_dir / "cct-real-training"),
     "run_dir": str(run_dir),
 }
 (run_dir / "summary.json").write_text(
@@ -657,6 +948,10 @@ print(json.dumps(summary, indent=2, ensure_ascii=False))
 PY
 
 echo
-echo "All supported smoke stages passed."
+echo "Real ProcessBench CCT graph extraction, training, and evaluation passed."
 echo "Artifacts: ${RUN_DIR}"
-echo "Scientific boundary: no real paired-view CRWH ProcessBench result was run."
+echo "Metrics: ${CCT_TRAIN_DIR}/metrics.json"
+echo "Checkpoint: ${CCT_TRAIN_DIR}/checkpoint.json"
+echo "Safe weights: ${CCT_TRAIN_DIR}/model.safetensors"
+echo "Scientific boundary: this is a supervised single-view CCT graph result,"
+echo "not a real paired-view CRWH ProcessBench result."

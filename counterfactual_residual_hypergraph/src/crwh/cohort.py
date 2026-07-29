@@ -44,10 +44,24 @@ def select_balanced_unique(
         trace_id = getattr(candidate, "trace_id", None)
         problem_id = getattr(candidate, "problem_id", None)
         label = getattr(candidate, "response_label", None)
-        if not isinstance(trace_id, str) or not trace_id.strip():
-            raise ValueError("candidate trace_id must be a non-empty string")
-        if not isinstance(problem_id, str) or not problem_id.strip():
-            raise ValueError("candidate problem_id must be a non-empty string")
+        if (
+            not isinstance(trace_id, str)
+            or not trace_id
+            or trace_id != trace_id.strip()
+            or any(ord(character) < 32 for character in trace_id)
+        ):
+            raise ValueError(
+                "candidate trace_id must be a canonical non-empty string"
+            )
+        if (
+            not isinstance(problem_id, str)
+            or not problem_id
+            or problem_id != problem_id.strip()
+            or any(ord(character) < 32 for character in problem_id)
+        ):
+            raise ValueError(
+                "candidate problem_id must be a canonical non-empty string"
+            )
         if isinstance(label, bool) or not isinstance(label, Integral):
             raise ValueError("candidate response_label must be 0 or 1")
         label = int(label)

@@ -198,6 +198,24 @@ class CausalHypergraph:
             raise ValueError("receivers contain an invalid node")
         if np.any((response_nodes < 0) | (response_nodes >= len(nodes))):
             raise ValueError("response_nodes contain an invalid node")
+        if not np.isin(edge_kind, ("pair", "hyper")).all():
+            raise ValueError("edge_kind must contain only pair or hyper")
+        for edge, (receiver, kind) in enumerate(zip(receivers, edge_kind)):
+            members = incidence[0, incidence[1] == edge]
+            if len(members) != len(set(int(node) for node in members)):
+                raise ValueError("each edge must contain unique node memberships")
+            if int(np.sum(members == receiver)) != 1:
+                raise ValueError(
+                    "each edge must contain its receiver exactly once"
+                )
+            if kind == "pair" and len(members) != 2:
+                raise ValueError(
+                    "a pair edge must contain one source and one receiver"
+                )
+            if kind == "hyper" and len(members) < 3:
+                raise ValueError(
+                    "a hyperedge must contain at least two sources and one receiver"
+                )
         object.__setattr__(self, "node_features", nodes)
         object.__setattr__(self, "incidence", incidence)
         object.__setattr__(self, "receivers", receivers)

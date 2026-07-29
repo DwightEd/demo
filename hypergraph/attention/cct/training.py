@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
+import math
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -45,7 +49,9 @@ class TrainingConfig:
             self.batch_size,
         )
         if (
-            any(value <= 0 for value in positive)
+            any(not math.isfinite(float(value)) for value in positive)
+            or any(value <= 0 for value in positive)
+            or not math.isfinite(float(self.weight_decay))
             or self.weight_decay < 0
             or self.bootstrap_replicates <= 0
             or not 0.0 < self.bootstrap_confidence < 1.0
@@ -395,3 +401,128 @@ class CausalTransportTrainer:
         edge_dims = {trace.graph.edge_features.shape[1] for trace in traces}
         if len(node_dims) != 1 or len(edge_dims) != 1:
             raise ValueError("all traces must share node and edge feature dimensions")
+
+
+def _checkpoint_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def trace_cohort_sha256(root: str | Path) -> str:
+    files = sorted(Path(root).glob("*.npz"))
+    if not files:
+        raise FileNotFoundError(f"no causal traces in {root}")
+    member_digests = sorted(
+        bytes.fromhex(_checkpoint_file_sha256(path)) for path in files
+    )
+    digest = hashlib.sha256()
+    for member in member_digests:
+        digest.update(len(member).to_bytes(8, "big"))
+        digest.update(member)
+    return digest.hexdigest()
+
+
+def trace_sidecar_sha256(root: str | Path) -> str | None:
+    files = sorted(Path(root).glob("*.json"))
+    if not files:
+        return None
+    digest = hashlib.sha256()
+    for path in files:
+        relative = path.name.encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(
+            bytes.fromhex(_checkpoint_file_sha256(path))
+        )
+    return digest.hexdigest()
+
+
+def load_training_checkpoint(
+    output_dir: str | Path,
+    *,
+    device: str = "cpu",
+):
+    """Load a schema-checked CCT model and normalizer without pickle."""
+
+    require_torch()
+    from safetensors.torch import load_file
+
+    root = Path(output_dir)
+    checkpoint_path = root / "checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    if checkpoint.get("schema_version") != 1:
+        raise ValueError("unsupported CCT checkpoint schema")
+    if checkpoint.get("artifact_type") != "cct_hg_training_checkpoint":
+        raise ValueError("unexpected CCT checkpoint artifact type")
+
+    model_config = checkpoint.get("model")
+    expected_model_keys = {
+        "node_dim",
+        "edge_dim",
+        "hidden_dim",
+        "num_layers",
+    }
+    if not isinstance(model_config, dict) or set(model_config) != expected_model_keys:
+        raise ValueError("checkpoint model configuration is incomplete")
+    model_values = {
+        key: int(model_config[key])
+        for key in expected_model_keys
+    }
+    if any(value <= 0 for value in model_values.values()):
+        raise ValueError("checkpoint model dimensions must be positive")
+
+    split_path = root / "split.json"
+    if _checkpoint_file_sha256(split_path) != checkpoint.get("split_sha256"):
+        raise ValueError("checkpoint split hash mismatch")
+    weights_path = root / str(checkpoint.get("weights_file", ""))
+    if (
+        weights_path.name != checkpoint.get("weights_file")
+        or _checkpoint_file_sha256(weights_path)
+        != checkpoint.get("weights_sha256")
+    ):
+        raise ValueError("checkpoint weight hash mismatch")
+    normalizer_path = root / str(checkpoint.get("normalizer_file", ""))
+    if (
+        normalizer_path.name != checkpoint.get("normalizer_file")
+        or _checkpoint_file_sha256(normalizer_path)
+        != checkpoint.get("normalizer_sha256")
+    ):
+        raise ValueError("checkpoint normalizer hash mismatch")
+
+    with np.load(normalizer_path, allow_pickle=False) as archive:
+        mean = np.asarray(archive["mean"], dtype=np.float64)
+        scale = np.asarray(archive["scale"], dtype=np.float64)
+        content_dim = int(archive["content_dim"])
+    if (
+        mean.ndim != 1
+        or scale.shape != mean.shape
+        or len(mean) != model_values["node_dim"]
+        or not np.isfinite(mean).all()
+        or not np.isfinite(scale).all()
+        or np.any(scale <= 0.0)
+        or not 0 < content_dim < len(mean)
+    ):
+        raise ValueError("checkpoint normalizer is invalid")
+    normalizer_manifest = checkpoint.get("normalizer")
+    if normalizer_manifest != {
+        "feature_dim": len(mean),
+        "content_dim": content_dim,
+    }:
+        raise ValueError("checkpoint normalizer manifest mismatch")
+
+    model = ConstraintTransportDetector(
+        node_dim=model_values["node_dim"],
+        edge_dim=model_values["edge_dim"],
+        hidden_dim=model_values["hidden_dim"],
+        num_layers=model_values["num_layers"],
+    ).to(device)
+    state = load_file(str(weights_path), device=device)
+    model.load_state_dict(state, strict=True)
+    return model, FeatureNormalizer(
+        mean=mean,
+        scale=scale,
+        content_dim=content_dim,
+    )

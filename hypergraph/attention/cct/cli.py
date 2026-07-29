@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import os
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Sequence
@@ -17,6 +19,8 @@ from .training import (
     EvaluationResult,
     TrainingConfig,
     TrainingResult,
+    trace_cohort_sha256,
+    trace_sidecar_sha256,
 )
 
 
@@ -38,6 +42,26 @@ def _write_json(path: Path, value: Any) -> None:
         json.dumps(_json_value(value), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _source_tree_sha256_file(value: str) -> str:
+    digest = Path(value).read_text(encoding="utf-8").strip()
+    if (
+        len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise argparse.ArgumentTypeError(
+            "source-tree SHA256 file must contain one lowercase hexadecimal digest"
+        )
+    return digest
 
 
 def _evaluation_payload(result: EvaluationResult) -> dict[str, Any]:
@@ -140,7 +164,7 @@ def extract_command(args: argparse.Namespace) -> int:
     failures: list[dict[str, str]] = []
     written = 0
     for record in iterator:
-        destination = Path(args.output) / f"{record.trace_id}.npz"
+        destination = repository.path_for_trace_id(record.trace_id)
         if destination.exists() and not args.overwrite:
             raise FileExistsError(
                 f"{destination} already exists; pass --overwrite explicitly"
@@ -211,11 +235,33 @@ def _splitter(args: argparse.Namespace) -> FixedHoldoutSplitter:
     )
 
 
-def _save_result(output: Path, result: TrainingResult, config: TrainingConfig) -> None:
+def _save_result(
+    output: Path,
+    result: TrainingResult,
+    config: TrainingConfig,
+    *,
+    node_dim: int,
+    edge_dim: int,
+    trace_cohort_sha256: str,
+    trace_sidecar_sha256: str | None,
+    source_tree_sha256: str | None,
+    variant: str,
+) -> None:
     import torch
+    from safetensors.torch import save_file
 
     output.mkdir(parents=True, exist_ok=True)
     torch.save(result.model_state, output / "model.pt")
+    safe_weights = output / "model.safetensors"
+    temporary_weights = safe_weights.with_suffix(".safetensors.tmp")
+    save_file(
+        {
+            key: value.detach().cpu().contiguous()
+            for key, value in result.model_state.items()
+        },
+        str(temporary_weights),
+    )
+    os.replace(temporary_weights, safe_weights)
     np.savez(
         output / "normalizer.npz",
         mean=result.normalizer.mean,
@@ -236,6 +282,36 @@ def _save_result(output: Path, result: TrainingResult, config: TrainingConfig) -
     )
     _write_predictions(output / "predictions_test.csv", result.test.predictions)
     _write_json(output / "split.json", result.split.manifest())
+    checkpoint = {
+        "schema_version": 1,
+        "artifact_type": "cct_hg_training_checkpoint",
+        "variant": variant,
+        "model": {
+            "node_dim": int(node_dim),
+            "edge_dim": int(edge_dim),
+            "hidden_dim": int(config.hidden_dim),
+            "num_layers": int(config.num_layers),
+        },
+        "normalizer": {
+            "feature_dim": int(len(result.normalizer.mean)),
+            "content_dim": int(result.normalizer.content_dim),
+        },
+        "best_epoch": int(result.best_epoch),
+        "training_config": asdict(config),
+        "trace_cohort_sha256": trace_cohort_sha256,
+        "trace_sidecar_sha256": trace_sidecar_sha256,
+        "source_tree_sha256": source_tree_sha256,
+        "split_sha256": _sha256_file(output / "split.json"),
+        "weights_file": safe_weights.name,
+        "weights_sha256": _sha256_file(safe_weights),
+        "normalizer_file": "normalizer.npz",
+        "normalizer_sha256": _sha256_file(output / "normalizer.npz"),
+        "legacy_pickle_weights": (
+            "model.pt is retained for trusted-local backward compatibility; "
+            "load model.safetensors for portable evaluation"
+        ),
+    }
+    _write_json(output / "checkpoint.json", checkpoint)
     with (output / "history.csv").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(
             stream,
@@ -255,7 +331,17 @@ def train_command(args: argparse.Namespace) -> int:
     config = _training_config(args)
     result = CausalTransportTrainer(config).fit(traces, _splitter(args))
     output = Path(args.output)
-    _save_result(output, result, config)
+    _save_result(
+        output,
+        result,
+        config,
+        node_dim=traces[0].graph.node_features.shape[1],
+        edge_dim=traces[0].graph.edge_features.shape[1],
+        trace_cohort_sha256=trace_cohort_sha256(Path(args.traces)),
+        trace_sidecar_sha256=trace_sidecar_sha256(Path(args.traces)),
+        source_tree_sha256=args.source_tree_sha256,
+        variant="full",
+    )
 
     test = result.test.response
     print(
@@ -280,6 +366,7 @@ def benchmark_command(args: argparse.Namespace) -> int:
 
     traces = list(TraceRepository(args.traces).traces())
     config = _training_config(args)
+    cohort_sha256 = trace_cohort_sha256(Path(args.traces))
     controls = {
         "full": None,
         "hidden_only": HiddenOnlyControl(),
@@ -335,7 +422,17 @@ def benchmark_command(args: argparse.Namespace) -> int:
             traces if control is None else [control.apply(trace) for trace in traces]
         )
         result = CausalTransportTrainer(config).fit(cohort, _splitter(args))
-        _save_result(root / name, result, config)
+        _save_result(
+            root / name,
+            result,
+            config,
+            node_dim=cohort[0].graph.node_features.shape[1],
+            edge_dim=cohort[0].graph.edge_features.shape[1],
+            trace_cohort_sha256=cohort_sha256,
+            trace_sidecar_sha256=trace_sidecar_sha256(Path(args.traces)),
+            source_tree_sha256=args.source_tree_sha256,
+            variant=name,
+        )
         report = result.test.response
         summary[name] = _response_summary(report, result.test.uncertainty)
         print(f"{name}: AUROC={report.auroc} AUPRC={report.aupr}")
@@ -362,6 +459,11 @@ def _add_training_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--bootstrap-replicates", type=int, default=2000)
     parser.add_argument("--bootstrap-confidence", type=float, default=0.95)
+    parser.add_argument(
+        "--source-tree-sha256-file",
+        type=_source_tree_sha256_file,
+        dest="source_tree_sha256",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from .contracts import CausalHypergraph, ContributionMap, InterventionEffect
@@ -9,8 +11,16 @@ class CausalHypergraphBuilder:
     """Promote source sets to hyperedges only after non-additive intervention."""
 
     def __init__(self, *, min_effect: float = 0.0, min_synergy: float = 1e-6) -> None:
-        if min_effect < 0.0 or min_synergy <= 0.0:
-            raise ValueError("min_effect must be non-negative and min_synergy positive")
+        if (
+            not math.isfinite(min_effect)
+            or not math.isfinite(min_synergy)
+            or min_effect < 0.0
+            or min_synergy <= 0.0
+        ):
+            raise ValueError(
+                "min_effect must be finite and non-negative and "
+                "min_synergy finite and positive"
+            )
         self.min_effect = float(min_effect)
         self.min_synergy = float(min_synergy)
 

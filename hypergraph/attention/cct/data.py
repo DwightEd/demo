@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,17 @@ import numpy as np
 
 from ..splitting import TraceMeta
 from .contracts import CausalHypergraph, FirstErrorLabels
+
+
+def _canonical_identifier(value: object, *, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise ValueError(f"{name} must be a canonical non-empty string")
+    return value
 
 
 @dataclass(frozen=True)
@@ -24,10 +36,13 @@ class CausalTrace:
     labels: FirstErrorLabels
 
     def __post_init__(self) -> None:
-        if not self.trace_id or not self.problem_id:
-            raise ValueError("trace_id and problem_id are required")
-        if not self.generator_model or not self.observer_model:
-            raise ValueError("generator_model and observer_model are required")
+        for name in (
+            "trace_id",
+            "problem_id",
+            "generator_model",
+            "observer_model",
+        ):
+            _canonical_identifier(getattr(self, name), name=name)
         if self.layer_id < 0 or self.prompt_tokens <= 0 or self.response_tokens <= 0:
             raise ValueError("layer and token counts are invalid")
         if len(self.graph.response_nodes) != self.labels.num_steps:
@@ -59,9 +74,14 @@ class TraceRepository:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
 
+    def path_for_trace_id(self, trace_id: str) -> Path:
+        canonical = _canonical_identifier(trace_id, name="trace_id")
+        storage_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return self.root / f"{storage_id}.npz"
+
     def save(self, trace: CausalTrace) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
-        path = self.root / f"{trace.trace_id}.npz"
+        path = self.path_for_trace_id(trace.trace_id)
         temporary = path.with_suffix(".npz.tmp")
         graph = trace.graph
         with temporary.open("wb") as stream:
