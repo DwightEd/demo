@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from numbers import Integral, Real
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -121,6 +122,7 @@ class GhostTraceEmbedding:
     response_last: np.ndarray
     token_count: int
     response_token_count: int
+    step_count: int
 
     def __post_init__(self) -> None:
         if not isinstance(self.trace_id, str) or not self.trace_id.strip():
@@ -163,10 +165,14 @@ class GhostTraceEmbedding:
             or not isinstance(self.token_count, Integral)
             or isinstance(self.response_token_count, bool)
             or not isinstance(self.response_token_count, Integral)
+            or isinstance(self.step_count, bool)
+            or not isinstance(self.step_count, Integral)
             or int(self.token_count) < 1
             or not 1 <= int(self.response_token_count) <= int(self.token_count)
+            or int(self.step_count) < 1
+            or int(self.first_error) >= int(self.step_count)
         ):
-            raise ValueError("token counts are invalid")
+            raise ValueError("token or step counts are invalid")
         object.__setattr__(self, "layer_depths", depths)
         object.__setattr__(self, "response_mean", mean)
         object.__setattr__(self, "response_last", last)
@@ -175,6 +181,7 @@ class GhostTraceEmbedding:
         object.__setattr__(
             self, "response_token_count", int(self.response_token_count)
         )
+        object.__setattr__(self, "step_count", int(self.step_count))
 
     def representation(self, name: str) -> np.ndarray:
         if name == "response_mean":
@@ -466,3 +473,116 @@ class GhostMahalanobisEnsemble:
             ),
             final_percentile=percentiles[:, -1],
         )
+
+    def save(self, path: str | Path) -> None:
+        if (
+            self.models_ is None
+            or self.reference_layer_scores_ is None
+            or self.reference_fused_scores_ is None
+            or self.representation_ is None
+            or self.reference_trace_ids_ is None
+            or self.reference_problem_ids_ is None
+            or self.calibration_trace_ids_ is None
+            or self.calibration_problem_ids_ is None
+        ):
+            raise RuntimeError("fit and calibrate must be called before save")
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            destination,
+            schema_version=np.asarray("ghost_mahalanobis_v1"),
+            mid_depths=np.asarray(self.mid_depths, dtype=np.int64),
+            final_depth=np.asarray(self.final_depth, dtype=np.int64),
+            shrinkage=np.asarray(self.shrinkage, dtype=np.float64),
+            regularization=np.asarray(self.regularization, dtype=np.float64),
+            representation=np.asarray(self.representation_),
+            means=np.stack([model.mean_ for model in self.models_]),
+            centered_references=np.stack(
+                [model.centered_reference_ for model in self.models_]
+            ),
+            cholesky_factors=np.stack(
+                [model.cholesky_ for model in self.models_]
+            ),
+            betas=np.asarray([model.beta_ for model in self.models_]),
+            lambdas=np.asarray([model.lambda_ for model in self.models_]),
+            calibration_layer_scores=np.stack(self.reference_layer_scores_),
+            calibration_fused_scores=self.reference_fused_scores_,
+            reference_trace_ids=np.asarray(self.reference_trace_ids_),
+            reference_problem_ids=np.asarray(self.reference_problem_ids_),
+            calibration_trace_ids=np.asarray(self.calibration_trace_ids_),
+            calibration_problem_ids=np.asarray(self.calibration_problem_ids_),
+        )
+
+    @classmethod
+    def load(cls, path: str | Path) -> "GhostMahalanobisEnsemble":
+        with np.load(Path(path), allow_pickle=False) as archive:
+            if archive["schema_version"].item() != "ghost_mahalanobis_v1":
+                raise ValueError("unsupported GHOST Mahalanobis artifact schema")
+            middle = tuple(int(value) for value in archive["mid_depths"])
+            detector = cls(
+                mid_depths=middle,
+                final_depth=int(archive["final_depth"].item()),
+                shrinkage=float(archive["shrinkage"].item()),
+                regularization=float(archive["regularization"].item()),
+            )
+            means = np.asarray(archive["means"], dtype=np.float64)
+            centered = np.asarray(
+                archive["centered_references"], dtype=np.float64
+            )
+            factors = np.asarray(archive["cholesky_factors"], dtype=np.float64)
+            betas = np.asarray(archive["betas"], dtype=np.float64)
+            lambdas = np.asarray(archive["lambdas"], dtype=np.float64)
+            if (
+                means.ndim != 2
+                or centered.ndim != 3
+                or factors.ndim != 3
+                or means.shape[0] != len(detector.layer_depths)
+                or centered.shape[0] != means.shape[0]
+                or centered.shape[2] != means.shape[1]
+                or factors.shape
+                != (means.shape[0], centered.shape[1], centered.shape[1])
+                or betas.shape != (means.shape[0],)
+                or lambdas.shape != (means.shape[0],)
+            ):
+                raise ValueError("malformed GHOST Mahalanobis model arrays")
+            models = []
+            for index in range(means.shape[0]):
+                model = LowRankShrunkMahalanobis(
+                    shrinkage=detector.shrinkage,
+                    regularization=detector.regularization,
+                )
+                model.mean_ = means[index]
+                model.centered_reference_ = centered[index]
+                model.cholesky_ = factors[index]
+                model.beta_ = float(betas[index])
+                model.lambda_ = float(lambdas[index])
+                models.append(model)
+            layer_scores = np.asarray(
+                archive["calibration_layer_scores"], dtype=np.float64
+            )
+            if (
+                layer_scores.ndim != 2
+                or layer_scores.shape[0] != means.shape[0]
+            ):
+                raise ValueError("malformed GHOST calibration score arrays")
+            detector.models_ = tuple(models)
+            detector.reference_layer_scores_ = tuple(
+                layer_scores[index] for index in range(layer_scores.shape[0])
+            )
+            detector.reference_fused_scores_ = np.asarray(
+                archive["calibration_fused_scores"], dtype=np.float64
+            )
+            detector.representation_ = str(archive["representation"].item())
+            detector.reference_trace_ids_ = tuple(
+                str(value) for value in archive["reference_trace_ids"]
+            )
+            detector.reference_problem_ids_ = tuple(
+                str(value) for value in archive["reference_problem_ids"]
+            )
+            detector.calibration_trace_ids_ = tuple(
+                str(value) for value in archive["calibration_trace_ids"]
+            )
+            detector.calibration_problem_ids_ = tuple(
+                str(value) for value in archive["calibration_problem_ids"]
+            )
+        return detector

@@ -35,6 +35,7 @@ def _trace(
         response_last=location + 0.01 * layer_offsets + features,
         token_count=12,
         response_token_count=4,
+        step_count=2,
     )
 
 
@@ -147,3 +148,34 @@ def test_calibration_is_normal_only_and_disjoint_from_fit_references() -> None:
         )
     with pytest.raises(ValueError, match="overlap"):
         ensemble.calibrate((references[0], references[1]))
+
+
+def test_saved_detector_reproduces_held_out_scores(tmp_path) -> None:
+    references = [
+        _trace(trace_id=f"fit-{index}", label=0, location=0.01 * index)
+        for index in range(6)
+    ]
+    calibration = [
+        _trace(trace_id=f"cal-{index}", label=0, location=0.02 * index)
+        for index in range(3)
+    ]
+    held_out = (
+        _trace(trace_id="held-normal", label=0, location=0.02),
+        _trace(trace_id="held-error", label=1, location=2.0),
+    )
+    detector = GhostMahalanobisEnsemble(
+        mid_depths=MID_DEPTHS,
+        final_depth=32,
+    ).fit(references, representation="response_mean")
+    detector.calibrate(calibration)
+    expected = detector.score(held_out)
+    artifact = tmp_path / "model.npz"
+
+    detector.save(artifact)
+    actual = GhostMahalanobisEnsemble.load(artifact).score(held_out)
+
+    assert np.array_equal(actual.layer_distances, expected.layer_distances)
+    assert np.array_equal(
+        actual.mid_fused_percentile,
+        expected.mid_fused_percentile,
+    )
