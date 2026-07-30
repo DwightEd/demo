@@ -326,6 +326,9 @@ class GhostMahalanobisEnsemble:
         self.reference_fused_scores_: np.ndarray | None = None
         self.representation_: str | None = None
         self.reference_trace_ids_: tuple[str, ...] | None = None
+        self.reference_problem_ids_: tuple[str, ...] | None = None
+        self.calibration_trace_ids_: tuple[str, ...] | None = None
+        self.calibration_problem_ids_: tuple[str, ...] | None = None
 
     def _matrix(
         self,
@@ -361,17 +364,58 @@ class GhostMahalanobisEnsemble:
             raise ValueError("normal reference trace IDs must be unique")
         values = self._matrix(traces, representation=representation)
         models = []
-        distances = np.empty((len(traces), len(self.layer_depths)), dtype=np.float64)
-        sorted_scores = []
         for layer_index in range(len(self.layer_depths)):
             model = LowRankShrunkMahalanobis(
                 shrinkage=self.shrinkage,
                 regularization=self.regularization,
             ).fit(values[:, layer_index, :])
-            layer_scores = model.score_samples(values[:, layer_index, :])
-            distances[:, layer_index] = layer_scores
             models.append(model)
-            sorted_scores.append(np.sort(layer_scores))
+        self.models_ = tuple(models)
+        self.reference_layer_scores_ = None
+        self.reference_fused_scores_ = None
+        self.representation_ = representation
+        self.reference_trace_ids_ = tuple(trace.trace_id for trace in traces)
+        self.reference_problem_ids_ = tuple(trace.problem_id for trace in traces)
+        self.calibration_trace_ids_ = None
+        self.calibration_problem_ids_ = None
+        return self
+
+    def calibrate(
+        self,
+        normal_traces: Sequence[GhostTraceEmbedding],
+    ) -> "GhostMahalanobisEnsemble":
+        if (
+            self.models_ is None
+            or self.representation_ is None
+            or self.reference_trace_ids_ is None
+            or self.reference_problem_ids_ is None
+        ):
+            raise RuntimeError("fit must be called before calibrate")
+        traces = tuple(normal_traces)
+        if any(trace.response_label != 0 for trace in traces):
+            raise ValueError("every calibration trace must be normal")
+        if len(traces) < 2:
+            raise ValueError("at least two normal calibration traces are required")
+        trace_ids = tuple(trace.trace_id for trace in traces)
+        problem_ids = tuple(trace.problem_id for trace in traces)
+        if len(set(trace_ids)) != len(trace_ids):
+            raise ValueError("normal calibration trace IDs must be unique")
+        if set(trace_ids).intersection(self.reference_trace_ids_) or set(
+            problem_ids
+        ).intersection(self.reference_problem_ids_):
+            raise ValueError(
+                "normal calibration traces overlap fitted reference traces or groups"
+            )
+        values = self._matrix(traces, representation=self.representation_)
+        distances = np.column_stack(
+            [
+                model.score_samples(values[:, index, :])
+                for index, model in enumerate(self.models_)
+            ]
+        )
+        sorted_scores = tuple(
+            np.sort(distances[:, index]) for index in range(len(self.layer_depths))
+        )
         layer_percentiles = np.column_stack(
             [
                 _empirical_percentile(sorted_scores[index], distances[:, index])
@@ -379,11 +423,10 @@ class GhostMahalanobisEnsemble:
             ]
         )
         fused = layer_percentiles[:, : len(self.mid_depths)].mean(axis=1)
-        self.models_ = tuple(models)
-        self.reference_layer_scores_ = tuple(sorted_scores)
+        self.reference_layer_scores_ = sorted_scores
         self.reference_fused_scores_ = np.sort(fused)
-        self.representation_ = representation
-        self.reference_trace_ids_ = tuple(trace.trace_id for trace in traces)
+        self.calibration_trace_ids_ = trace_ids
+        self.calibration_problem_ids_ = problem_ids
         return self
 
     def score(
@@ -396,7 +439,7 @@ class GhostMahalanobisEnsemble:
             or self.reference_fused_scores_ is None
             or self.representation_ is None
         ):
-            raise RuntimeError("fit must be called before score")
+            raise RuntimeError("fit and calibrate must be called before score")
         examples = tuple(traces)
         values = self._matrix(examples, representation=self.representation_)
         distances = np.column_stack(

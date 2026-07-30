@@ -102,13 +102,18 @@ def test_ensemble_fit_is_fail_closed_on_non_normal_reference() -> None:
 def test_mid_layer_ensemble_scores_far_held_out_trace_as_more_anomalous() -> None:
     references = [
         _trace(trace_id=f"normal-{index}", label=0, location=0.01 * index)
-        for index in range(12)
+        for index in range(8)
+    ]
+    calibration = [
+        _trace(trace_id=f"calibration-{index}", label=0, location=0.005 + 0.01 * index)
+        for index in range(4)
     ]
     ensemble = GhostMahalanobisEnsemble(
         mid_depths=MID_DEPTHS,
         final_depth=32,
         shrinkage=0.2,
     ).fit(references, representation="response_mean")
+    ensemble.calibrate(calibration)
 
     scored = ensemble.score(
         (
@@ -122,3 +127,23 @@ def test_mid_layer_ensemble_scores_far_held_out_trace_as_more_anomalous() -> Non
     assert np.all((0.0 <= scored.mid_fused_percentile) & (scored.mid_fused_percentile <= 1.0))
     assert scored.mid_fused_percentile[1] > scored.mid_fused_percentile[0]
     assert scored.final_percentile[1] > scored.final_percentile[0]
+
+
+def test_calibration_is_normal_only_and_disjoint_from_fit_references() -> None:
+    references = [
+        _trace(trace_id=f"normal-{index}", label=0, location=0.01 * index)
+        for index in range(5)
+    ]
+    ensemble = GhostMahalanobisEnsemble(
+        mid_depths=MID_DEPTHS,
+        final_depth=32,
+    ).fit(references, representation="response_last")
+
+    with pytest.raises(RuntimeError, match="calibrate"):
+        ensemble.score((_trace(trace_id="held", label=0, location=0.02),))
+    with pytest.raises(ValueError, match="normal"):
+        ensemble.calibrate(
+            (_trace(trace_id="calibration-error", label=1, location=2.0),)
+        )
+    with pytest.raises(ValueError, match="overlap"):
+        ensemble.calibrate((references[0], references[1]))
