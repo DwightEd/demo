@@ -152,6 +152,10 @@ PROFILE=smoke \
 bash scripts/run_ghost_real_4090.sh
 ```
 
+The successful console path shows progress bars and one final run-directory
+line only. Configuration, dependency checks, and audit details are retained in
+that run's `run.log` and JSON artifacts.
+
 If the dependency preflight reports a missing package, rerun once with
 `INSTALL_DEPS=1`. The requirements file deliberately does not install or
 replace the server's CUDA PyTorch.

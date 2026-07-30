@@ -202,6 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--dtype", choices=("bfloat16", "float16"), default="bfloat16")
     extract.add_argument("--device", default="cuda")
     extract.add_argument("--attention-implementation", default="sdpa")
+    extract.add_argument("--progress", action="store_true")
 
     evaluate = commands.add_parser("evaluate")
     evaluate.add_argument("--embeddings", required=True)
@@ -225,7 +226,7 @@ def _run_select(args: argparse.Namespace) -> int:
         use_fast=True,
         local_files_only=True,
     )
-    manifest = select_processbench_cohort(
+    select_processbench_cohort(
         source=args.input,
         output=args.output,
         manifest_path=args.manifest,
@@ -235,7 +236,6 @@ def _run_select(args: argparse.Namespace) -> int:
         max_tokens=args.max_tokens,
         seed=args.seed,
     )
-    print(json.dumps(manifest, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -331,6 +331,7 @@ def _run_extract(args: argparse.Namespace) -> int:
         mid_depths=mid_depths,
         final_depth=num_hidden_layers,
         max_tokens=args.max_tokens,
+        show_progress=args.progress,
     )
     generators = Counter(trace.generator_model for trace in traces)
     metadata = {
@@ -384,13 +385,12 @@ def _run_extract(args: argparse.Namespace) -> int:
         ),
     }
     _write_json(manifest_path, extraction_manifest)
-    print(json.dumps(extraction_manifest, indent=2, ensure_ascii=False))
     return 0
 
 
 def _run_evaluate(args: argparse.Namespace) -> int:
     traces, metadata = load_embedding_artifact(args.embeddings)
-    summary = evaluate_ghost(
+    evaluate_ghost(
         traces,
         output_dir=args.output_dir,
         config=EvaluationConfig(
@@ -405,7 +405,6 @@ def _run_evaluate(args: argparse.Namespace) -> int:
         ),
         embedding_metadata=metadata,
     )
-    print(json.dumps(summary, indent=2, ensure_ascii=False))
     return 0
 
 

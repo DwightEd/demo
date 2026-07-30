@@ -41,6 +41,28 @@ def test_ghost_script_is_a_distinct_fail_closed_real_data_pipeline() -> None:
     assert "enable_grad" not in text
 
 
+def test_remote_console_is_progress_only_while_details_stay_in_run_log() -> None:
+    script_text = SCRIPT.read_text(encoding="utf-8")
+    cli_text = CLI.read_text(encoding="utf-8")
+    extractor_text = EXTRACTOR.read_text(encoding="utf-8")
+
+    assert 'LOG_FILE="${RUN_DIR}/run.log"' in script_text
+    assert 'exec 3>&1 4>&2' in script_text
+    assert 'exec >>"${LOG_FILE}" 2>&1' in script_text
+    assert 'tee -a "${LOG_FILE}" >&4' in script_text
+    assert 'exec > >(tee -a "${RUN_DIR}/run.log") 2>&1' not in script_text
+    assert 'printf "Completed: %s\\n" "${RUN_DIR}"' in script_text
+    assert 'printf "Failed: %s (see %s)\\n"' in script_text
+    assert 'print(json.dumps({' not in script_text
+    assert "--progress" in script_text
+    assert "print(json.dumps(manifest" not in cli_text
+    assert "print(json.dumps(extraction_manifest" not in cli_text
+    assert "print(json.dumps(summary" not in cli_text
+    assert "from tqdm.auto import tqdm" in extractor_text
+    assert 'desc="Extracting hidden states"' in extractor_text
+    assert 'f"extracted {index}' not in extractor_text
+
+
 def test_ghost_profiles_distinguish_smoke_pilot_and_full_science_runs() -> None:
     text = SCRIPT.read_text(encoding="utf-8")
     smoke = text.partition("  smoke)")[2].partition("    ;;")[0]

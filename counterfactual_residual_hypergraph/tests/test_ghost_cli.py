@@ -112,7 +112,7 @@ def test_cli_exposes_separate_select_extract_and_evaluate_stages() -> None:
             "cohort.json",
         ]
     ).command == "select"
-    assert parser.parse_args(
+    extract_args = parser.parse_args(
         [
             "extract",
             "--input",
@@ -123,8 +123,11 @@ def test_cli_exposes_separate_select_extract_and_evaluate_stages() -> None:
             "embeddings.npz",
             "--manifest",
             "extract.json",
+            "--progress",
         ]
-    ).command == "extract"
+    )
+    assert extract_args.command == "extract"
+    assert extract_args.progress is True
     assert parser.parse_args(
         [
             "evaluate",

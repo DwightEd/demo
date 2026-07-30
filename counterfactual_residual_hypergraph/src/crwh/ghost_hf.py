@@ -313,18 +313,30 @@ def extract_processbench_embeddings(
     mid_depths: Sequence[int],
     final_depth: int,
     max_tokens: int,
+    show_progress: bool = False,
 ) -> tuple[GhostTraceEmbedding, ...]:
     import torch
+    from tqdm.auto import tqdm
 
     if max_tokens < 1:
         raise ValueError("max_tokens must be positive")
+    record_iterator = (
+        tqdm(
+            records,
+            desc="Extracting hidden states",
+            unit="trace",
+            dynamic_ncols=True,
+        )
+        if show_progress
+        else records
+    )
     traces = []
     with HookedResponseStateExtractor(
         model,
         mid_depths=mid_depths,
         final_depth=final_depth,
     ) as extractor:
-        for index, record in enumerate(records, start=1):
+        for record in record_iterator:
             tokenized = tokenize_chat_record(tokenizer, record)
             if len(tokenized.input_ids) > max_tokens:
                 raise ValueError(
@@ -354,11 +366,6 @@ def extract_processbench_embeddings(
                     response_token_count=len(positions),
                     step_count=len(record.steps),
                 )
-            )
-            print(
-                f"extracted {index}: trace={record.trace_id} "
-                f"tokens={len(tokenized.input_ids)} response_tokens={len(positions)}",
-                flush=True,
             )
     return tuple(traces)
 

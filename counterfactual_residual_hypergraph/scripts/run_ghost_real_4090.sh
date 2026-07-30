@@ -75,6 +75,8 @@ if [[ -e "${RUN_DIR}" ]]; then
   exit 2
 fi
 mkdir -p "${RUN_DIR}"
+LOG_FILE="${RUN_DIR}/run.log"
+touch "${LOG_FILE}"
 
 on_exit() {
   local status=$?
@@ -83,11 +85,14 @@ on_exit() {
     printf "success\n" > "${RUN_DIR}/_SUCCESS"
   else
     printf "exit_status=%s\n" "${status}" > "${RUN_DIR}/_FAILED"
+    printf "Failed: %s (see %s)\n" "${RUN_DIR}" "${LOG_FILE}" >&4
   fi
   exit "${status}"
 }
 trap on_exit EXIT
-exec > >(tee -a "${RUN_DIR}/run.log") 2>&1
+# Keep routine output in the audit log; expose only extraction progress/errors.
+exec 3>&1 4>&2
+exec >>"${LOG_FILE}" 2>&1
 
 stage() {
   printf "\n===== %s =====\n" "$1"
@@ -207,6 +212,7 @@ fi
 
 export CUDA_VISIBLE_DEVICES="${GPU}"
 export TOKENIZERS_PARALLELISM=false
+export TRANSFORMERS_VERBOSITY=error
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
@@ -340,7 +346,9 @@ EXTRACTION_MANIFEST="${RUN_DIR}/extraction-manifest.json"
   --max-tokens "${MAX_TOKENS}" \
   --dtype bfloat16 \
   --device cuda \
-  --attention-implementation sdpa
+  --attention-implementation sdpa \
+  --progress \
+  2> >(tee -a "${LOG_FILE}" >&4)
 nvidia-smi > "${RUN_DIR}/gpu-after-extraction.txt"
 
 stage "normal_reference_fit_calibration_and_test"
@@ -377,34 +385,4 @@ done
 cp "${EVALUATION_DIR}/summary.json" "${RUN_DIR}/summary.json"
 nvidia-smi > "${RUN_DIR}/gpu-after.txt"
 
-stage "result"
-RUN_DIR="${RUN_DIR}" "${PYTHON_BIN}" - <<'PY'
-import json
-import os
-from pathlib import Path
-
-run_dir = Path(os.environ["RUN_DIR"])
-summary = json.loads(
-    (run_dir / "summary.json").read_text(encoding="utf-8")
-)
-print(json.dumps({
-    "status": summary["status"],
-    "result_kind": summary["result_kind"],
-    "method": summary["method"],
-    "fit_normal_traces": summary["fit_normal_traces"],
-    "calibration_normal_traces": summary["calibration_normal_traces"],
-    "test_traces": summary["test_traces"],
-    "mid_fused": summary["primary_test_mid_fused"],
-    "final_layer": summary["primary_test_final_layer"],
-    "run_dir": str(run_dir),
-}, indent=2, ensure_ascii=False))
-PY
-
-echo
-echo "GHOST-inspired real ProcessBench run completed."
-echo "Run directory: ${RUN_DIR}"
-echo "Main summary: ${RUN_DIR}/summary.json"
-echo "All metrics: ${EVALUATION_DIR}/metrics.json"
-echo "Predictions: ${EVALUATION_DIR}/scores-test.csv"
-echo "This is a normal-reference one-class result with zero training epochs."
-echo "It is an abstract-level reimplementation, not an exact-paper claim."
+printf "Completed: %s\n" "${RUN_DIR}" >&3

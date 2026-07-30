@@ -16,6 +16,7 @@ from crwh.ghost_eval import (
 )
 from crwh.ghost_hf import (
     HookedResponseStateExtractor,
+    extract_processbench_embeddings,
     load_embedding_artifact,
     save_embedding_artifact,
 )
@@ -85,7 +86,9 @@ def test_discrete_nuisance_scores_use_tie_aware_midranks() -> None:
     assert np.allclose(scores["two_sided"], [0.0, 1.0, 1.0])
 
 
-def test_hook_extractor_captures_only_requested_depths_in_one_forward() -> None:
+def test_hook_extractor_captures_only_requested_depths_in_one_forward(
+    capsys,
+) -> None:
     torch = pytest.importorskip("torch")
 
     class Block(torch.nn.Module):
@@ -130,6 +133,20 @@ def test_hook_extractor_captures_only_requested_depths_in_one_forward() -> None:
     assert model.last_kwargs["use_cache"] is False
     assert model.last_kwargs["output_hidden_states"] is False
     assert model.last_kwargs["output_attentions"] is False
+
+    empty = extract_processbench_embeddings(
+        (),
+        model=model,
+        tokenizer=object(),
+        mid_depths=MID_DEPTHS,
+        final_depth=8,
+        max_tokens=16,
+        show_progress=True,
+    )
+    captured = capsys.readouterr()
+    assert empty == ()
+    assert "Extracting hidden states" in captured.err
+    assert "extracted 1:" not in captured.err
 
 
 def test_real_evaluation_fits_only_normal_train_and_calibration_groups(
