@@ -56,8 +56,8 @@ def test_response_pooling_uses_only_tokens_owned_by_reasoning_steps() -> None:
 
 def test_low_rank_shrunk_mahalanobis_matches_direct_covariance_inverse() -> None:
     rng = np.random.default_rng(4)
-    reference = rng.normal(size=(9, 5))
-    queries = rng.normal(size=(3, 5))
+    reference = rng.normal(size=(5, 17))
+    queries = rng.normal(size=(3, 17))
     shrinkage = 0.2
     regularization = 1e-6
 
@@ -70,7 +70,7 @@ def test_low_rank_shrunk_mahalanobis_matches_direct_covariance_inverse() -> None
     mean = reference.mean(axis=0)
     centered = reference - mean
     empirical = centered.T @ centered / (len(reference) - 1)
-    isotropic = max(float(np.trace(empirical) / reference.shape[1]), regularization)
+    isotropic = float(np.trace(empirical) / reference.shape[1])
     covariance = (
         (1.0 - shrinkage) * empirical
         + (shrinkage * isotropic + regularization) * np.eye(reference.shape[1])

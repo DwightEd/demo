@@ -9,7 +9,11 @@ import numpy as np
 import pytest
 
 from crwh.ghost import GhostTraceEmbedding
-from crwh.ghost_eval import EvaluationConfig, evaluate_ghost
+from crwh.ghost_eval import (
+    EvaluationConfig,
+    _normal_tail_scores,
+    evaluate_ghost,
+)
 from crwh.ghost_hf import (
     HookedResponseStateExtractor,
     load_embedding_artifact,
@@ -38,7 +42,7 @@ def _traces(count: int = 60) -> tuple[GhostTraceEmbedding, ...]:
                 problem_id=f"problem-{index:03d}",
                 response_label=label,
                 first_error=1 if label else -1,
-                generator_model=f"generator-{index % 2}",
+                generator_model=f"generator-{index % 3}",
                 layer_depths=ALL_DEPTHS,
                 response_mean=mean,
                 response_last=mean + 0.01,
@@ -68,6 +72,17 @@ def test_embedding_artifact_round_trip_is_pickle_free(tmp_path: Path) -> None:
     assert np.allclose(restored[2].response_mean, source[2].response_mean)
     with np.load(destination, allow_pickle=False) as archive:
         assert archive["schema_version"].item() == "ghost_embeddings_v1"
+
+
+def test_discrete_nuisance_scores_use_tie_aware_midranks() -> None:
+    calibration = np.asarray([3, 3, 3, 3], dtype=np.float64)
+    test = np.asarray([3, 2, 4], dtype=np.float64)
+
+    scores = _normal_tail_scores(calibration, test)
+
+    assert np.allclose(scores["upper_tail"], [0.5, 0.0, 1.0])
+    assert np.allclose(scores["lower_tail"], [0.5, 1.0, 0.0])
+    assert np.allclose(scores["two_sided"], [0.0, 1.0, 1.0])
 
 
 def test_hook_extractor_captures_only_requested_depths_in_one_forward() -> None:
@@ -139,11 +154,17 @@ def test_real_evaluation_fits_only_normal_train_and_calibration_groups(
     split = json.loads((output / "split.json").read_text(encoding="utf-8"))
     with (output / "scores-test.csv").open(encoding="utf-8", newline="") as stream:
         predictions = list(csv.DictReader(stream))
+    with (output / "anomaly-scores-test.csv").open(
+        encoding="utf-8",
+        newline="",
+    ) as stream:
+        unlabeled = list(csv.DictReader(stream))
 
     assert summary["result_kind"] == "real_processbench_ghost_style_one_class"
     assert summary["training_epochs"] == 0
     assert audit["fit_positive_count"] == 0
     assert audit["calibration_positive_count"] == 0
+    assert audit["frozen_score_artifact_written_before_metric_computation"] is True
     assert audit["problem_group_intersections"] == {
         "fit_calibration": [],
         "fit_test": [],
@@ -154,10 +175,28 @@ def test_real_evaluation_fits_only_normal_train_and_calibration_groups(
     )
     assert metrics["response_mean"]["mid_fused"]["auroc"] > 0.95
     assert metrics["response_mean"]["mid_fused"]["aupr"] > 0.95
+    assert metrics["response_mean"]["mid_fused"]["calibration_count"] == audit[
+        "calibration_trace_count"
+    ]
+    assert set(metrics["nuisance_only"]["response_token_count"]) == {
+        "upper_tail",
+        "lower_tail",
+        "two_sided",
+    }
     assert metrics["response_mean"]["mid_minus_final_bootstrap"][
         "replicates"
     ] == 25
+    assert len(
+        metrics["response_mean"]["per_mid_layer_minus_final_bootstrap"]
+    ) == len(MID_DEPTHS)
     assert len(predictions) == metrics["response_mean"]["mid_fused"]["n"]
+    assert "label" not in unlabeled[0]
+    assert "first_error" not in unlabeled[0]
+    assert "response_mean_mid_fused_rank_score" in unlabeled[0]
+    assert "response_mean_depth_2_distance" in unlabeled[0]
+    assert metrics["response_mean"]["generator_macro_mid_fused"][
+        "defined_auroc_generators"
+    ] >= 1
     assert (output / "reference-model-response_mean.npz").is_file()
     assert (output / "reference-model-response_last.npz").is_file()
     assert (output / "summary.json").is_file()

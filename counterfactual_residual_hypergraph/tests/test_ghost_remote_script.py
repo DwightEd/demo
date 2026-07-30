@@ -34,6 +34,9 @@ def test_ghost_script_is_a_distinct_fail_closed_real_data_pipeline() -> None:
     assert "-m crwh.ghost_cli extract" in text
     assert "-m crwh.ghost_cli evaluate" in text
     assert "-m hypergraph.attention.cct" not in text
+    assert "src/crwh/cohort.py" in text
+    assert "hypergraph/attention/splitting.py" in text
+    assert "hypergraph/attention/cct/processbench.py" in text
     assert "output_hidden_states=True" not in text
     assert "enable_grad" not in text
 
@@ -63,4 +66,5 @@ def test_hf_path_uses_base_model_hooks_and_never_materializes_all_layers() -> No
     assert "use_cache=False" in extractor_text
     assert "output_hidden_states=False" in extractor_text
     assert "output_hidden_states=True" not in extractor_text
+    assert "selected.float().mean(dim=0)" in extractor_text
     assert "tokenize_chat_record" in extractor_text

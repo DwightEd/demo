@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from crwh.ghost_cli import build_parser, select_processbench_cohort
+from crwh.ghost_hf import tokenize_chat_record
 
 
 class CharacterTokenizer:
@@ -16,10 +19,18 @@ class CharacterTokenizer:
         tokenize: bool,
         add_generation_prompt: bool,
     ):
-        assert tokenize is True
-        assert add_generation_prompt is True
         assert messages[0]["role"] == "user"
-        return [100, 101, 102]
+        prefix = "<prompt><assistant>"
+        if len(messages) == 1:
+            assert add_generation_prompt is True
+            rendered = prefix
+        else:
+            assert add_generation_prompt is False
+            response = messages[1]["content"]
+            rendered = prefix + response + "<eot>"
+        if tokenize:
+            return list(range(len(rendered)))
+        return rendered
 
     def __call__(
         self,
@@ -123,3 +134,31 @@ def test_cli_exposes_separate_select_extract_and_evaluate_stages() -> None:
             "evaluation",
         ]
     ).command == "evaluate"
+
+
+def test_chat_tokenization_fails_closed_when_response_boundary_changes() -> None:
+    class BoundaryChangingTokenizer(CharacterTokenizer):
+        def apply_chat_template(
+            self,
+            messages,
+            *,
+            tokenize: bool,
+            add_generation_prompt: bool,
+        ):
+            values = super().apply_chat_template(
+                messages,
+                tokenize=tokenize,
+                add_generation_prompt=add_generation_prompt,
+            )
+            if tokenize and len(messages) == 2 and messages[1]["content"]:
+                values[3] += 7
+            return values
+
+    record = type(
+        "Record",
+        (),
+        {"question": "Question?", "steps": ("first step", "second step")},
+    )()
+
+    with pytest.raises(ValueError, match="canonical"):
+        tokenize_chat_record(BoundaryChangingTokenizer(), record)

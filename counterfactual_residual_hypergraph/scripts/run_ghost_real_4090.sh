@@ -104,6 +104,14 @@ SUBSET=${SUBSET}
 SELECTION_MODE=${SELECTION_MODE}
 LIMIT=${LIMIT}
 MAX_TOKENS=${MAX_TOKENS}
+SELECTION_SEED=${SELECTION_SEED}
+SPLIT_SEED=${SPLIT_SEED}
+VALIDATION_RATIO=${VALIDATION_RATIO}
+TEST_RATIO=${TEST_RATIO}
+THRESHOLD_QUANTILE=${THRESHOLD_QUANTILE}
+SHRINKAGE=${SHRINKAGE}
+REGULARIZATION=${REGULARIZATION}
+BOOTSTRAP_REPLICATES=${BOOTSTRAP_REPLICATES}
 GPU=${GPU}
 RUN_DIR=${RUN_DIR}
 EOF
@@ -132,6 +140,15 @@ command -v nvidia-smi >/dev/null || {
   echo "Observer model config.json is missing" >&2
   exit 2
 }
+[[ -f "${MODEL_PATH}/tokenizer_config.json" ]] || {
+  echo "Observer tokenizer_config.json is missing" >&2
+  exit 2
+}
+if [[ ! -f "${MODEL_PATH}/tokenizer.json" &&
+  ! -f "${MODEL_PATH}/tokenizer.model" ]]; then
+  echo "Observer fast-tokenizer assets are missing" >&2
+  exit 2
+fi
 
 PB_INPUT=""
 for candidate in \
@@ -212,6 +229,11 @@ versions = {}
 for name in required:
     module = importlib.import_module(name)
     versions[name] = getattr(module, "__version__", "unknown")
+if not str(versions["transformers"]).startswith("4.57."):
+    raise SystemExit(
+        "This audited extractor requires transformers 4.57.x; "
+        f"found {versions['transformers']}"
+    )
 print(json.dumps(versions, indent=2, sort_keys=True))
 PY
 "${PYTHON_BIN}" -m pip freeze > "${RUN_DIR}/pip-freeze.txt"
@@ -260,6 +282,8 @@ stage "source_witness"
     "${CRWH_ROOT}/src/crwh/ghost_hf.py" \
     "${CRWH_ROOT}/src/crwh/ghost_eval.py" \
     "${CRWH_ROOT}/src/crwh/ghost_cli.py" \
+    "${CRWH_ROOT}/src/crwh/cohort.py" \
+    "${CRWH_ROOT}/scripts/run_ghost_real_4090.sh" \
     "${DEMO_ROOT}/hypergraph/attention/splitting.py" \
     "${DEMO_ROOT}/hypergraph/attention/cct/processbench.py"
 } > "${RUN_DIR}/source-files.sha256"
@@ -272,7 +296,10 @@ git -c safe.directory="${DEMO_ROOT}" -C "${DEMO_ROOT}" status --short \
   counterfactual_residual_hypergraph/src/crwh/ghost_hf.py \
   counterfactual_residual_hypergraph/src/crwh/ghost_eval.py \
   counterfactual_residual_hypergraph/src/crwh/ghost_cli.py \
+  counterfactual_residual_hypergraph/src/crwh/cohort.py \
   counterfactual_residual_hypergraph/scripts/run_ghost_real_4090.sh \
+  hypergraph/attention/splitting.py \
+  hypergraph/attention/cct/processbench.py \
   > "${RUN_DIR}/git-status.txt" 2>/dev/null || true
 
 stage "ghost_tests"
@@ -305,6 +332,7 @@ EXTRACTION_MANIFEST="${RUN_DIR}/extraction-manifest.json"
   --model "${MODEL_PATH}" \
   --output "${EMBEDDINGS}" \
   --manifest "${EXTRACTION_MANIFEST}" \
+  --cohort-manifest "${COHORT_MANIFEST}" \
   --mid-depths auto \
   --mid-start 0.25 \
   --mid-end 0.50 \
@@ -350,12 +378,14 @@ cp "${EVALUATION_DIR}/summary.json" "${RUN_DIR}/summary.json"
 nvidia-smi > "${RUN_DIR}/gpu-after.txt"
 
 stage "result"
-"${PYTHON_BIN}" - <<PY
+RUN_DIR="${RUN_DIR}" "${PYTHON_BIN}" - <<'PY'
 import json
+import os
 from pathlib import Path
 
+run_dir = Path(os.environ["RUN_DIR"])
 summary = json.loads(
-    Path("${RUN_DIR}/summary.json").read_text(encoding="utf-8")
+    (run_dir / "summary.json").read_text(encoding="utf-8")
 )
 print(json.dumps({
     "status": summary["status"],
@@ -366,7 +396,7 @@ print(json.dumps({
     "test_traces": summary["test_traces"],
     "mid_fused": summary["primary_test_mid_fused"],
     "final_layer": summary["primary_test_final_layer"],
-    "run_dir": "${RUN_DIR}",
+    "run_dir": str(run_dir),
 }, indent=2, ensure_ascii=False))
 PY
 

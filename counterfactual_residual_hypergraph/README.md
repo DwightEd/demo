@@ -357,6 +357,11 @@ semantics.
 
 ## Experimental controls
 
+The executable GHOST-style middle-layer Mahalanobis experiment, including the
+4090 command, leakage contract, exact layer numbering, equations, artifacts,
+and interpretation boundary, is documented in
+[`GHOST_EXPERIMENT.md`](GHOST_EXPERIMENT.md).
+
 At minimum compare:
 
 - nuisance-only features (length, position, token rarity, entropy);

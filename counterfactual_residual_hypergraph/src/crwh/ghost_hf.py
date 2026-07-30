@@ -61,46 +61,103 @@ def tokenize_chat_record(
     apply_template = getattr(tokenizer, "apply_chat_template", None)
     if not callable(apply_template):
         raise ValueError("the observer tokenizer has no chat template")
-    prefix = apply_template(
-        [{"role": "user", "content": record.question}],
-        tokenize=True,
+
+    def template_ids(messages, *, add_generation_prompt: bool) -> np.ndarray:
+        rendered = apply_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=add_generation_prompt,
+        )
+        if isinstance(rendered, Mapping):
+            rendered = rendered.get("input_ids")
+        values = np.asarray(rendered, dtype=np.int64)
+        if values.ndim == 2 and values.shape[0] == 1:
+            values = values[0]
+        if values.ndim != 1 or not len(values):
+            raise ValueError("chat template produced no one-dimensional tokens")
+        return values
+
+    def template_text(messages, *, add_generation_prompt: bool) -> str:
+        rendered = apply_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+        )
+        if not isinstance(rendered, str) or not rendered:
+            raise ValueError("chat template produced no serialized text")
+        return rendered
+
+    user_message = {"role": "user", "content": record.question}
+    prefix_text = template_text(
+        [user_message],
         add_generation_prompt=True,
     )
-    if isinstance(prefix, Mapping):
-        prefix = prefix.get("input_ids")
-    prefix_ids = np.asarray(prefix, dtype=np.int64)
-    if prefix_ids.ndim == 2 and prefix_ids.shape[0] == 1:
-        prefix_ids = prefix_ids[0]
-    if prefix_ids.ndim != 1 or not len(prefix_ids):
-        raise ValueError("chat template produced no one-dimensional prompt tokens")
+    clean_steps = tuple(str(step).strip() for step in record.steps)
+    if not clean_steps or any(not step for step in clean_steps):
+        raise ValueError("fixed response contains an empty normalized reasoning step")
+    response = separator.join(clean_steps)
+    full_messages = [user_message, {"role": "assistant", "content": response}]
+    empty_messages = [user_message, {"role": "assistant", "content": ""}]
+    full_text = template_text(
+        full_messages,
+        add_generation_prompt=False,
+    )
+    empty_assistant_text = template_text(
+        empty_messages,
+        add_generation_prompt=False,
+    )
+    if (
+        len(empty_assistant_text) < len(prefix_text)
+        or not empty_assistant_text.startswith(prefix_text)
+    ):
+        raise ValueError(
+            "chat template assistant prefix is not stable between generation "
+            "and completed-conversation rendering"
+        )
+    suffix_text = empty_assistant_text[len(prefix_text) :]
+    if (
+        len(full_text) < len(prefix_text) + len(suffix_text)
+        or not full_text.startswith(prefix_text)
+        or (suffix_text and not full_text.endswith(suffix_text))
+    ):
+        raise ValueError("completed chat text does not preserve prompt/suffix boundaries")
+    response_stop = len(full_text) - len(suffix_text) if suffix_text else len(full_text)
+    if full_text[len(prefix_text) : response_stop] != response:
+        raise ValueError("chat template altered the normalized assistant response")
 
-    response = separator.join(record.steps)
-    spans = []
-    cursor = 0
-    for index, step in enumerate(record.steps):
-        spans.append((cursor, cursor + len(step)))
-        cursor += len(step)
-        if index + 1 < len(record.steps):
-            cursor += len(separator)
     encoded = tokenizer(
-        response,
+        full_text,
         add_special_tokens=False,
         return_offsets_mapping=True,
         return_tensors=None,
     )
-    response_ids = np.asarray(encoded["input_ids"], dtype=np.int64)
+    full_ids = np.asarray(encoded["input_ids"], dtype=np.int64)
+    canonical_full_ids = template_ids(
+        full_messages,
+        add_generation_prompt=False,
+    )
+    if not np.array_equal(canonical_full_ids, full_ids):
+        raise ValueError(
+            "offset-tokenized full chat disagrees with canonical chat tokenization"
+        )
+    spans = []
+    cursor = len(prefix_text)
+    for index, step in enumerate(clean_steps):
+        spans.append((cursor, cursor + len(step)))
+        cursor += len(step)
+        if index + 1 < len(clean_steps):
+            cursor += len(separator)
     offsets = np.asarray(encoded["offset_mapping"], dtype=np.int64)
-    if response_ids.ndim != 1 or not len(response_ids):
+    if full_ids.ndim != 1 or not len(full_ids):
         raise ValueError("fixed response maps to no tokens")
-    local_ranges = _align_offsets_to_steps(
+    step_ranges = _align_offsets_to_steps(
         offsets,
         np.asarray(spans, dtype=np.int64),
     )
-    prompt_tokens = len(prefix_ids)
     return ChatTokenizedTrace(
-        input_ids=np.concatenate((prefix_ids, response_ids)),
-        step_ranges=local_ranges + np.asarray([prompt_tokens, prompt_tokens]),
-        prompt_tokens=prompt_tokens,
+        input_ids=full_ids,
+        step_ranges=step_ranges,
+        prompt_tokens=int(step_ranges[0, 0]),
     )
 
 
@@ -149,7 +206,7 @@ class HookedResponseStateExtractor:
         self.mid_depths = middle
         self.final_depth = int(final_depth)
         self._positions = None
-        self._captured: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self._captured: dict[int, tuple[object, object]] = {}
         self._handles = []
         for depth in middle:
             self._handles.append(
@@ -165,8 +222,8 @@ class HookedResponseStateExtractor:
                 raise ValueError("decoder block output must have shape [1, tokens, hidden]")
             selected = hidden[0].index_select(0, self._positions)
             self._captured[depth] = (
-                selected.mean(dim=0).detach().to(dtype=hidden.dtype).float().cpu().numpy(),
-                selected[-1].detach().to(dtype=hidden.dtype).float().cpu().numpy(),
+                selected.float().mean(dim=0).detach(),
+                selected[-1].float().detach(),
             )
 
         return capture
@@ -214,16 +271,24 @@ class HookedResponseStateExtractor:
             raise ValueError("observer model returned no final hidden state")
         selected_final = final[0].index_select(0, self._positions)
         self._captured[self.final_depth] = (
-            selected_final.mean(dim=0).detach().float().cpu().numpy(),
-            selected_final[-1].detach().float().cpu().numpy(),
+            selected_final.float().mean(dim=0).detach(),
+            selected_final[-1].float().detach(),
         )
         missing = set(self.mid_depths).difference(self._captured)
         self._positions = None
         if missing:
             raise RuntimeError(f"decoder hooks did not capture depths: {sorted(missing)}")
         depths = (*self.mid_depths, self.final_depth)
-        means = np.stack([self._captured[depth][0] for depth in depths])
-        lasts = np.stack([self._captured[depth][1] for depth in depths])
+        means = (
+            torch.stack([self._captured[depth][0] for depth in depths])
+            .cpu()
+            .numpy()
+        )
+        lasts = (
+            torch.stack([self._captured[depth][1] for depth in depths])
+            .cpu()
+            .numpy()
+        )
         if not np.isfinite(means).all() or not np.isfinite(lasts).all():
             raise ValueError("observer produced non-finite hidden states")
         return means, lasts

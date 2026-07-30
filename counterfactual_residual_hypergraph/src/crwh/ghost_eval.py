@@ -82,7 +82,7 @@ def _rank_auc(labels: np.ndarray, scores: np.ndarray) -> float | None:
 def _average_precision(labels: np.ndarray, scores: np.ndarray) -> float | None:
     labels = np.asarray(labels, dtype=np.int64)
     positive_count = int(labels.sum())
-    if not positive_count:
+    if not positive_count or positive_count == len(labels):
         return None
     order = np.argsort(-np.asarray(scores), kind="mergesort")
     sorted_labels = labels[order]
@@ -106,22 +106,29 @@ def _average_precision(labels: np.ndarray, scores: np.ndarray) -> float | None:
 
 def _detection_metrics(
     labels: np.ndarray,
-    scores: np.ndarray,
+    ranking_scores: np.ndarray,
+    threshold_scores: np.ndarray,
     *,
     threshold: float,
-) -> dict[str, float | int | None]:
+    calibration_count: int,
+) -> dict[str, object]:
     labels = np.asarray(labels, dtype=np.int64)
-    scores = np.asarray(scores, dtype=np.float64)
+    ranking_scores = np.asarray(ranking_scores, dtype=np.float64)
+    threshold_scores = np.asarray(threshold_scores, dtype=np.float64)
     if (
         labels.ndim != 1
-        or scores.shape != labels.shape
+        or ranking_scores.shape != labels.shape
+        or threshold_scores.shape != labels.shape
         or not len(labels)
         or not np.isin(labels, [0, 1]).all()
-        or not np.isfinite(scores).all()
-        or np.any((scores < 0.0) | (scores > 1.0))
+        or not np.isfinite(ranking_scores).all()
+        or not np.isfinite(threshold_scores).all()
+        or np.any((threshold_scores < 0.0) | (threshold_scores > 1.0))
     ):
-        raise ValueError("binary labels and anomaly percentiles must be aligned")
-    predicted = scores >= threshold
+        raise ValueError("binary labels and aligned finite anomaly scores are required")
+    if calibration_count < 1:
+        raise ValueError("calibration_count must be positive")
+    predicted = threshold_scores >= threshold
     positive = labels == 1
     tp = int((predicted & positive).sum())
     tn = int((~predicted & ~positive).sum())
@@ -131,29 +138,71 @@ def _detection_metrics(
     specificity = tn / (tn + fp) if tn + fp else 0.0
     denominator = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
     mcc = (tp * tn - fp * fn) / denominator if denominator else 0.0
-    negative_scores = scores[~positive]
-    if len(negative_scores) and positive.any():
-        fpr_threshold = float(
-            np.quantile(negative_scores, 0.95, method="higher")
-        )
-        tpr_at_fpr_5 = float(np.mean(scores[positive] > fpr_threshold))
-    else:
-        tpr_at_fpr_5 = None
+    roc_tpr, roc_fpr = _max_tpr_at_fpr(
+        labels,
+        ranking_scores,
+        maximum_fpr=0.05,
+    )
+    cutoff_rank = int(np.ceil(threshold * calibration_count))
+    grid_implied_tail = (
+        calibration_count - cutoff_rank + 1
+    ) / (calibration_count + 1)
+    minimum_grid_tail = 1.0 / (calibration_count + 1)
     return {
         "n": int(len(labels)),
         "positives": int(positive.sum()),
         "prevalence": float(positive.mean()),
-        "score_semantics": "normal_calibration_empirical_anomaly_percentile",
-        "auroc": _rank_auc(labels, scores),
-        "aupr": _average_precision(labels, scores),
+        "ranking_score_semantics": "unquantized_or_pre_final_ecdf_anomaly_score",
+        "threshold_score_semantics": "normal_calibration_empirical_anomaly_percentile",
+        "auroc": _rank_auc(labels, ranking_scores),
+        "aupr": _average_precision(labels, ranking_scores),
         "threshold": float(threshold),
+        "calibration_count": int(calibration_count),
+        "calibration_percentile_grid_step": float(1.0 / calibration_count),
+        "minimum_rank_grid_tail_rate": float(minimum_grid_tail),
+        "grid_implied_tail_rate_at_percentile_cutoff": float(grid_implied_tail),
+        "nominal_tail_rate": float(1.0 - threshold),
+        "threshold_metrics_scope": (
+            "finite_sample_diagnostic_not_an_fpr_guarantee"
+        ),
         "accuracy": float(np.mean(predicted == positive)),
         "sensitivity": float(sensitivity),
         "specificity": float(specificity),
         "balanced_accuracy": float(0.5 * (sensitivity + specificity)),
         "mcc": float(mcc),
-        "tpr_at_empirical_5pct_fpr": tpr_at_fpr_5,
+        "fixed_threshold_achieved_test_fpr": float(1.0 - specificity),
+        "max_tpr_at_test_fpr_at_most_0_05": roc_tpr,
+        "achieved_test_fpr_for_roc_operating_point": roc_fpr,
     }
+
+
+def _max_tpr_at_fpr(
+    labels: np.ndarray,
+    scores: np.ndarray,
+    *,
+    maximum_fpr: float,
+) -> tuple[float | None, float | None]:
+    positive = labels == 1
+    positive_count = int(positive.sum())
+    negative_count = int((~positive).sum())
+    if not positive_count or not negative_count:
+        return None, None
+    best_tpr = 0.0
+    best_fpr = 0.0
+    thresholds = np.concatenate(
+        (
+            np.asarray([np.inf]),
+            np.unique(np.asarray(scores, dtype=np.float64))[::-1],
+        )
+    )
+    for cutoff in thresholds:
+        predicted = scores >= cutoff
+        fpr = float(np.mean(predicted[~positive]))
+        if fpr <= maximum_fpr:
+            tpr = float(np.mean(predicted[positive]))
+            if tpr > best_tpr or (tpr == best_tpr and fpr > best_fpr):
+                best_tpr, best_fpr = tpr, fpr
+    return best_tpr, best_fpr
 
 
 def _bootstrap_indices_by_group(
@@ -210,6 +259,7 @@ def _group_bootstrap(
     replicates: int,
     confidence: float,
     seed: int,
+    candidate_name: str = "mid_fused",
 ) -> tuple[dict[str, object], dict[str, object]]:
     sampled_indices = _bootstrap_indices_by_group(
         groups,
@@ -228,6 +278,9 @@ def _group_bootstrap(
         if auc is not None and final_auc is not None:
             differences.append(auc - final_auc)
     mid_report = {
+        "resampling_scope": (
+            "conditional_on_fixed_split_fit_and_calibration_test_group_bootstrap"
+        ),
         "groups": int(len(set(str(value) for value in groups))),
         "replicates": int(replicates),
         "confidence": float(confidence),
@@ -243,7 +296,10 @@ def _group_bootstrap(
         ),
     }
     difference_report = {
-        "estimand": "test_auroc_mid_fused_minus_final_layer",
+        "estimand": f"test_auroc_{candidate_name}_minus_final_layer",
+        "resampling_scope": (
+            "conditional_on_fixed_split_fit_and_calibration_test_group_bootstrap"
+        ),
         "point": (
             None
             if _rank_auc(labels, mid_scores) is None
@@ -264,11 +320,25 @@ def _group_bootstrap(
     return mid_report, difference_report
 
 
-def _normal_cdf(reference: np.ndarray, values: np.ndarray) -> np.ndarray:
+def _normal_tail_scores(
+    reference: np.ndarray,
+    values: np.ndarray,
+) -> dict[str, np.ndarray]:
     ordered = np.sort(np.asarray(reference, dtype=np.float64))
-    if not len(ordered):
-        raise ValueError("normal nuisance calibration cannot be empty")
-    return np.searchsorted(ordered, values, side="right") / len(ordered)
+    queries = np.asarray(values, dtype=np.float64)
+    if not len(ordered) or not np.isfinite(queries).all():
+        raise ValueError("normal nuisance calibration requires finite values")
+    left_ranks = np.searchsorted(ordered, queries, side="left")
+    right_ranks = np.searchsorted(ordered, queries, side="right")
+    midrank = 0.5 * (left_ranks + right_ranks) / len(ordered)
+    right = midrank
+    left_tail = 1.0 - midrank
+    two_sided = np.clip(2.0 * np.abs(midrank - 0.5), 0.0, 1.0)
+    return {
+        "upper_tail": right,
+        "lower_tail": left_tail,
+        "two_sided": two_sided,
+    }
 
 
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:
@@ -393,6 +463,55 @@ def evaluate_ghost(
     }
     if any(intersections.values()):
         raise ValueError(f"problem group leakage detected: {intersections}")
+    test_generator_names = sorted(
+        {trace.generator_model for trace in test_traces}
+    )
+    generator_coverage = {
+        generator: {
+            "fit_normal": sum(
+                trace.generator_model == generator for trace in fit_traces
+            ),
+            "calibration_normal": sum(
+                trace.generator_model == generator
+                for trace in calibration_traces
+            ),
+            "test_normal": sum(
+                trace.generator_model == generator
+                and trace.response_label == 0
+                for trace in test_traces
+            ),
+            "test_error": sum(
+                trace.generator_model == generator
+                and trace.response_label == 1
+                for trace in test_traces
+            ),
+        }
+        for generator in test_generator_names
+    }
+    missing_fit_generator_reference = [
+        generator
+        for generator, counts in generator_coverage.items()
+        if counts["fit_normal"] == 0
+    ]
+    missing_calibration_generator_reference = [
+        generator
+        for generator, counts in generator_coverage.items()
+        if counts["calibration_normal"] == 0
+    ]
+    within_generator_eligible = [
+        generator
+        for generator, counts in generator_coverage.items()
+        if counts["test_normal"] > 0 and counts["test_error"] > 0
+    ]
+    generator_confound_status = (
+        "coverage_complete_but_split_not_generator_stratified"
+        if (
+            not missing_fit_generator_reference
+            and not missing_calibration_generator_reference
+            and len(within_generator_eligible) == len(generator_coverage)
+        )
+        else "uncontrolled_use_within_generator_metrics_before_pooled_claim"
+    )
 
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=False)
@@ -407,6 +526,7 @@ def evaluate_ghost(
             "calibration_normal_problem_ids": sorted(calibration_groups),
             "test_trace_ids": [trace.trace_id for trace in test_traces],
             "test_problem_ids": sorted(test_groups),
+            "generator_coverage": generator_coverage,
             "unused_train_error_trace_ids": [
                 examples[index].trace_id
                 for index in split.train.indices
@@ -433,6 +553,15 @@ def evaluate_ghost(
         "problem_group_intersections": intersections,
         "error_samples_used_for_fit_or_calibration": 0,
         "training_epochs": 0,
+        "generator_coverage": generator_coverage,
+        "test_generators_without_fit_normal_reference": (
+            missing_fit_generator_reference
+        ),
+        "test_generators_without_calibration_normal_reference": (
+            missing_calibration_generator_reference
+        ),
+        "within_generator_both_class_eligible": within_generator_eligible,
+        "generator_confound_status": generator_confound_status,
         "layer_depth_semantics": {
             "depth_d": "output of d transformer blocks; HF hidden_states index d",
             "block_index": "depth_d minus 1",
@@ -448,26 +577,12 @@ def evaluate_ghost(
             "token_count": trace.token_count,
             "response_token_count": trace.response_token_count,
             "step_count": trace.step_count,
-            "label": trace.response_label,
-            "first_error": trace.first_error,
         }
         for trace in test_traces
     ]
-    metrics: dict[str, object] = {
-        "schema_version": "ghost_metrics_v1",
-        "result_kind": "real_processbench_ghost_style_one_class",
-        "primary_representation": "response_mean",
-        "primary_layer_rule": "equal_mean_of_six_mid_layer_calibration_percentiles",
-        "labels_used_for": "split/reference identification and final evaluation only",
-        "not_probability": True,
-    }
-    test_groups_array = np.asarray(
-        [trace.problem_id for trace in test_traces],
-        dtype=str,
-    )
-    for representation_index, representation in enumerate(
-        ("response_mean", "response_last")
-    ):
+    calibration_count = len(calibration_traces)
+    scored_by_representation = {}
+    for representation in ("response_mean", "response_last"):
         detector = GhostMahalanobisEnsemble(
             mid_depths=layer_depths[:-1],
             final_depth=layer_depths[-1],
@@ -476,66 +591,28 @@ def evaluate_ghost(
         ).fit(fit_traces, representation=representation)
         detector.calibrate(calibration_traces)
         scored = detector.score(test_traces)
+        scored_by_representation[representation] = scored
         detector.save(destination / f"reference-model-{representation}.npz")
         for row_index, row in enumerate(score_rows):
-            row[f"{representation}_mid_fused"] = float(
+            row[f"{representation}_mid_fused_rank_score"] = float(
+                scored.mid_fused_score[row_index]
+            )
+            row[f"{representation}_mid_fused_percentile"] = float(
                 scored.mid_fused_percentile[row_index]
             )
-            row[f"{representation}_final"] = float(
+            row[f"{representation}_final_distance"] = float(
+                scored.layer_distances[row_index, -1]
+            )
+            row[f"{representation}_final_percentile"] = float(
                 scored.final_percentile[row_index]
             )
             for layer_index, depth in enumerate(layer_depths):
-                row[f"{representation}_depth_{depth}"] = float(
+                row[f"{representation}_depth_{depth}_distance"] = float(
+                    scored.layer_distances[row_index, layer_index]
+                )
+                row[f"{representation}_depth_{depth}_percentile"] = float(
                     scored.layer_percentiles[row_index, layer_index]
                 )
-
-        mid_metrics = _detection_metrics(
-            test_labels,
-            scored.mid_fused_percentile,
-            threshold=float(config.threshold_quantile),
-        )
-        final_metrics = _detection_metrics(
-            test_labels,
-            scored.final_percentile,
-            threshold=float(config.threshold_quantile),
-        )
-        bootstrap, difference = _group_bootstrap(
-            test_labels,
-            scored.mid_fused_percentile,
-            scored.final_percentile,
-            test_groups_array,
-            replicates=int(config.bootstrap_replicates),
-            confidence=float(config.bootstrap_confidence),
-            seed=int(config.split_seed) + 1000 + representation_index,
-        )
-        mid_metrics["problem_group_bootstrap"] = bootstrap
-        per_layer = {
-            str(depth): _detection_metrics(
-                test_labels,
-                scored.layer_percentiles[:, layer_index],
-                threshold=float(config.threshold_quantile),
-            )
-            for layer_index, depth in enumerate(layer_depths)
-        }
-        generator_metrics = {}
-        generators = np.asarray(
-            [trace.generator_model for trace in test_traces],
-            dtype=str,
-        )
-        for generator in sorted(set(generators)):
-            mask = generators == generator
-            generator_metrics[generator] = _detection_metrics(
-                test_labels[mask],
-                scored.mid_fused_percentile[mask],
-                threshold=float(config.threshold_quantile),
-            )
-        metrics[representation] = {
-            "mid_fused": mid_metrics,
-            "final_layer": final_metrics,
-            "per_layer": per_layer,
-            "generator_stratified_mid_fused": generator_metrics,
-            "mid_minus_final_bootstrap": difference,
-        }
 
     calibration_token_counts = np.asarray(
         [trace.response_token_count for trace in calibration_traces],
@@ -553,27 +630,188 @@ def evaluate_ghost(
         [trace.step_count for trace in test_traces],
         dtype=np.float64,
     )
-    metrics["nuisance_only"] = {
-        "response_token_count": _detection_metrics(
-            test_labels,
-            _normal_cdf(calibration_token_counts, test_token_counts),
-            threshold=float(config.threshold_quantile),
+    nuisance_scores = {
+        "response_token_count": _normal_tail_scores(
+            calibration_token_counts,
+            test_token_counts,
         ),
-        "step_count": _detection_metrics(
-            test_labels,
-            _normal_cdf(calibration_step_counts, test_step_counts),
-            threshold=float(config.threshold_quantile),
+        "step_count": _normal_tail_scores(
+            calibration_step_counts,
+            test_step_counts,
         ),
     }
+    for nuisance_name, tails in nuisance_scores.items():
+        for tail_name, values in tails.items():
+            for row_index, row in enumerate(score_rows):
+                row[f"nuisance_{nuisance_name}_{tail_name}"] = float(
+                    values[row_index]
+                )
+
     unlabeled_path = destination / "anomaly-scores-test.csv"
     _write_score_rows(unlabeled_path, score_rows, include_label=False)
     score_hash = hashlib.sha256(unlabeled_path.read_bytes()).hexdigest()
     audit["unlabeled_score_sha256"] = score_hash
-    audit["test_labels_attached_after_unlabeled_score_artifact"] = True
+    audit["frozen_score_artifact_written_before_metric_computation"] = True
+    audit["test_labels_used_for_predeclared_split_stratification"] = True
     _write_json(destination / "fit-audit.json", audit)
+
+    metrics: dict[str, object] = {
+        "schema_version": "ghost_metrics_v1",
+        "result_kind": "real_processbench_ghost_style_one_class",
+        "primary_representation": "response_mean",
+        "primary_layer_rule": "equal_mean_of_six_mid_layer_calibration_percentiles",
+        "labels_used_for": (
+            "upstream cohort construction (profile-dependent), predeclared split "
+            "stratification, normal-reference identification, and final evaluation"
+        ),
+        "evaluation_config": asdict(config),
+        "bootstrap_scope": (
+            "conditional_on_fixed_split_fit_and_calibration_test_group_bootstrap"
+        ),
+        "not_probability": True,
+    }
+    test_groups_array = np.asarray(
+        [trace.problem_id for trace in test_traces],
+        dtype=str,
+    )
+    generators = np.asarray(
+        [trace.generator_model for trace in test_traces],
+        dtype=str,
+    )
+    for representation_index, representation in enumerate(
+        ("response_mean", "response_last")
+    ):
+        scored = scored_by_representation[representation]
+        mid_metrics = _detection_metrics(
+            test_labels,
+            scored.mid_fused_score,
+            scored.mid_fused_percentile,
+            threshold=float(config.threshold_quantile),
+            calibration_count=calibration_count,
+        )
+        final_metrics = _detection_metrics(
+            test_labels,
+            scored.layer_distances[:, -1],
+            scored.final_percentile,
+            threshold=float(config.threshold_quantile),
+            calibration_count=calibration_count,
+        )
+        bootstrap, difference = _group_bootstrap(
+            test_labels,
+            scored.mid_fused_score,
+            scored.layer_distances[:, -1],
+            test_groups_array,
+            replicates=int(config.bootstrap_replicates),
+            confidence=float(config.bootstrap_confidence),
+            seed=int(config.split_seed) + 1000 + representation_index,
+        )
+        mid_metrics["problem_group_bootstrap"] = bootstrap
+        per_layer = {
+            str(depth): _detection_metrics(
+                test_labels,
+                scored.layer_distances[:, layer_index],
+                scored.layer_percentiles[:, layer_index],
+                threshold=float(config.threshold_quantile),
+                calibration_count=calibration_count,
+            )
+            for layer_index, depth in enumerate(layer_depths)
+        }
+        per_layer_differences = {}
+        for layer_index, depth in enumerate(layer_depths[:-1]):
+            _, layer_difference = _group_bootstrap(
+                test_labels,
+                scored.layer_distances[:, layer_index],
+                scored.layer_distances[:, -1],
+                test_groups_array,
+                replicates=int(config.bootstrap_replicates),
+                confidence=float(config.bootstrap_confidence),
+                seed=(
+                    int(config.split_seed)
+                    + 2000
+                    + 100 * representation_index
+                    + layer_index
+                ),
+                candidate_name=f"depth_{depth}",
+            )
+            per_layer_differences[str(depth)] = layer_difference
+        generator_metrics = {}
+        for generator in sorted(set(generators)):
+            mask = generators == generator
+            generator_metrics[generator] = _detection_metrics(
+                test_labels[mask],
+                scored.mid_fused_score[mask],
+                scored.mid_fused_percentile[mask],
+                threshold=float(config.threshold_quantile),
+                calibration_count=calibration_count,
+            )
+        defined_auc = [
+            report["auroc"]
+            for report in generator_metrics.values()
+            if report["auroc"] is not None
+        ]
+        defined_ap = [
+            report["aupr"]
+            for report in generator_metrics.values()
+            if report["aupr"] is not None
+        ]
+        generator_macro = {
+            "total_generators": len(generator_metrics),
+            "eligible_both_class_generators": len(defined_auc),
+            "defined_auroc_generators": len(defined_auc),
+            "defined_aupr_generators": len(defined_ap),
+            "auroc": (
+                float(np.mean(defined_auc)) if defined_auc else None
+            ),
+            "aupr": float(np.mean(defined_ap)) if defined_ap else None,
+        }
+        metrics[representation] = {
+            "mid_fused": mid_metrics,
+            "final_layer": final_metrics,
+            "per_layer": per_layer,
+            "generator_stratified_mid_fused": generator_metrics,
+            "generator_macro_mid_fused": generator_macro,
+            "mid_minus_final_bootstrap": difference,
+            "per_mid_layer_minus_final_bootstrap": per_layer_differences,
+        }
+
+    nuisance_values = {
+        "response_token_count": (
+            calibration_token_counts,
+            test_token_counts,
+        ),
+        "step_count": (
+            calibration_step_counts,
+            test_step_counts,
+        ),
+    }
+    metrics["nuisance_only"] = {}
+    for nuisance_name, (normal_values, held_out_values) in nuisance_values.items():
+        rankings = {
+            "upper_tail": held_out_values,
+            "lower_tail": -held_out_values,
+            "two_sided": nuisance_scores[nuisance_name]["two_sided"],
+        }
+        metrics["nuisance_only"][nuisance_name] = {
+            tail_name: _detection_metrics(
+                test_labels,
+                rankings[tail_name],
+                nuisance_scores[nuisance_name][tail_name],
+                threshold=float(config.threshold_quantile),
+                calibration_count=calibration_count,
+            )
+            for tail_name in ("upper_tail", "lower_tail", "two_sided")
+        }
+    labeled_rows = [
+        {
+            **row,
+            "label": trace.response_label,
+            "first_error": trace.first_error,
+        }
+        for row, trace in zip(score_rows, test_traces)
+    ]
     _write_score_rows(
         destination / "scores-test.csv",
-        score_rows,
+        labeled_rows,
         include_label=True,
     )
     _write_json(destination / "metrics.json", metrics)
@@ -585,6 +823,7 @@ def evaluate_ghost(
         "result_kind": "real_processbench_ghost_style_one_class",
         "method": "GHOST-inspired abstract-level mid-layer Mahalanobis",
         "training_epochs": 0,
+        "evaluation_config": asdict(config),
         "observer_mode": "teacher_forced_fixed_processbench_response",
         "scientific_boundary": (
             "The supplied abstract does not specify exact probe layers, pooling, "
@@ -595,6 +834,31 @@ def evaluate_ghost(
             "ProcessBench label=-1 identifies fit/calibration normal samples; "
             "no error sample enters geometry or score calibration."
         ),
+        "label_use_boundary": (
+            "Labels may define a balanced smoke/pilot cohort, stratify the fixed "
+            "problem-group split, identify normal references, and compute final "
+            "metrics. They never enter hidden-state geometry, fusion weights, or "
+            "the fixed threshold."
+        ),
+        "comparison_estimand": (
+            "fixed_equal_weight_six_mid_layer_ensemble_vs_single_normalized_"
+            "final_layer_control; not an isolated causal layer-depth effect"
+        ),
+        "final_layer_normalization_boundary": (
+            "Middle probes are raw decoder-block residual outputs, whereas the "
+            "final AutoModel state is after the model final RMSNorm. The comparison "
+            "may therefore include a final-normalization effect."
+        ),
+        "bootstrap_boundary": (
+            "Intervals condition on one fixed split, fitted geometry, and "
+            "calibration set; they resample held-out problem groups only."
+        ),
+        "generator_confound_status": generator_confound_status,
+        "generator_confound_boundary": (
+            "The shared problem splitter is not generator-stratified. Treat pooled "
+            "metrics as potentially style-confounded when generator coverage is "
+            "incomplete or within-generator metrics are undefined."
+        ),
         "layer_depths": list(layer_depths),
         "mid_depths": list(layer_depths[:-1]),
         "final_depth": layer_depths[-1],
@@ -602,6 +866,17 @@ def evaluate_ghost(
         "calibration_normal_traces": len(calibration_traces),
         "test_traces": len(test_traces),
         "test_prevalence": float(test_labels.mean()),
+        "threshold_resolution": {
+            "calibration_count": calibration_count,
+            "minimum_rank_grid_tail_rate": primary["mid_fused"][
+                "minimum_rank_grid_tail_rate"
+            ],
+            "grid_implied_tail_rate_at_percentile_cutoff": primary[
+                "mid_fused"
+            ]["grid_implied_tail_rate_at_percentile_cutoff"],
+            "nominal_tail_rate": primary["mid_fused"]["nominal_tail_rate"],
+            "scope": primary["mid_fused"]["threshold_metrics_scope"],
+        },
         "primary_test_mid_fused": primary["mid_fused"],
         "primary_test_final_layer": primary["final_layer"],
         "primary_mid_minus_final_bootstrap": primary[

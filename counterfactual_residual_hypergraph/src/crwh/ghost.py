@@ -237,9 +237,8 @@ class LowRankShrunkMahalanobis:
         centered = values - mean
         denominator = values.shape[0] - 1
         isotropic_scale = float(np.sum(centered * centered) / denominator / values.shape[1])
-        target_scale = max(isotropic_scale, self.regularization)
         beta = (1.0 - self.shrinkage) / denominator
-        diagonal = self.shrinkage * target_scale + self.regularization
+        diagonal = self.shrinkage * isotropic_scale + self.regularization
         gram = np.eye(values.shape[0], dtype=np.float64)
         if beta:
             gram += (beta / diagonal) * (centered @ centered.T)
@@ -294,6 +293,7 @@ class GhostScores:
     layer_depths: tuple[int, ...]
     layer_distances: np.ndarray
     layer_percentiles: np.ndarray
+    mid_fused_score: np.ndarray
     mid_fused_percentile: np.ndarray
     final_percentile: np.ndarray
 
@@ -467,6 +467,7 @@ class GhostMahalanobisEnsemble:
             layer_depths=self.layer_depths,
             layer_distances=distances,
             layer_percentiles=percentiles,
+            mid_fused_score=fused,
             mid_fused_percentile=_empirical_percentile(
                 self.reference_fused_scores_,
                 fused,
