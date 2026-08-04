@@ -2,12 +2,12 @@
 
 ## Paper target
 
-Working title: **Hidden Futures, Routed Evidence: Causal Belief Geometry in
-Pretrained Transformers**.
+Working title: **Routed Updates: Causal Belief Decomposition in Pretrained
+Transformers**.
 
 Dominant contribution: a predictive-alias protocol with analytic Fourier belief
-geometry that distinguishes residual belief state from current logits and then
-tests the QK/OV path causally.
+coordinates that distinguishes residual belief state from current logits,
+decomposes attention/MLP block writes, and then tests the QK/OV path causally.
 
 ## Experiment block 1: geometry existence
 
@@ -63,6 +63,10 @@ increment over actual current logits and the exact-output alias remains intact.
 - evidence-versus-length-matched-token alignment difference;
 - donor-to-recipient future-logit mediation effect;
 - fraction of the total branch causal effect mediated by preregistered heads.
+- signed target progress and relative target error for attention, MLP, and actual
+  block writes at one preregistered layer;
+- p95 reconstruction error for `block_delta = attention + MLP`;
+- full-block versus attention-only direction gain and target-error reduction.
 
 ### Ablations
 
@@ -70,6 +74,8 @@ increment over actual current logits and the exact-output alias remains intact.
 - V content fixed while attention weights are swapped (follow-up ablation);
 - whole-head versus evidence-source-only patch;
 - MLP-output patch and residual-state patch as upper-bound controls;
+- attention-only, MLP-only, and joint patches only after the observational MLP
+  update-signature gate passes;
 - head rankings selected on training folds and frozen on test folds.
 
 ## Experiment block 3: ProcessBench transfer
@@ -112,11 +118,16 @@ their history; \(R\) contains only routing-mechanism scores frozen in block 2;
 2. Generate 20 alias pairs and inspect exact invariants.
 3. Extract 20 pairs with all layers, no attention.
 4. Fit Fourier charts and run nulls.
-5. If Gate B passes, extract attention for 20 pairs.
-6. Run ten donor-recipient patches and verify directionality.
-7. Scale block 1 to 2,500 pairs.
-8. Freeze layers/heads and scale block 2.
-9. Only after Gates B-D pass, run ProcessBench transfer.
+5. If the representation gate passes, extract attention/MLP/block writes and
+   verify component reconstruction at the preregistered layer.
+6. If decomposition is valid, extract source-specific attention for 20 pairs.
+7. Run ten donor-recipient source patches and verify directionality.
+8. Scale block 1 to 2,500 pairs.
+9. Freeze layers/heads and scale block 2.
+10. If the MLP update signature passes, run the attention-only, MLP-only, and
+    joint factorial patch pilot.
+11. Only after representation, decomposition, routing, and causal gates pass,
+   run ProcessBench transfer.
 
 ## Reproducibility contract
 

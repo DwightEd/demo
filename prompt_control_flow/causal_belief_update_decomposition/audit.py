@@ -237,7 +237,7 @@ def _write_score_table(
 
 def _render_report(report: dict[str, Any]) -> str:
     lines = [
-        "# Causal Belief Routing Representation Audit",
+        "# Causal Belief Update Decomposition: Representation Audit",
         "",
         "The primary test asks whether current residual states preserve a future-relevant "
         "belief distinction after the current output distribution has been matched by construction.",

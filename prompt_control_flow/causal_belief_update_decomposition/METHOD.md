@@ -1,11 +1,11 @@
-# Causal Belief Routing Under Predictive Aliasing
+# Causal Belief Update Decomposition Under Predictive Aliasing
 
 ## One-sentence thesis
 
 A pretrained Transformer can preserve future-relevant constraint beliefs that
-are invisible to the current output distribution, and the preservation is
-implemented by evidence-token attention routes whose OV writes move the
-residual stream along analytically known belief-update directions.
+are invisible to the current output distribution, while its block-local
+attention and MLP writes can be decomposed and measured against analytically
+known belief-update directions.
 
 This is a mechanism claim, not a claim that every language-model computation is
 Bayesian.
@@ -174,6 +174,53 @@ update, and same-layer randomly selected heads. Fourier-label permutation is
 performed only within each training fold, so held-out alias pairs never shape
 their own null model.
 
+## Block-local update decomposition
+
+For a pre-norm decoder block at the target token, capture the actual attention
+output \(a_\ell\), MLP output \(f_\ell\), block input \(h_\ell\), and block
+output \(h_{\ell+1}\). The extractor first verifies
+
+\[
+h_{\ell+1}-h_\ell \approx a_\ell+f_\ell.
+\]
+
+This reconstruction is a semantic check on the hooks, not a research result.
+The captured block output is also compared with the stored boundary state from
+the original trace; a replay mismatch blocks the audit.
+Every component is projected through the alias pair's held-out chart Jacobian.
+For \(u\in\{a_\ell,f_\ell,h_{\ell+1}-h_\ell\}\), the signed target progress is
+
+\[
+P_\ell(u)=
+\frac{\langle J_\ell u,\Delta\Phi_t^\star\rangle}
+{\|\Delta\Phi_t^\star\|^2},
+\]
+
+and the relative remaining error is
+
+\[
+E_\ell(u)=
+\frac{\|\Delta\Phi_t^\star-J_\ell u\|}
+{\|\Delta\Phi_t^\star\|}.
+\]
+
+The directional margin against the matched opposite branch remains a separate
+diagnostic. Attention mass times cosine margin is used only for cross-fitted
+head selection; it is not called the amount of belief update.
+
+The observational MLP signature is the full-block improvement over
+attention-only:
+
+\[
+G_{\mathrm{dir}}=M(h_{\ell+1}-h_\ell)-M(a_\ell),
+\qquad
+G_{\mathrm{err}}=E_\ell(a_\ell)-E_\ell(h_{\ell+1}-h_\ell).
+\]
+
+The audit requires an explicitly preregistered primary layer. Other layers are
+descriptive. Positive gains authorize factorial patching but do not establish a
+causal MLP correction by themselves.
+
 ## Causal mediation test
 
 For a donor and recipient in one predictive-alias pair, replace only the
@@ -215,19 +262,26 @@ reported only as baselines.
 - shuffled correspondence and random subspace fail;
 - result replicates across templates and at least two model families or sizes.
 
-### Gate C: routing
+### Gate C: update decomposition
+
+- actual block deltas reconstruct from attention and MLP outputs below the
+  preregistered error threshold;
+- target progress and target error are reported at a preregistered layer;
+- an MLP update signature is called observational until component patching.
+
+### Gate D: routing
 
 - evidence-source OV writes align with the true Fourier update more than all
   matched controls;
 - effect is localized to a sparse, reproducible set of layer-head paths.
 
-### Gate D: causality
+### Gate E: causality
 
 - donor evidence patches move future logits toward the donor answer;
 - mediation effect is larger for aligned heads than random heads/tokens;
 - patching does not simply increase output entropy or norm.
 
-### Gate E: transfer
+### Gate F: transfer
 
 - geometry-mediated evidence mismatch adds held-out usable information over
   logits, length, position, and lexical controls on ProcessBench;

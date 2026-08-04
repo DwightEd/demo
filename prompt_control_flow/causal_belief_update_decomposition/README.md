@@ -1,17 +1,25 @@
-# Causal Belief Routing
+# Causal Belief Update Decomposition (CBUD)
 
-This project tests a three-stage claim about pretrained decoder-only
+This project tests a four-stage claim about pretrained decoder-only
 Transformers:
 
 1. residual states preserve an analytically known constraint belief that is
    absent from the current task-output distribution;
-2. evidence-token attention/OV paths write in the direction of the exact
+2. target-token block updates can be decomposed into attention and MLP writes
+   and measured as signed progress toward the exact belief update;
+3. evidence-token attention/OV paths write in the direction of the exact
    belief update;
-3. replacing those source-specific paths changes future answers in the donor
+4. replacing those source-specific paths changes future answers in the donor
    direction.
 
 It does not infer a manifold from generic hidden-state distances. The geometric
 coordinates are finite-field Fourier characters of the exact posterior.
+
+The method and Python package are both named **Causal Belief Update
+Decomposition (CBUD)**. The package directory is
+`causal_belief_update_decomposition`. Existing representation trace/chart
+schemas and their data directories keep the old routing identifier so prior
+remote artifacts remain readable.
 
 ## Code map
 
@@ -23,7 +31,10 @@ coordinates are finite-field Fourier characters of the exact posterior.
 | `charts.py`, `audit.py`, `metrics.py` | Pair-grouped cross-fitting and representation gate |
 | `routing_extraction.py`, `routing.py`, `routing_schema.py` | Evidence-source attention and per-head \(W_O\) writes |
 | `routing_audit.py` | Cross-fitted head selection and routing gate |
+| `update_extraction.py`, `update_metrics.py`, `update_schema.py` | Attention/MLP/block writes, target progress, target error, and reconstruction |
+| `update_audit.py` | Preregistered-layer decomposition and MLP update-signature gate |
 | `patching.py`, `patch_schema.py`, `patch_audit.py` | Donor/recipient source-path interventions and causal gate |
+| `run_remote_pilot.sh` | Tests, extracts, and audits the update decomposition from existing trace/chart artifacts |
 
 See [GEOMETRY_PRIMER.md](GEOMETRY_PRIMER.md), [METHOD.md](METHOD.md),
 [EXPERIMENT_PLAN.md](EXPERIMENT_PLAN.md), and [RELATED_WORK.md](RELATED_WORK.md)
@@ -42,6 +53,18 @@ The exact observer path is:
 ```text
 /share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct
 ```
+
+If the 200-pair trace and representation charts already exist, run the new
+decomposition end to end with:
+
+```bash
+bash prompt_control_flow/causal_belief_update_decomposition/run_remote_pilot.sh
+```
+
+The script verifies the focused unit tests, extracts target-token
+attention/MLP/block writes, and audits preregistered layer 16. Override
+`MODEL_DIR`, `TRACE_PATH`, `CHARTS_PATH`, `PRIMARY_LAYER`, or
+`CUDA_VISIBLE_DEVICES` only when the remote layout differs.
 
 ### 1. Build 200 exact alias pairs
 
@@ -86,6 +109,35 @@ CUDA_VISIBLE_DEVICES=0 /opt/conda/bin/python extract_causal_belief_states.py \
 
 Stop if `ready for routing analysis` is false. A failed representation gate
 means attention extraction cannot support the intended mechanism claim.
+
+### 3a. Decompose attention and MLP block writes
+
+This pass does not request or persist attention matrices. It captures only the
+last visible token at selected raw decoder-block depths and verifies
+`block_delta = attention_output + mlp_output` and exact replay of the stored
+boundary state before interpreting components.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 /opt/conda/bin/python extract_causal_belief_updates.py \
+  --trace data/causal_belief_routing/alias_pilot_200_trace.npz \
+  --charts outputs/causal_belief_routing/alias_pilot_200/representation/layer_charts.npz \
+  --model /share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct \
+  --output data/causal_belief_update_decomposition/alias_pilot_200_updates.npz \
+  --batch_size 8 \
+  --max_batch_tokens 4096 \
+  --device cuda \
+  --dtype bfloat16
+
+/opt/conda/bin/python audit_causal_belief_updates.py \
+  --input data/causal_belief_update_decomposition/alias_pilot_200_updates.npz \
+  --output_dir outputs/causal_belief_update_decomposition/alias_pilot_200/updates \
+  --primary_layer 16 \
+  --bootstrap 2000
+```
+
+`primary_layer` is required and must be fixed before inspecting the update
+artifact. `mlp_update_signature=true` is observational; it authorizes an
+attention/MLP factorial patch pilot but is not itself a causal MLP result.
 
 ### 4. Extract source-specific OV writes
 
@@ -139,10 +191,16 @@ CUDA_VISIBLE_DEVICES=0 /opt/conda/bin/python extract_causal_belief_patches.py \
 - Belief labels are shuffled only inside training folds for the null model.
 - Routing uses the opposite branch update and a same-length non-evidence source
   window as controls.
+- Block decomposition reports signed target progress and relative target error;
+  residual norms and cosine margins are diagnostics, not update magnitude.
+- The update audit requires a preregistered primary layer and fails closed when
+  component reconstruction or stored-state replay exceeds its declared
+  threshold.
 - Patching uses the same selected heads with a same-length source null and
   same-layer, same-count random-head null.
 - Layer 32 is retained for representation decoding but excluded from head-write
   projection because its stored state is post-final-normalization rather than a
   raw block output.
 
-The local unit suite is `tests/test_causal_belief_routing.py`.
+The focused local unit suites are `tests/test_causal_belief_updates.py` and
+`tests/test_causal_belief_routing.py`.

@@ -4,12 +4,12 @@ import argparse
 from pathlib import Path
 import time
 
-from prompt_control_flow.causal_belief_routing.charts import LayerChartBundle
-from prompt_control_flow.causal_belief_routing.routing_extraction import (
+from prompt_control_flow.causal_belief_update_decomposition.charts import LayerChartBundle
+from prompt_control_flow.causal_belief_update_decomposition.routing_extraction import (
     RoutingExtractionConfig,
     extract_evidence_routing,
 )
-from prompt_control_flow.causal_belief_routing.schema import CausalBeliefTrace
+from prompt_control_flow.causal_belief_update_decomposition.schema import CausalBeliefTrace
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -95,6 +95,10 @@ small, canceling, or irrelevant value vector.
 | conditional usable bits | future NLL reduction over logits plus controls | information beyond output |
 | update alignment margin | cosine to true update minus cosine to opposite update | directional mechanism |
 | routed update score | evidence attention mass times update margin | source-specific mediation |
+| signed target progress | projected write on the exact update divided by target squared norm | update magnitude in analytic coordinates |
+| relative target error | remaining exact update after a component write | joint direction-and-magnitude error |
+| block reconstruction error | discrepancy between actual block delta and attention plus MLP writes | hook-semantic validity |
+| state replay error | captured block output versus the stored boundary state | model/revision/replay validity |
 | donor patch log-odds shift | patched donor-vs-recipient answer margin | causal effect |
 
 ## Why predictive aliasing is necessary
@@ -123,6 +127,8 @@ latent distinction, not merely another readout of current confidence.
 - Lower spread is not automatically higher certainty or correctness.
 - A linear chart is a measurement instrument, not the proposed mechanism.
 - Attention weights are not residual contributions.
+- Attention mass times cosine is a routing-selection score, not update magnitude.
+- A positive MLP update signature is observational until factorial patching.
 - Decodability is not causality.
 - Passing the controlled task does not prove that all natural-language
   reasoning follows Bayesian updates.

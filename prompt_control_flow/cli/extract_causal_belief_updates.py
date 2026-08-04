@@ -4,13 +4,40 @@ import argparse
 from pathlib import Path
 import time
 
-import numpy as np
-
-from prompt_control_flow.causal_belief_update_decomposition.patching import (
-    SourcePatchConfig,
-    extract_source_patches,
-)
+from prompt_control_flow.causal_belief_update_decomposition.charts import LayerChartBundle
 from prompt_control_flow.causal_belief_update_decomposition.schema import CausalBeliefTrace
+from prompt_control_flow.causal_belief_update_decomposition.update_extraction import (
+    BeliefUpdateExtractionConfig,
+    extract_belief_update_decomposition,
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Extract target-token attention, MLP, and actual block writes in "
+            "held-out finite-field belief coordinates."
+        )
+    )
+    parser.add_argument("--trace", required=True)
+    parser.add_argument("--charts", required=True)
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--max_batch_tokens", type=int, default=4096)
+    parser.add_argument("--max_seq_len", type=int, default=1024)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--dtype",
+        choices=("auto", "float16", "bfloat16", "float32"),
+        default="auto",
+    )
+    parser.add_argument("--trust_remote_code", action="store_true")
+    parser.add_argument("--allow_model_mismatch", action="store_true")
+    parser.add_argument("--allow_failed_representation_gate", action="store_true")
+    parser.add_argument("--no_progress", action="store_true")
+    parser.add_argument("--no_compress", action="store_true")
+    return parser
 
 
 def _torch_dtype(torch, requested: str, device):
@@ -26,33 +53,12 @@ def _torch_dtype(torch, requested: str, device):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Run donor-to-recipient source-specific attention-head path patches."
-    )
-    parser.add_argument("--trace", required=True)
-    parser.add_argument("--routing_summary", required=True)
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--max_pairs", type=int, default=0)
-    parser.add_argument("--max_seq_len", type=int, default=1024)
-    parser.add_argument("--max_replay_js", type=float, default=0.01)
-    parser.add_argument("--device", default="auto")
-    parser.add_argument(
-        "--dtype",
-        choices=("auto", "float16", "bfloat16", "float32"),
-        default="auto",
-    )
-    parser.add_argument("--trust_remote_code", action="store_true")
-    parser.add_argument("--allow_model_mismatch", action="store_true")
-    parser.add_argument("--allow_failed_routing_gate", action="store_true")
-    parser.add_argument("--no_progress", action="store_true")
-    parser.add_argument("--no_compress", action="store_true")
-    args = parser.parse_args()
-
+    args = build_parser().parse_args()
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     trace = CausalBeliefTrace.load(args.trace)
+    charts = LayerChartBundle.load(args.charts)
     recorded_model = str(trace.metadata.get("model", ""))
     if (
         recorded_model
@@ -60,7 +66,8 @@ def main() -> None:
         and not args.allow_model_mismatch
     ):
         raise SystemExit(
-            f"observer mismatch: trace={recorded_model!r}, replay={args.model!r}"
+            f"observer mismatch: trace={recorded_model!r}, replay={args.model!r}; "
+            "use the exact observer or explicitly mark the run exploratory"
         )
     device = torch.device(
         "cuda"
@@ -83,47 +90,49 @@ def main() -> None:
     model_kwargs = {
         "trust_remote_code": bool(args.trust_remote_code),
         "low_cpu_mem_usage": True,
-        "attn_implementation": "eager",
     }
     if dtype is not None:
         model_kwargs["torch_dtype"] = dtype
     model = AutoModelForCausalLM.from_pretrained(args.model, **model_kwargs).to(device)
     model.eval()
     started = time.perf_counter()
-    result = extract_source_patches(
+    updates = extract_belief_update_decomposition(
         model,
         tokenizer,
         trace,
-        args.routing_summary,
-        SourcePatchConfig(
-            max_pairs=int(args.max_pairs),
+        charts,
+        BeliefUpdateExtractionConfig(
+            batch_size=int(args.batch_size),
+            max_batch_tokens=int(args.max_batch_tokens),
             max_seq_len=int(args.max_seq_len),
-            max_replay_js=float(args.max_replay_js),
             show_progress=not bool(args.no_progress),
-            allow_failed_routing_gate=bool(args.allow_failed_routing_gate),
+            allow_failed_representation_gate=bool(
+                args.allow_failed_representation_gate
+            ),
         ),
         metadata={
             "model": str(args.model),
-            "trace": str(args.trace),
-            "device": str(device),
+            "source_trace": str(args.trace),
+            "source_charts": str(args.charts),
             "model_dtype": str(next(model.parameters()).dtype),
+            "device": str(device),
         },
     )
     elapsed = time.perf_counter() - started
-    result.metadata["elapsed_seconds"] = float(elapsed)
+    updates.metadata["elapsed_seconds"] = float(elapsed)
+    updates.metadata["rows_per_second"] = float(
+        len(updates.row_indices) / max(elapsed, 1e-9)
+    )
     if device.type == "cuda":
-        result.metadata["gpu_peak_mb"] = float(
+        updates.metadata["gpu_peak_mb"] = float(
             torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0)
         )
-    result.save(args.output, compressed=not bool(args.no_compress))
+    updates.save(args.output, compressed=not bool(args.no_compress))
     print(
-        f"saved {len(result.pair_ids)} patch directions from "
-        f"{len(np.unique(result.pair_ids))} pairs to {args.output}"
+        f"saved belief-update decomposition for {len(updates.row_indices)} rows, "
+        f"layers={updates.layers.tolist()}"
     )
-    print(
-        f"coverage={result.metadata['coverage']:.3f} | "
-        f"max replay JS={np.max(result.replay_js):.6f} | elapsed={elapsed:.1f}s"
-    )
+    print(f"output: {args.output} | elapsed={elapsed:.1f}s")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from prompt_control_flow.causal_belief_routing.audit import (
+from prompt_control_flow.causal_belief_update_decomposition.audit import (
     RepresentationAuditConfig,
     run_representation_audit,
 )

@@ -6,11 +6,11 @@ from pathlib import Path
 import time
 from typing import Sequence
 
-from prompt_control_flow.causal_belief_routing.extraction import (
+from prompt_control_flow.causal_belief_update_decomposition.extraction import (
     StateExtractionConfig,
     extract_causal_belief_states,
 )
-from prompt_control_flow.causal_belief_routing.world import load_alias_worlds_jsonl
+from prompt_control_flow.causal_belief_update_decomposition.world import load_alias_worlds_jsonl
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

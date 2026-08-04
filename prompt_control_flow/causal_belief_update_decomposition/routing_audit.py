@@ -94,7 +94,9 @@ def _render_report(report: dict[str, Any]) -> str:
         "",
         "Heads are selected only on training alias pairs. The primary score is "
         "evidence attention mass multiplied by the held-out geometric alignment "
-        "margin between the true and opposite belief updates.",
+        "margin between the true and opposite belief updates. This is a routing "
+        "selection score, not the amount of belief update; signed target progress "
+        "is reported by the separate block-decomposition audit.",
         "",
         f"- Rows: `{report['data']['rows']}`",
         f"- Pairs: `{report['data']['pairs']}`",

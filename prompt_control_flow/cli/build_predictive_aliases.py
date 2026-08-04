@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
-from prompt_control_flow.causal_belief_routing.world import (
+from prompt_control_flow.causal_belief_update_decomposition.world import (
     AliasWorldConfig,
     generate_alias_worlds,
     write_alias_worlds_jsonl,

@@ -3,46 +3,46 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import prompt_control_flow.causal_belief_routing.charts as chart_module
+import prompt_control_flow.causal_belief_update_decomposition.charts as chart_module
 
-from prompt_control_flow.causal_belief_routing.finite_field import (
+from prompt_control_flow.causal_belief_update_decomposition.finite_field import (
     enumerate_vectors,
     in_row_span,
     matrix_rank_mod,
 )
-from prompt_control_flow.causal_belief_routing.geometry import (
+from prompt_control_flow.causal_belief_update_decomposition.geometry import (
     direct_query_distribution,
     fourier_coordinates,
     query_distribution_from_fourier,
 )
-from prompt_control_flow.causal_belief_routing.routing import (
+from prompt_control_flow.causal_belief_update_decomposition.routing import (
     head_residual_writes,
     length_matched_control_mask,
     source_head_pre_output,
 )
-from prompt_control_flow.causal_belief_routing.routing_schema import (
+from prompt_control_flow.causal_belief_update_decomposition.routing_schema import (
     EvidenceRoutingTrace,
     ROUTING_SCHEMA,
 )
-from prompt_control_flow.causal_belief_routing.routing_audit import (
+from prompt_control_flow.causal_belief_update_decomposition.routing_audit import (
     RoutingAuditConfig,
     run_routing_audit,
 )
-from prompt_control_flow.causal_belief_routing.patching import (
+from prompt_control_flow.causal_belief_update_decomposition.patching import (
     apply_source_component_patch,
     frozen_pair_folds,
 )
-from prompt_control_flow.causal_belief_routing.patch_schema import (
+from prompt_control_flow.causal_belief_update_decomposition.patch_schema import (
     PATCH_SCHEMA,
     SourcePatchTrace,
 )
-from prompt_control_flow.causal_belief_routing.patch_audit import (
+from prompt_control_flow.causal_belief_update_decomposition.patch_audit import (
     SourcePatchAuditConfig,
     run_source_patch_audit,
 )
-from prompt_control_flow.causal_belief_routing.data import build_alias_observations
-from prompt_control_flow.causal_belief_routing.schema import CausalBeliefTrace
-from prompt_control_flow.causal_belief_routing.charts import (
+from prompt_control_flow.causal_belief_update_decomposition.data import build_alias_observations
+from prompt_control_flow.causal_belief_update_decomposition.schema import CausalBeliefTrace
+from prompt_control_flow.causal_belief_update_decomposition.charts import (
     LayerChartBundle,
     RandomProjection,
     RidgeChart,
@@ -50,18 +50,18 @@ from prompt_control_flow.causal_belief_routing.charts import (
     fit_ridge_accelerated,
     fit_layer_chart_bundle,
 )
-from prompt_control_flow.causal_belief_routing.metrics import (
+from prompt_control_flow.causal_belief_update_decomposition.metrics import (
     cluster_bootstrap_mean,
     evaluate_fourier_predictions,
 )
-from prompt_control_flow.causal_belief_routing.audit import (
+from prompt_control_flow.causal_belief_update_decomposition.audit import (
     RepresentationAuditConfig,
     run_representation_audit,
 )
-from prompt_control_flow.causal_belief_routing.extraction import (
+from prompt_control_flow.causal_belief_update_decomposition.extraction import (
     resolve_residue_token_groups,
 )
-from prompt_control_flow.causal_belief_routing.world import (
+from prompt_control_flow.causal_belief_update_decomposition.world import (
     AliasWorldConfig,
     generate_alias_worlds,
     load_alias_worlds_jsonl,
