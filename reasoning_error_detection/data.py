@@ -257,7 +257,7 @@ class ProcessBenchFeatureLoader:
                     controls.append(
                         np.log1p(
                             np.asarray(
-                                [step + 1, lengths[step], previous[step], cumulative[step]],
+                                [step, lengths[step], previous[step], cumulative[step]],
                                 dtype=np.float64,
                             )
                         )

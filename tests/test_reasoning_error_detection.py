@@ -11,6 +11,7 @@ from reasoning_error_detection.data import (
     StepFeatureDataset,
 )
 from reasoning_error_detection.detector import DetectorConfig, ProcessBenchErrorDetector
+from reasoning_error_detection.main import build_parser
 
 
 def _write_processbench_features(path: Path) -> None:
@@ -81,6 +82,8 @@ def test_loader_builds_label_safe_first_error_rows_from_processbench_features(
         "control.log1p_previous_step_tokens",
         "control.log1p_cumulative_tokens",
     )
+    assert data.control_features[0, 0] == pytest.approx(0.0)
+    assert data.control_features[1, 0] == pytest.approx(np.log(2.0))
     assert data.output_names == ("output.token_entropy",)
     assert data.routing_names == ("routing.icr_mean",)
     assert data.residual_features.shape == (7, 12)
@@ -181,3 +184,39 @@ def test_detector_crossfits_by_problem_and_localizes_injected_first_errors(
     assert (tmp_path / "report" / "summary.json").exists()
     predictions = np.load(tmp_path / "report" / "oof_predictions.npz")
     assert np.isfinite(predictions["probabilities"]).all()
+
+
+def test_main_parser_exposes_processbench_feature_run_parameters() -> None:
+    args = build_parser().parse_args(
+        [
+            "--input",
+            "/data/processbench/gsm8k/geometry/trace.npz",
+            "--output_dir",
+            "/results/gsm8k",
+            "--layers",
+            "8,16,24",
+            "--projection_dim",
+            "32",
+            "--device",
+            "cuda:0",
+        ]
+    )
+
+    assert args.input.endswith("geometry/trace.npz")
+    assert args.layers == (8, 16, 24)
+    assert args.projection_dim == 32
+    assert args.device == "cuda:0"
+
+
+def test_remote_runner_uses_geometry_manifests_and_active_python() -> None:
+    runner = (
+        Path(__file__).parents[1]
+        / "reasoning_error_detection"
+        / "run_processbench.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "${subset}/geometry/trace.npz" in runner
+    assert "gsm8k math olympiadbench omnimath" in runner
+    assert 'PYTHON_BIN="${PYTHON_BIN:-python}"' in runner
+    assert "transformers" not in runner
+    assert "selected/trace.npz" not in runner
