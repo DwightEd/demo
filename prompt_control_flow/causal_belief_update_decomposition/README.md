@@ -54,16 +54,17 @@ The exact observer path is:
 /share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct
 ```
 
-If the 200-pair trace and representation charts already exist, run the new
-decomposition end to end with:
+Run the 200-pair decomposition end to end with:
 
 ```bash
 bash prompt_control_flow/causal_belief_update_decomposition/run_remote_pilot.sh
 ```
 
-The script verifies the focused unit tests, extracts target-token
-attention/MLP/block writes, and audits preregistered layer 16. Override
-`MODEL_DIR`, `TRACE_PATH`, `CHARTS_PATH`, `PRIMARY_LAYER`, or
+The script verifies the focused unit tests, builds missing predictive aliases,
+extracts the dedicated boundary-state trace, fits the representation chart,
+extracts target-token attention/MLP/block writes, and audits preregistered
+layer 16. Existing stage outputs are reused. Override `MODEL_DIR`,
+`ALIAS_PATH`, `TRACE_PATH`, `CHARTS_PATH`, `PRIMARY_LAYER`, or
 `CUDA_VISIBLE_DEVICES` only when the remote layout differs.
 
 ### 1. Build 200 exact alias pairs

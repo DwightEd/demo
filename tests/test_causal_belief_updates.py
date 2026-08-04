@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -228,3 +230,21 @@ def test_belief_update_audit_cli_requires_explicit_primary_layer() -> None:
     parser = build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["--input", "updates.npz", "--output_dir", "audit"])
+
+
+def test_remote_runner_builds_missing_cbud_prerequisites() -> None:
+    demo_root = Path(__file__).resolve().parents[1]
+    script = (
+        demo_root
+        / "prompt_control_flow"
+        / "causal_belief_update_decomposition"
+        / "run_remote_pilot.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'if [[ ! -f "${ALIAS_PATH}" ]]' in script
+    assert '"${PYTHON_BIN}" build_predictive_aliases.py' in script
+    assert 'if [[ ! -f "${TRACE_PATH}" ]]' in script
+    assert '"${PYTHON_BIN}" extract_causal_belief_states.py' in script
+    assert 'if [[ ! -f "${CHARTS_PATH}" ]]' in script
+    assert '"${PYTHON_BIN}" audit_causal_belief_routing.py' in script
+    assert "trace is missing" not in script
