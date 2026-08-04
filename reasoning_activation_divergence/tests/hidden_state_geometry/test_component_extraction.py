@@ -50,13 +50,24 @@ def _sample(tmp_path, *, chain_id: int = 11, component_path=None) -> ChainSample
     )
 
 
-def _trace(tmp_path, *, attention_mask=None, gold=None, dataset=None) -> TraceSource:
+def _trace(
+    tmp_path, *, attention_mask=None, gold=None, dataset=None, padded_ranges=False
+) -> TraceSource:
     selected = tmp_path / "gsm8k" / "selected"
     selected.mkdir(parents=True)
     trace = selected / "trace.npz"
-    ranges = np.empty(2, dtype=object)
-    ranges[0] = np.asarray([[1, 1]], dtype=np.int64)
-    ranges[1] = np.asarray([[2, 3], [4, 4]], dtype=np.int64)
+    if padded_ranges:
+        ranges = np.asarray(
+            [
+                [[1, 1], [-1, -1], [-1, -1]],
+                [[2, 3], [4, 4], [-1, -1]],
+            ],
+            dtype=np.int64,
+        )
+    else:
+        ranges = np.empty(2, dtype=object)
+        ranges[0] = np.asarray([[1, 1]], dtype=np.int64)
+        ranges[1] = np.asarray([[2, 3], [4, 4]], dtype=np.int64)
     np.savez(
         trace,
         chain_idx=np.asarray([10, 11], dtype=np.int64),
@@ -73,6 +84,7 @@ def _trace(tmp_path, *, attention_mask=None, gold=None, dataset=None) -> TraceSo
             dtype=np.int64,
         ),
         prompt_token_counts=np.asarray([1, 2], dtype=np.int64),
+        n_steps=np.asarray([1, 2], dtype=np.int64),
         step_token_ranges=ranges,
         gold_error_step=np.asarray([-1, 1] if gold is None else gold, dtype=np.int64),
         dataset=np.asarray(
@@ -214,6 +226,15 @@ def test_load_trace_replay_record_joins_by_chain_and_rejects_interior_padding(
     )
     with pytest.raises(ValueError, match="interior padding"):
         load_trace_replay_record(bad_source.exact_trace, sample)
+
+
+def test_load_trace_replay_record_trims_step_range_padding_by_n_steps(tmp_path) -> None:
+    source = _trace(tmp_path, padded_ranges=True)
+    sample = _sample(tmp_path)
+
+    record = load_trace_replay_record(source.exact_trace, sample)
+
+    np.testing.assert_array_equal(record.step_token_ranges, sample.step_ranges)
 
 
 def test_load_trace_replay_record_rejects_alignment_mismatches(tmp_path) -> None:

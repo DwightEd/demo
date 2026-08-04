@@ -72,6 +72,7 @@ def _cache_trace_archive(path: Path) -> _CachedTraceArchive:
         "full_input_ids",
         "full_attention_mask",
         "prompt_token_counts",
+        "n_steps",
         "step_token_ranges",
         "gold_error_step",
         "dataset",
@@ -296,6 +297,7 @@ def _load_trace_replay_record(
         "full_input_ids",
         "full_attention_mask",
         "prompt_token_counts",
+        "n_steps",
         "step_token_ranges",
         "gold_error_step",
         "dataset",
@@ -316,9 +318,17 @@ def _load_trace_replay_record(
     )
     count = len(chain_ids)
     prompt_counts = _record_vector(archive, "prompt_token_counts", count)
+    step_counts = _record_vector(archive, "n_steps", count)
     gold = _record_vector(archive, "gold_error_step", count)
     datasets = _record_vector(archive, "dataset", count)
-    ranges = _ranges_row(archive, row)
+    padded_ranges = _ranges_row(archive, row)
+    step_count = int(step_counts[row])
+    if step_count < 1 or step_count > padded_ranges.shape[0]:
+        raise ValueError(
+            f"chain {sample.chain_id}: n_steps={step_count} is incompatible with "
+            f"step_token_ranges rows={padded_ranges.shape[0]}"
+        )
+    ranges = padded_ranges[:step_count]
     metadata = _metadata_json(archive, row, count)
     provenance = {
         "model_name": _provenance_field(
@@ -365,6 +375,11 @@ def _load_trace_replay_record(
     if _dataset_id(datasets[row]) != _dataset_id(sample.dataset):
         raise ValueError(f"chain {sample.chain_id}: dataset provenance disagrees")
     expected_ranges = np.asarray(sample.step_ranges, dtype=np.int64)
+    if step_count != expected_ranges.shape[0]:
+        raise ValueError(
+            f"chain {sample.chain_id}: n_steps disagrees with ChainSample: "
+            f"trace={step_count}, sample={expected_ranges.shape[0]}"
+        )
     if ranges.shape != expected_ranges.shape or not np.array_equal(
         ranges, expected_ranges
     ):

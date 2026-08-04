@@ -13,12 +13,13 @@ For every selected ProcessBench domain under
   layer IDs, prompt token counts, step token ranges, gold first-error labels,
   chain IDs, dataset names, and model provenance;
 - `trace.npz` with `full_input_ids`, `full_attention_mask`, `chain_idx`,
-  `prompt_token_counts`, `step_token_ranges`, `gold_error_step`, dataset,
+  `prompt_token_counts`, `n_steps`, `step_token_ranges`, `gold_error_step`, dataset,
   model/tokenizer provenance, and output summaries;
 - response-token hidden shards referenced by the raw residual manifest.
 
 The extractor never re-tokenizes. It loads each stored full token sequence by
-`chain_idx`, trims only right padding proven by `full_attention_mask`, and
+`chain_idx`, trims token padding proven by `full_attention_mask` and range-row
+padding declared by `n_steps`, and
 rejects interior padding or any disagreement with `ChainSample` prompt counts,
 step ranges, gold label, dataset, or response-token count.
 
