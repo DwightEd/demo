@@ -273,3 +273,17 @@ def test_remote_runner_centralizes_remote_data_and_gpu_configuration() -> None:
     assert 'export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${GPU_ID}}"' in script
     assert "memory.used" not in script
     assert 'mkdir -p \\' in script
+
+
+def test_remote_runner_does_not_require_pytest_at_runtime() -> None:
+    demo_root = Path(__file__).resolve().parents[1]
+    script = (
+        demo_root
+        / "prompt_control_flow"
+        / "causal_belief_update_decomposition"
+        / "run_remote_pilot.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "CBUD runtime imports: OK" in script
+    assert 'importlib.util.find_spec("pytest") is None' in script
+    assert "pytest is not installed; focused unit tests skipped" in script

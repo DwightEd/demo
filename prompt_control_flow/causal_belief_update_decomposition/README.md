@@ -60,10 +60,12 @@ Run the 200-pair decomposition end to end with:
 bash prompt_control_flow/causal_belief_update_decomposition/run_remote_pilot.sh
 ```
 
-The script verifies the focused unit tests, builds missing predictive aliases,
-extracts the dedicated boundary-state trace, fits the representation chart,
-extracts target-token attention/MLP/block writes, and audits preregistered
-layer 16. Existing stage outputs are reused. Override `MODEL_DIR`,
+The script always verifies the CBUD runtime imports and runs the focused unit
+tests when the selected Python environment already provides `pytest`. It then
+builds missing predictive aliases, extracts the dedicated boundary-state trace,
+fits the representation chart, extracts target-token attention/MLP/block
+writes, and audits preregistered layer 16. Existing stage outputs are reused.
+Override `MODEL_DIR`,
 `DATA_ROOT`, `GPU_ID`, or `PRIMARY_LAYER` in the user-editable configuration at
 the top of `run_remote_pilot.sh` when the remote layout changes. All artifact
 paths are derived from `DATA_ROOT`; their individual environment variables

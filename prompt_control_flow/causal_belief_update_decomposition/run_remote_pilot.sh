@@ -35,10 +35,28 @@ export PYTHONUNBUFFERED=1
 cd "${DEMO_ROOT}"
 
 echo "[1/6] Verifying the renamed package and update method"
-"${PYTHON_BIN}" -m pytest \
-  tests/test_causal_belief_updates.py \
-  tests/test_causal_belief_routing.py \
-  -q
+"${PYTHON_BIN}" - <<'PY'
+from prompt_control_flow.causal_belief_update_decomposition import (
+    routing_extraction,
+    update_audit,
+    update_extraction,
+    world,
+)
+
+assert routing_extraction and update_audit and update_extraction and world
+print("CBUD runtime imports: OK")
+PY
+
+if "${PYTHON_BIN}" -c \
+  'import importlib.util; raise SystemExit(importlib.util.find_spec("pytest") is None)'
+then
+  "${PYTHON_BIN}" -m pytest \
+    tests/test_causal_belief_updates.py \
+    tests/test_causal_belief_routing.py \
+    -q
+else
+  echo "pytest is not installed; focused unit tests skipped after runtime import verification"
+fi
 
 echo "[2/6] Preparing predictive-alias observations"
 if [[ ! -f "${ALIAS_PATH}" ]]; then
