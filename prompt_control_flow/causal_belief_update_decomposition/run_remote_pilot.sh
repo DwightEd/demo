@@ -6,7 +6,7 @@ DEMO_ROOT="$(cd -- "${PROJECT_DIR}/../.." && pwd)"
 
 # User-editable remote configuration. Change these defaults when the server,
 # model, GPU, or persistent data location changes. Environment variables remain
-# available for one-off overrides. `python` resolves from the active environment.
+# available for one-off overrides. `python` is used directly from the active environment.
 PYTHON_BIN="${PYTHON_BIN:-python}"
 MODEL_DIR="${MODEL_DIR:-/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct}"
 GPU_ID="${GPU_ID:-0}"
@@ -20,11 +20,6 @@ CHARTS_PATH="${CHARTS_PATH:-${DATA_ROOT}/derived/representation/layer_charts.npz
 UPDATE_PATH="${UPDATE_PATH:-${DATA_ROOT}/extractions/attention_mlp_block_updates_200.npz}"
 REPORT_DIR="${REPORT_DIR:-${DATA_ROOT}/results/update_audit}"
 
-if ! RESOLVED_PYTHON="$(command -v "${PYTHON_BIN}")"; then
-  echo "python command is not available: ${PYTHON_BIN}" >&2
-  exit 2
-fi
-PYTHON_BIN="${RESOLVED_PYTHON}"
 [[ -d "${MODEL_DIR}" ]] || { echo "model directory is missing: ${MODEL_DIR}" >&2; exit 2; }
 
 mkdir -p \

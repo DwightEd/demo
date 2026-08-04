@@ -300,5 +300,7 @@ def test_remote_runner_uses_active_python_and_checks_model_runtime() -> None:
 
     assert 'PYTHON_BIN="${PYTHON_BIN:-python}"' in script
     assert "/opt/conda/bin/python" not in script
+    assert 'command -v "${PYTHON_BIN}"' not in script
+    assert "RESOLVED_PYTHON" not in script
     assert "import torch" in script
     assert "import transformers" in script
