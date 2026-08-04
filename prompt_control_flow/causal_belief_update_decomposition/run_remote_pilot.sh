@@ -6,8 +6,8 @@ DEMO_ROOT="$(cd -- "${PROJECT_DIR}/../.." && pwd)"
 
 # User-editable remote configuration. Change these defaults when the server,
 # model, GPU, or persistent data location changes. Environment variables remain
-# available for one-off overrides.
-PYTHON_BIN="${PYTHON_BIN:-/opt/conda/bin/python}"
+# available for one-off overrides. `python` resolves from the active environment.
+PYTHON_BIN="${PYTHON_BIN:-python}"
 MODEL_DIR="${MODEL_DIR:-/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct}"
 GPU_ID="${GPU_ID:-0}"
 DATA_ROOT="${DATA_ROOT:-/share/home/tm902089733300000/a903202310/lys/data/CBUD/finite_field_predictive_alias/llama31_8b/pilot_200}"
@@ -20,7 +20,11 @@ CHARTS_PATH="${CHARTS_PATH:-${DATA_ROOT}/derived/representation/layer_charts.npz
 UPDATE_PATH="${UPDATE_PATH:-${DATA_ROOT}/extractions/attention_mlp_block_updates_200.npz}"
 REPORT_DIR="${REPORT_DIR:-${DATA_ROOT}/results/update_audit}"
 
-[[ -x "${PYTHON_BIN}" ]] || { echo "python is not executable: ${PYTHON_BIN}" >&2; exit 2; }
+if ! RESOLVED_PYTHON="$(command -v "${PYTHON_BIN}")"; then
+  echo "python command is not available: ${PYTHON_BIN}" >&2
+  exit 2
+fi
+PYTHON_BIN="${RESOLVED_PYTHON}"
 [[ -d "${MODEL_DIR}" ]] || { echo "model directory is missing: ${MODEL_DIR}" >&2; exit 2; }
 
 mkdir -p \
@@ -36,6 +40,11 @@ cd "${DEMO_ROOT}"
 
 echo "[1/6] Verifying the renamed package and update method"
 "${PYTHON_BIN}" - <<'PY'
+import sys
+
+import torch
+import transformers
+
 from prompt_control_flow.causal_belief_update_decomposition import (
     routing_extraction,
     update_audit,
@@ -44,7 +53,12 @@ from prompt_control_flow.causal_belief_update_decomposition import (
 )
 
 assert routing_extraction and update_audit and update_extraction and world
-print("CBUD runtime imports: OK")
+print(
+    "CBUD runtime imports: OK",
+    f"python={sys.executable}",
+    f"torch={torch.__version__}",
+    f"transformers={transformers.__version__}",
+)
 PY
 
 if "${PYTHON_BIN}" -c \

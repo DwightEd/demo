@@ -76,7 +76,9 @@ remain available for one-off overrides. The default persistent root is:
 ```
 
 The script uses GPU 0 by default and does not reject a GPU based on a fixed
-memory-usage threshold.
+memory-usage threshold. `PYTHON_BIN` defaults to `python` from the active shell
+environment, so activate the intended conda environment before launching the
+script; an explicit `PYTHON_BIN` remains available as an override.
 
 ### 1. Build 200 exact alias pairs
 

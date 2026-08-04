@@ -287,3 +287,18 @@ def test_remote_runner_does_not_require_pytest_at_runtime() -> None:
     assert "CBUD runtime imports: OK" in script
     assert 'importlib.util.find_spec("pytest") is None' in script
     assert "pytest is not installed; focused unit tests skipped" in script
+
+
+def test_remote_runner_uses_active_python_and_checks_model_runtime() -> None:
+    demo_root = Path(__file__).resolve().parents[1]
+    script = (
+        demo_root
+        / "prompt_control_flow"
+        / "causal_belief_update_decomposition"
+        / "run_remote_pilot.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'PYTHON_BIN="${PYTHON_BIN:-python}"' in script
+    assert "/opt/conda/bin/python" not in script
+    assert "import torch" in script
+    assert "import transformers" in script
