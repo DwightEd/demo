@@ -13,6 +13,7 @@ class TaskExample:
     sample: ChainSample
     visible_steps: int
     boundary_step: int | None
+    task_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -46,7 +47,9 @@ class TaskDataset:
 
 
 def build_whole_chain_task(samples: tuple[ChainSample, ...]) -> TaskDataset:
-    examples = tuple(TaskExample(sample, sample.n_steps, None) for sample in samples)
+    examples = tuple(
+        TaskExample(sample, sample.n_steps, None, "whole_chain") for sample in samples
+    )
     labels = np.asarray([sample.first_error_step >= 0 for sample in samples], dtype=np.int8)
     return TaskDataset(
         name="whole_chain",
@@ -69,7 +72,14 @@ def build_strict_prefix_task(samples: tuple[ChainSample, ...]) -> TaskDataset:
             continue
         last_boundary = gold if gold > 0 else sample.n_steps - 1
         for step in range(1, last_boundary + 1):
-            examples.append(TaskExample(sample, visible_steps=step, boundary_step=step))
+            examples.append(
+                TaskExample(
+                    sample,
+                    visible_steps=step,
+                    boundary_step=step,
+                    task_name="strict_prefix",
+                )
+            )
             labels.append(int(gold == step))
     return TaskDataset(
         name="strict_prefix",
@@ -77,6 +87,34 @@ def build_strict_prefix_task(samples: tuple[ChainSample, ...]) -> TaskDataset:
         examples=tuple(examples),
         labels=np.asarray(labels, dtype=np.int8),
         left_truncated_step0_errors=left_truncated,
+    )
+
+
+def build_post_step_task(samples: tuple[ChainSample, ...]) -> TaskDataset:
+    examples: list[TaskExample] = []
+    labels: list[int] = []
+    for sample in samples:
+        gold = int(sample.first_error_step)
+        if gold >= sample.n_steps:
+            raise ValueError(f"chain {sample.chain_id}: first error exceeds n_steps")
+        if gold < -1:
+            raise ValueError(f"chain {sample.chain_id}: unsupported first-error label {gold}")
+        last_step = sample.n_steps - 1 if gold == -1 else gold
+        for step in range(last_step + 1):
+            examples.append(
+                TaskExample(
+                    sample,
+                    visible_steps=step + 1,
+                    boundary_step=step,
+                    task_name="post_step",
+                )
+            )
+            labels.append(int(gold == step))
+    return TaskDataset(
+        name="post_step",
+        claim_scope="retrospective_first_error_diagnosis",
+        examples=tuple(examples),
+        labels=np.asarray(labels, dtype=np.int8),
     )
 
 

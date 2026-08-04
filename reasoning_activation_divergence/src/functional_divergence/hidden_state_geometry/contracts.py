@@ -21,6 +21,7 @@ class TraceSource:
     acquisition_mode: str
     exact_trace: Path | None = None
     hidden_dir: Path | None = None
+    component_dir: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "manifest", Path(self.manifest).expanduser())
@@ -28,6 +29,10 @@ class TraceSource:
             object.__setattr__(self, "exact_trace", Path(self.exact_trace).expanduser())
         if self.hidden_dir is not None:
             object.__setattr__(self, "hidden_dir", Path(self.hidden_dir).expanduser())
+        if self.component_dir is not None:
+            object.__setattr__(
+                self, "component_dir", Path(self.component_dir).expanduser()
+            )
         if not self.dataset.strip():
             raise ValueError("dataset name cannot be empty")
         if self.acquisition_mode not in ACQUISITION_MODES:
@@ -70,6 +75,7 @@ class ChainSample:
     output_feature_names: tuple[str, ...]
     first_error_step: int
     problem_hash: str | None = None
+    component_path: Path | None = None
 
     @property
     def n_steps(self) -> int:

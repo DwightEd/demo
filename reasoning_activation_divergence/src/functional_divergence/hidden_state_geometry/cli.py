@@ -22,11 +22,19 @@ def _csv(value: str) -> tuple[str, ...]:
     return values
 
 
+def _directory_name(value: str) -> str:
+    name = value.strip()
+    if not name or "/" in name or "\\" in name:
+        raise argparse.ArgumentTypeError("expected one directory name, not a path")
+    return name
+
+
 def trace_sources(
     data_root: str | Path,
     domains: Iterable[str],
     manifest_name: str = "trace.raw_residual_stream.npz",
     acquisition_mode: str = "observer_teacher_forcing_replay",
+    component_dir_name: str = "component_step_v1",
 ) -> tuple[TraceSource, ...]:
     root = Path(data_root).expanduser()
     return tuple(
@@ -35,6 +43,7 @@ def trace_sources(
             manifest=root / str(domain) / "selected" / manifest_name,
             acquisition_mode=acquisition_mode,
             exact_trace=root / str(domain) / "selected" / "trace.npz",
+            component_dir=root / str(domain) / "selected" / component_dir_name,
         )
         for domain in domains
     )
@@ -45,6 +54,12 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--domains", type=_csv, default=DEFAULT_DOMAINS)
     parser.add_argument(
         "--manifest-name", default="trace.raw_residual_stream.npz"
+    )
+    parser.add_argument(
+        "--component-dir-name",
+        type=_directory_name,
+        default="component_step_v1",
+        help="directory under each selected domain containing component_step_v1 NPZ files",
     )
     parser.add_argument("--response-generator", default="llama3.1-8b")
     parser.add_argument("--observer-model", default="llama3.1-8b")
@@ -127,7 +142,11 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     sources = trace_sources(
-        args.data_root, args.domains, args.manifest_name, args.acquisition_mode
+        args.data_root,
+        args.domains,
+        args.manifest_name,
+        args.acquisition_mode,
+        args.component_dir_name,
     )
     common = dict(
         sources=sources,

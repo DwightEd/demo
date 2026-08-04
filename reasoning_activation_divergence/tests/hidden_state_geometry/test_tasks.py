@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 import numpy as np
 
 from functional_divergence.hidden_state_geometry.contracts import ChainSample
 from functional_divergence.hidden_state_geometry.tasks import (
+    build_post_step_task,
     build_strict_prefix_task,
     build_whole_chain_task,
     load_visible_states,
@@ -99,3 +98,30 @@ def test_strict_prefix_nuisance_never_uses_final_length_or_relative_progress(tmp
 
     assert names == ("step_index", "prefix_token_count", "previous_step_length")
     assert values.shape == (3,)
+
+
+def test_post_step_includes_current_step_and_stops_at_first_error(tmp_path):
+    correct = _sample(tmp_path, chain_id=7, gold=-1, n_steps=3)
+    error = _sample(tmp_path, chain_id=8, gold=2, n_steps=4)
+    step0_error = _sample(tmp_path, chain_id=9, gold=0, n_steps=4)
+
+    task = build_post_step_task((correct, error, step0_error))
+
+    assert task.name == "post_step"
+    assert task.claim_scope == "retrospective_first_error_diagnosis"
+    assert task.left_truncated_step0_errors == 0
+
+    correct_rows = [row for row in task.examples if row.sample.chain_id == 7]
+    assert [row.boundary_step for row in correct_rows] == [0, 1, 2]
+    assert [row.visible_steps for row in correct_rows] == [1, 2, 3]
+    assert task.labels[:3].tolist() == [0, 0, 0]
+
+    error_rows = [row for row in task.examples if row.sample.chain_id == 8]
+    assert [row.boundary_step for row in error_rows] == [0, 1, 2]
+    assert [row.visible_steps for row in error_rows] == [1, 2, 3]
+    assert task.labels[3:6].tolist() == [0, 0, 1]
+    assert all(row.boundary_step <= error.first_error_step for row in error_rows)
+
+    step0_rows = [row for row in task.examples if row.sample.chain_id == 9]
+    assert [(row.boundary_step, row.visible_steps) for row in step0_rows] == [(0, 1)]
+    assert task.labels[-1] == 1

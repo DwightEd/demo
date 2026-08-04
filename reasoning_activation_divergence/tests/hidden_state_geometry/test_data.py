@@ -122,6 +122,31 @@ def test_loader_filters_llama_rows_joins_output_by_chain_and_trims_padding(tmp_p
     assert np.array_equal(dataset.samples[0].output_steps[:, 0], [10, 11, 12])
 
 
+def test_loader_derives_component_paths_without_requiring_component_files(tmp_path):
+    manifest, exact = _write_trace_fixture(tmp_path)
+    component_dir = tmp_path / "gsm8k" / "selected" / "component_step_v1"
+
+    dataset = load_hidden_geometry_dataset(
+        [
+            TraceSource(
+                "gsm8k",
+                manifest,
+                "observer_teacher_forcing_replay",
+                exact,
+                component_dir=component_dir,
+            )
+        ],
+        response_generator="llama3.1-8b",
+        observer_model="llama3.1-8b",
+        output_features=("token_entropy", "token_nll"),
+    )
+
+    assert dataset.samples[0].component_path == (
+        component_dir / "chain_10.component_step_v1.npz"
+    )
+    assert not dataset.samples[0].component_path.exists()
+
+
 def test_step_end_loader_uses_response_relative_real_shard_positions(tmp_path):
     manifest, exact = _write_trace_fixture(tmp_path)
     dataset = load_hidden_geometry_dataset(

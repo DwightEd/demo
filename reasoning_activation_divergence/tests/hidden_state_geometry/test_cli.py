@@ -60,9 +60,55 @@ def test_cli_resolves_each_domain_to_selected_real_trace(tmp_path):
     assert [source.dataset for source in sources] == ["gsm8k", "math", "omnimath"]
     assert sources[0].manifest == Path(tmp_path / "gsm8k/selected/trace.raw_residual_stream.npz")
     assert sources[0].exact_trace == Path(tmp_path / "gsm8k/selected/trace.npz")
+    assert sources[0].component_dir == Path(tmp_path / "gsm8k/selected/component_step_v1")
     assert sources[0].acquisition_mode == "observer_teacher_forcing_replay"
+    assert args.component_dir_name == "component_step_v1"
     assert args.max_records_per_domain == 0
     assert args.method == "raw_functional_probe"
+
+
+def test_cli_can_override_component_directory_name(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "preflight",
+            "--data-root",
+            str(tmp_path),
+            "--domains",
+            "gsm8k",
+            "--component-dir-name",
+            "component_step_smoke",
+        ]
+    )
+
+    sources = trace_sources(
+        args.data_root,
+        args.domains,
+        args.manifest_name,
+        args.acquisition_mode,
+        args.component_dir_name,
+    )
+
+    assert sources[0].component_dir == (
+        Path(tmp_path) / "gsm8k" / "selected" / "component_step_smoke"
+    )
+
+
+def test_cli_accepts_post_step_task_name(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "run",
+            "--data-root",
+            str(tmp_path),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--tasks",
+            "post_step",
+        ]
+    )
+
+    assert args.tasks == ("post_step",)
 
 
 def test_cli_preserves_plugin_default_config_unless_json_is_explicit(tmp_path):

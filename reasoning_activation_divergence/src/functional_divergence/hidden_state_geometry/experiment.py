@@ -18,12 +18,18 @@ from .data import load_hidden_geometry_dataset
 from .evaluation import TaskEvaluation, evaluate_task
 from .methods import load_builtin_methods
 from .registry import method_spec, resolve_method_config
-from .tasks import TaskDataset, build_strict_prefix_task, build_whole_chain_task
+from .tasks import (
+    TaskDataset,
+    build_post_step_task,
+    build_strict_prefix_task,
+    build_whole_chain_task,
+)
 
 
 _TASK_BUILDERS = {
     "whole_chain": build_whole_chain_task,
     "strict_prefix": build_strict_prefix_task,
+    "post_step": build_post_step_task,
 }
 
 
@@ -319,6 +325,22 @@ def _factor_payload(evaluations: dict[str, TaskEvaluation]) -> dict[str, np.ndar
     }
 
 
+def _estimand_population(task_name: str) -> str:
+    if task_name == "whole_chain":
+        return "all eligible completed chains"
+    if task_name == "strict_prefix":
+        return (
+            "step boundaries conditional on surviving step 0, no prior first "
+            "error, and an observed next reasoning step"
+        )
+    if task_name == "post_step":
+        return (
+            "completed reasoning steps through the first error, including step-zero "
+            "errors and no post-error rows"
+        )
+    raise ValueError(f"unknown task: {task_name}")
+
+
 def run_hidden_geometry_experiment(
     *,
     sources: Iterable[TraceSource],
@@ -426,12 +448,7 @@ def run_hidden_geometry_experiment(
                 "events": int(task.labels.sum()),
                 "problem_groups": int(len(np.unique(task.groups))),
                 "left_truncated_step0_errors": task.left_truncated_step0_errors,
-                "estimand_population": (
-                    "all eligible completed chains"
-                    if name == "whole_chain"
-                    else "step boundaries conditional on surviving step 0, no prior first "
-                    "error, and an observed next reasoning step"
-                ),
+                "estimand_population": _estimand_population(name),
                 "summary": evaluations[name].summary,
                 "fold_diagnostics": evaluations[name].diagnostics,
             }

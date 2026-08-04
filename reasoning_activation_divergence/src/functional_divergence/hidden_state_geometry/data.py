@@ -322,6 +322,12 @@ def load_hidden_geometry_dataset(
                     output_feature_names=requested,
                     first_error_step=gold,
                     problem_hash=selected_hashes[local_row],
+                    component_path=(
+                        specification.component_dir
+                        / f"chain_{chain_id}.component_step_v1.npz"
+                        if specification.component_dir is not None
+                        else None
+                    ),
                 )
             )
             labels.append(int(gold >= 0))
