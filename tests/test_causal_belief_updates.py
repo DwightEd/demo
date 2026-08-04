@@ -248,3 +248,28 @@ def test_remote_runner_builds_missing_cbud_prerequisites() -> None:
     assert 'if [[ ! -f "${CHARTS_PATH}" ]]' in script
     assert '"${PYTHON_BIN}" audit_causal_belief_routing.py' in script
     assert "trace is missing" not in script
+
+
+def test_remote_runner_centralizes_remote_data_and_gpu_configuration() -> None:
+    demo_root = Path(__file__).resolve().parents[1]
+    script = (
+        demo_root
+        / "prompt_control_flow"
+        / "causal_belief_update_decomposition"
+        / "run_remote_pilot.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'GPU_ID="${GPU_ID:-0}"' in script
+    assert (
+        'DATA_ROOT="${DATA_ROOT:-/share/home/tm902089733300000/'
+        'a903202310/lys/data/CBUD/finite_field_predictive_alias/'
+        'llama31_8b/pilot_200}"'
+    ) in script
+    assert 'ALIAS_PATH="${ALIAS_PATH:-${DATA_ROOT}/source/' in script
+    assert 'TRACE_PATH="${TRACE_PATH:-${DATA_ROOT}/extractions/' in script
+    assert 'CHARTS_PATH="${CHARTS_PATH:-${DATA_ROOT}/derived/representation/' in script
+    assert 'UPDATE_PATH="${UPDATE_PATH:-${DATA_ROOT}/extractions/' in script
+    assert 'REPORT_DIR="${REPORT_DIR:-${DATA_ROOT}/results/update_audit}"' in script
+    assert 'export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${GPU_ID}}"' in script
+    assert "memory.used" not in script
+    assert 'mkdir -p \\' in script

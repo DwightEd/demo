@@ -64,8 +64,17 @@ The script verifies the focused unit tests, builds missing predictive aliases,
 extracts the dedicated boundary-state trace, fits the representation chart,
 extracts target-token attention/MLP/block writes, and audits preregistered
 layer 16. Existing stage outputs are reused. Override `MODEL_DIR`,
-`ALIAS_PATH`, `TRACE_PATH`, `CHARTS_PATH`, `PRIMARY_LAYER`, or
-`CUDA_VISIBLE_DEVICES` only when the remote layout differs.
+`DATA_ROOT`, `GPU_ID`, or `PRIMARY_LAYER` in the user-editable configuration at
+the top of `run_remote_pilot.sh` when the remote layout changes. All artifact
+paths are derived from `DATA_ROOT`; their individual environment variables
+remain available for one-off overrides. The default persistent root is:
+
+```text
+/share/home/tm902089733300000/a903202310/lys/data/CBUD/finite_field_predictive_alias/llama31_8b/pilot_200
+```
+
+The script uses GPU 0 by default and does not reject a GPU based on a fixed
+memory-usage threshold.
 
 ### 1. Build 200 exact alias pairs
 

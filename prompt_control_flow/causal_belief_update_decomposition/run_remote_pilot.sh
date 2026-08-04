@@ -4,19 +4,33 @@ set -euo pipefail
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DEMO_ROOT="$(cd -- "${PROJECT_DIR}/../.." && pwd)"
 
+# User-editable remote configuration. Change these defaults when the server,
+# model, GPU, or persistent data location changes. Environment variables remain
+# available for one-off overrides.
 PYTHON_BIN="${PYTHON_BIN:-/opt/conda/bin/python}"
 MODEL_DIR="${MODEL_DIR:-/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct}"
-ALIAS_PATH="${ALIAS_PATH:-${DEMO_ROOT}/data/causal_belief_routing/alias_pilot_200.jsonl}"
-TRACE_PATH="${TRACE_PATH:-${DEMO_ROOT}/data/causal_belief_routing/alias_pilot_200_trace.npz}"
-CHARTS_PATH="${CHARTS_PATH:-${DEMO_ROOT}/outputs/causal_belief_routing/alias_pilot_200/representation/layer_charts.npz}"
-UPDATE_PATH="${UPDATE_PATH:-${DEMO_ROOT}/data/causal_belief_update_decomposition/alias_pilot_200_updates.npz}"
-REPORT_DIR="${REPORT_DIR:-${DEMO_ROOT}/outputs/causal_belief_update_decomposition/alias_pilot_200/updates}"
+GPU_ID="${GPU_ID:-0}"
+DATA_ROOT="${DATA_ROOT:-/share/home/tm902089733300000/a903202310/lys/data/CBUD/finite_field_predictive_alias/llama31_8b/pilot_200}"
 PRIMARY_LAYER="${PRIMARY_LAYER:-16}"
+
+# Artifact paths are derived from DATA_ROOT so a storage move requires one edit.
+ALIAS_PATH="${ALIAS_PATH:-${DATA_ROOT}/source/predictive_alias_pairs_200.jsonl}"
+TRACE_PATH="${TRACE_PATH:-${DATA_ROOT}/extractions/boundary_states_and_logit_sketch_200.npz}"
+CHARTS_PATH="${CHARTS_PATH:-${DATA_ROOT}/derived/representation/layer_charts.npz}"
+UPDATE_PATH="${UPDATE_PATH:-${DATA_ROOT}/extractions/attention_mlp_block_updates_200.npz}"
+REPORT_DIR="${REPORT_DIR:-${DATA_ROOT}/results/update_audit}"
 
 [[ -x "${PYTHON_BIN}" ]] || { echo "python is not executable: ${PYTHON_BIN}" >&2; exit 2; }
 [[ -d "${MODEL_DIR}" ]] || { echo "model directory is missing: ${MODEL_DIR}" >&2; exit 2; }
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+mkdir -p \
+  "$(dirname -- "${ALIAS_PATH}")" \
+  "$(dirname -- "${TRACE_PATH}")" \
+  "$(dirname -- "${CHARTS_PATH}")" \
+  "$(dirname -- "${UPDATE_PATH}")" \
+  "${REPORT_DIR}"
+
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${GPU_ID}}"
 export PYTHONUNBUFFERED=1
 cd "${DEMO_ROOT}"
 
