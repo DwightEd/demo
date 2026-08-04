@@ -8,7 +8,9 @@ import pytest
 from reasoning_error_detection.data import (
     FeatureConfig,
     ProcessBenchFeatureLoader,
+    StepFeatureDataset,
 )
+from reasoning_error_detection.detector import DetectorConfig, ProcessBenchErrorDetector
 
 
 def _write_processbench_features(path: Path) -> None:
@@ -100,3 +102,82 @@ def test_loader_fails_when_processbench_residual_state_views_are_missing(
 
     with pytest.raises(ValueError, match="step_pre_state"):
         ProcessBenchFeatureLoader(FeatureConfig(device="cpu")).load(path)
+
+
+def _synthetic_detection_dataset() -> StepFeatureDataset:
+    rng = np.random.default_rng(23)
+    chain_idx: list[int] = []
+    groups: list[int] = []
+    step_idx: list[int] = []
+    gold: list[int] = []
+    onset: list[int] = []
+    chain_error: list[int] = []
+    control: list[np.ndarray] = []
+    output: list[np.ndarray] = []
+    routing: list[np.ndarray] = []
+    residual: list[np.ndarray] = []
+    for chain in range(24):
+        first_error = 1 + (chain // 2) % 3 if chain % 2 else -1
+        for step in range(4):
+            is_onset = int(first_error == step)
+            chain_idx.append(chain)
+            groups.append(chain)
+            step_idx.append(step)
+            gold.append(first_error)
+            onset.append(0 if first_error < 0 or step < first_error else (1 if is_onset else -1))
+            chain_error.append(int(first_error >= 0))
+            control.append(np.asarray([step, 1.0, 1.0, step + 1.0]))
+            output.append(np.asarray([0.4 * is_onset + 0.2 * rng.normal()]))
+            routing.append(np.asarray([0.6 * is_onset + 0.2 * rng.normal()]))
+            residual.append(
+                np.asarray(
+                    [
+                        3.0 * is_onset + 0.15 * rng.normal(),
+                        -2.0 * is_onset + 0.15 * rng.normal(),
+                    ]
+                )
+            )
+    labels = np.asarray(onset, dtype=np.int8)
+    data = StepFeatureDataset(
+        source_path="synthetic",
+        chain_idx=np.asarray(chain_idx, dtype=np.int64),
+        problem_groups=np.asarray(groups, dtype=np.int64),
+        step_idx=np.asarray(step_idx, dtype=np.int64),
+        gold_error_step=np.asarray(gold, dtype=np.int64),
+        onset_label=labels,
+        onset_eligible=labels >= 0,
+        chain_error=np.asarray(chain_error, dtype=np.int8),
+        control_features=np.asarray(control, dtype=np.float32),
+        output_features=np.asarray(output, dtype=np.float32),
+        routing_features=np.asarray(routing, dtype=np.float32),
+        residual_features=np.asarray(residual, dtype=np.float32),
+        control_names=("step", "length", "previous_length", "cumulative_length"),
+        output_names=("entropy",),
+        routing_names=("icr",),
+        residual_names=("delta_x", "delta_y"),
+        selected_layers=(16,),
+    )
+    data.validate()
+    return data
+
+
+def test_detector_crossfits_by_problem_and_localizes_injected_first_errors(
+    tmp_path: Path,
+) -> None:
+    detector = ProcessBenchErrorDetector(
+        DetectorConfig(folds=4, logistic_c=1.0, seed=29)
+    )
+
+    report = detector.run(_synthetic_detection_dataset(), tmp_path / "report")
+
+    assert report["split"]["problem_group_overlap"] == 0
+    assert report["feature_sets"]["residual"]["onset"]["auroc"] > 0.95
+    assert (
+        report["feature_sets"]["residual"]["onset"]["auroc"]
+        > report["feature_sets"]["controls"]["onset"]["auroc"] + 0.2
+    )
+    assert report["feature_sets"]["joint"]["localization"]["top1"] > 0.9
+    assert report["feature_sets"]["joint"]["chain_detection"]["auroc"] > 0.9
+    assert (tmp_path / "report" / "summary.json").exists()
+    predictions = np.load(tmp_path / "report" / "oof_predictions.npz")
+    assert np.isfinite(predictions["probabilities"]).all()
