@@ -85,7 +85,7 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         temporary.replace(target)
 
 
-def _limit_dataset(
+def select_deterministic_domain_subset(
     data: HiddenGeometryDataset, maximum: int, seed: int
 ) -> HiddenGeometryDataset:
     if maximum <= 0:
@@ -289,7 +289,7 @@ def inspect_hidden_geometry_sources(
     )
     return _preflight(
         source_list,
-        _limit_dataset(data, int(max_records_per_domain), seed),
+        select_deterministic_domain_subset(data, int(max_records_per_domain), seed),
         progress,
         _new_run_id(),
     )
@@ -383,7 +383,7 @@ def run_hidden_geometry_experiment(
         observer_model=observer_model,
         output_features=output_features,
     )
-    data = _limit_dataset(data, int(max_records_per_domain), seed)
+    data = select_deterministic_domain_subset(data, int(max_records_per_domain), seed)
     preflight = _preflight(source_list, data, reporter, run_id)
 
     reporter.stage("build", ", ".join(task_names))
