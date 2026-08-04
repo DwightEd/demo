@@ -9,6 +9,7 @@ from prompt_control_flow.causal_belief_update_decomposition.schema import Causal
 from prompt_control_flow.causal_belief_update_decomposition.update_extraction import (
     BeliefUpdateExtractionConfig,
     extract_belief_update_decomposition,
+    representation_gate_failure_message,
 )
 
 
@@ -54,11 +55,23 @@ def _torch_dtype(torch, requested: str, device):
 
 def main() -> None:
     args = build_parser().parse_args()
+    charts = LayerChartBundle.load(args.charts)
+    gate_failure = representation_gate_failure_message(charts)
+    if gate_failure is not None:
+        gate_report = Path(args.charts).parent / "summary.json"
+        if not args.allow_failed_representation_gate:
+            raise SystemExit(
+                f"{gate_failure}\n"
+                "model loading skipped because the resulting component scores would "
+                "not support a formal mechanism claim\n"
+                f"representation report: {gate_report}"
+            )
+        print(f"WARNING: exploratory failed-gate override enabled: {gate_failure}")
+
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     trace = CausalBeliefTrace.load(args.trace)
-    charts = LayerChartBundle.load(args.charts)
     recorded_model = str(trace.metadata.get("model", ""))
     if (
         recorded_model

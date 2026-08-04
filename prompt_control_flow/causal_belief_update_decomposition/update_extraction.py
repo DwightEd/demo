@@ -34,6 +34,27 @@ class BeliefUpdateExtractionConfig:
             raise ValueError("belief-update batch and sequence limits must be positive")
 
 
+def representation_gate_failure_message(
+    charts: LayerChartBundle,
+) -> str | None:
+    gate = charts.metadata.get("decision_gate", {})
+    if bool(gate.get("ready_for_routing_analysis", False)):
+        return None
+    conditions = gate.get("conditions", {})
+    failed_conditions = sorted(
+        str(name) for name, passed in conditions.items() if not bool(passed)
+    )
+    if failed_conditions:
+        return (
+            "representation gate did not authorize belief-update decomposition; "
+            f"failed conditions: {', '.join(failed_conditions)}"
+        )
+    return (
+        "representation gate did not authorize belief-update decomposition; "
+        "the chart contains no failed-condition details"
+    )
+
+
 def _mlp_module(block):
     for name in ("mlp", "feed_forward", "ffn"):
         module = getattr(block, name, None)
@@ -178,13 +199,11 @@ def extract_belief_update_decomposition(
     import torch
 
     cfg.validate()
-    gate = charts.metadata.get("decision_gate", {})
-    if not cfg.allow_failed_representation_gate and not bool(
-        gate.get("ready_for_routing_analysis", False)
-    ):
+    gate_failure = representation_gate_failure_message(charts)
+    if gate_failure is not None and not cfg.allow_failed_representation_gate:
         raise RuntimeError(
-            "representation gate did not authorize belief-update decomposition; "
-            "use the exploratory override only if this failure is intentional"
+            f"{gate_failure}; use the exploratory override only if this failure "
+            "is intentional"
         )
     topology = resolve_model_topology(model)
     final_depth = topology.num_depths - 1

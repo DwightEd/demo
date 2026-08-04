@@ -107,6 +107,74 @@ def test_component_reconstruction_error_detects_hook_semantic_mismatch() -> None
     assert mismatch_error[1] > 0.5
 
 
+def test_representation_gate_failure_names_failed_conditions() -> None:
+    from prompt_control_flow.causal_belief_update_decomposition.update_extraction import (
+        representation_gate_failure_message,
+    )
+
+    class FailedCharts:
+        metadata = {
+            "decision_gate": {
+                "conditions": {
+                    "exact_current_alias_verified": True,
+                    "joint_future_bits_ci_above_zero": False,
+                    "hidden_beats_shuffled_null": False,
+                },
+                "ready_for_routing_analysis": False,
+            }
+        }
+
+    message = representation_gate_failure_message(FailedCharts())
+
+    assert message is not None
+    assert "joint_future_bits_ci_above_zero" in message
+    assert "hidden_beats_shuffled_null" in message
+    assert "exact_current_alias_verified" not in message
+
+
+def test_update_cli_checks_representation_gate_before_model_import(monkeypatch) -> None:
+    import builtins
+    import sys
+
+    from prompt_control_flow.cli import extract_causal_belief_updates as cli
+
+    class FailedCharts:
+        metadata = {
+            "decision_gate": {
+                "conditions": {"joint_future_bits_ci_above_zero": False},
+                "ready_for_routing_analysis": False,
+            }
+        }
+
+    monkeypatch.setattr(cli.LayerChartBundle, "load", lambda _path: FailedCharts())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "extract_causal_belief_updates.py",
+            "--trace",
+            "trace.npz",
+            "--charts",
+            "charts.npz",
+            "--model",
+            "model",
+            "--output",
+            "updates.npz",
+        ],
+    )
+    original_import = builtins.__import__
+
+    def reject_model_dependency(name, *args, **kwargs):
+        if name == "transformers":
+            raise AssertionError("model dependency imported before gate preflight")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_model_dependency)
+
+    with pytest.raises(SystemExit, match="joint_future_bits_ci_above_zero"):
+        cli.main()
+
+
 def _synthetic_update_trace() -> BeliefUpdateTrace:
     rng = np.random.default_rng(211)
     pair_ids = np.repeat(np.arange(40), 2)
@@ -304,3 +372,20 @@ def test_remote_runner_uses_active_python_and_checks_model_runtime() -> None:
     assert "RESOLVED_PYTHON" not in script
     assert "import torch" in script
     assert "import transformers" in script
+
+
+def test_remote_runner_requires_explicit_failed_gate_override() -> None:
+    demo_root = Path(__file__).resolve().parents[1]
+    script = (
+        demo_root
+        / "prompt_control_flow"
+        / "causal_belief_update_decomposition"
+        / "run_remote_pilot.sh"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        'ALLOW_FAILED_REPRESENTATION_GATE="${ALLOW_FAILED_REPRESENTATION_GATE:-0}"'
+        in script
+    )
+    assert "GATE_OVERRIDE_ARGS" in script
+    assert "--allow_failed_representation_gate" in script

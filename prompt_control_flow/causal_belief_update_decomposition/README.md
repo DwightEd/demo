@@ -65,6 +65,11 @@ tests when the selected Python environment already provides `pytest`. It then
 builds missing predictive aliases, extracts the dedicated boundary-state trace,
 fits the representation chart, extracts target-token attention/MLP/block
 writes, and audits preregistered layer 16. Existing stage outputs are reused.
+A failed representation gate is reported before the checkpoint is loaded, with
+the failed conditions and representation-report path. Keep
+`ALLOW_FAILED_REPRESENTATION_GATE=0` for claim-bearing runs. Setting it to `1`
+at the top of the script permits an explicitly exploratory extraction whose
+scores must not be used as mechanism evidence.
 Override `MODEL_DIR`,
 `DATA_ROOT`, `GPU_ID`, or `PRIMARY_LAYER` in the user-editable configuration at
 the top of `run_remote_pilot.sh` when the remote layout changes. All artifact

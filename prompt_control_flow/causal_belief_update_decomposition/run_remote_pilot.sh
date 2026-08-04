@@ -12,6 +12,9 @@ MODEL_DIR="${MODEL_DIR:-/share/home/tm902089733300000/a903202310/lys/models/Meta
 GPU_ID="${GPU_ID:-0}"
 DATA_ROOT="${DATA_ROOT:-/share/home/tm902089733300000/a903202310/lys/data/CBUD/finite_field_predictive_alias/llama31_8b/pilot_200}"
 PRIMARY_LAYER="${PRIMARY_LAYER:-16}"
+# Keep this at 0 for claim-bearing runs. Set it to 1 only to inspect extraction
+# mechanics after a failed representation gate.
+ALLOW_FAILED_REPRESENTATION_GATE="${ALLOW_FAILED_REPRESENTATION_GATE:-0}"
 
 # Artifact paths are derived from DATA_ROOT so a storage move requires one edit.
 ALIAS_PATH="${ALIAS_PATH:-${DATA_ROOT}/source/predictive_alias_pairs_200.jsonl}"
@@ -21,6 +24,18 @@ UPDATE_PATH="${UPDATE_PATH:-${DATA_ROOT}/extractions/attention_mlp_block_updates
 REPORT_DIR="${REPORT_DIR:-${DATA_ROOT}/results/update_audit}"
 
 [[ -d "${MODEL_DIR}" ]] || { echo "model directory is missing: ${MODEL_DIR}" >&2; exit 2; }
+GATE_OVERRIDE_ARGS=()
+case "${ALLOW_FAILED_REPRESENTATION_GATE}" in
+  0) ;;
+  1)
+    echo "WARNING: failed representation gate override is enabled; results are exploratory" >&2
+    GATE_OVERRIDE_ARGS=(--allow_failed_representation_gate)
+    ;;
+  *)
+    echo "ALLOW_FAILED_REPRESENTATION_GATE must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 
 mkdir -p \
   "$(dirname -- "${ALIAS_PATH}")" \
@@ -111,7 +126,7 @@ else
   echo "reusing layer charts: ${CHARTS_PATH}"
 fi
 
-echo "[5/6] Extracting target-token attention/MLP/block updates"
+echo "[5/6] Checking the gate and extracting target-token attention/MLP/block updates"
 "${PYTHON_BIN}" extract_causal_belief_updates.py \
   --trace "${TRACE_PATH}" \
   --charts "${CHARTS_PATH}" \
@@ -120,7 +135,8 @@ echo "[5/6] Extracting target-token attention/MLP/block updates"
   --batch_size 8 \
   --max_batch_tokens 4096 \
   --device cuda \
-  --dtype bfloat16
+  --dtype bfloat16 \
+  "${GATE_OVERRIDE_ARGS[@]}"
 
 echo "[6/6] Auditing the preregistered layer"
 "${PYTHON_BIN}" audit_causal_belief_updates.py \
