@@ -149,10 +149,13 @@ def test_remote_runner_exposes_foreground_full_tensor_ridge_modes():
     runner = Path(__file__).resolve().parents[2] / "run_hidden_geometry_remote.sh"
     script = runner.read_text(encoding="utf-8")
 
-    assert "ridge-smoke)" in script
-    assert "ridge-full)" in script
-    assert "--method full_tensor_ridge" in script
-    assert script.count('"max_iter":2000') == 2
+    for mode in ("ridge-smoke", "ridge-full"):
+        marker = f"  {mode})"
+        assert marker in script
+        start = script.index(marker)
+        branch = script[start : script.index("    ;;", start)]
+        assert "--method full_tensor_ridge" in branch
+        assert '"max_iter":2000' in branch
     assert "nohup" not in script
     assert "screen -dmS" not in script
     assert "tmux" not in script
