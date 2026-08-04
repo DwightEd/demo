@@ -76,8 +76,24 @@ case "${MODE}" in
       --max-records-per-domain 0 --bootstrap 2000 \
       --output-dir "${OUTPUT_ROOT}/ridge_full_${RUN_TAG}"
     ;;
+  innovation-smoke)
+    innovation_config='{"source_layer":14,"destination_layer":16,"rank":4,"normal_ridge_alpha":10.0,"covariance_shrinkage":0.1,"l2":0.1,"max_iter":2000}'
+    "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+      "${common[@]}" --tasks strict_prefix \
+      --method innovation_hazard --method-config-json "${innovation_config}" \
+      --max-records-per-domain 32 --bootstrap 200 \
+      --output-dir "${OUTPUT_ROOT}/innovation_smoke_${RUN_TAG}"
+    ;;
+  innovation-full)
+    innovation_config='{"source_layer":14,"destination_layer":16,"rank":8,"normal_ridge_alpha":10.0,"covariance_shrinkage":0.1,"l2":0.1,"max_iter":2000}'
+    "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+      "${common[@]}" --tasks strict_prefix \
+      --method innovation_hazard --method-config-json "${innovation_config}" \
+      --max-records-per-domain 0 --bootstrap 2000 \
+      --output-dir "${OUTPUT_ROOT}/innovation_full_${RUN_TAG}"
+    ;;
   *)
-    echo "usage: $0 preflight|smoke|full|ridge-smoke|ridge-full" >&2
+    echo "usage: $0 preflight|smoke|full|ridge-smoke|ridge-full|innovation-smoke|innovation-full" >&2
     exit 2
     ;;
 esac
