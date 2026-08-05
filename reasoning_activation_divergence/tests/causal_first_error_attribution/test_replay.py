@@ -6,6 +6,7 @@ import pytest
 from functional_divergence.causal_first_error_attribution.replay import (
     DecisionTraceExtractor,
     edge_margin_proxy,
+    head_source_graph,
     head_source_residual_messages,
 )
 
@@ -72,6 +73,56 @@ def test_graph_edge_uses_residual_message_not_attention_weight() -> None:
     assert score_a.item() == pytest.approx(2.0)
     assert score_b.item() == pytest.approx(-3.0)
     assert score_a.item() != score_b.item()
+
+
+def test_memory_bounded_graph_matches_dense_residual_messages() -> None:
+    torch = pytest.importorskip("torch")
+    generator = torch.Generator().manual_seed(7)
+    attention = torch.rand((1, 2, 4, 4), generator=generator)
+    attention = attention / attention.sum(dim=-1, keepdim=True)
+    values = torch.randn((1, 4, 2, 3), generator=generator)
+    output_weight = torch.randn((6, 6), generator=generator)
+    output_direction = torch.randn((6,), generator=generator)
+
+    messages, dense_mass, dense_heads = head_source_residual_messages(
+        attention, values, output_weight, query_position=3
+    )
+    proxy, mass, heads, reconstructed = head_source_graph(
+        attention,
+        values,
+        output_weight,
+        output_direction,
+        query_position=3,
+    )
+
+    assert torch.allclose(proxy, edge_margin_proxy(messages, output_direction))
+    assert torch.equal(mass, dense_mass)
+    assert torch.allclose(heads, dense_heads)
+    assert torch.allclose(reconstructed, messages.sum(dim=(0, 1)), atol=1e-5)
+
+
+def test_graph_supports_a_cached_single_decision_query() -> None:
+    torch = pytest.importorskip("torch")
+    attention = torch.tensor([[[[0.2, 0.3, 0.5]]]], dtype=torch.float32)
+    values = torch.tensor(
+        [[[[1.0, 2.0]], [[3.0, 4.0]], [[5.0, 6.0]]]],
+        dtype=torch.float32,
+    )
+    output_weight = torch.eye(2, dtype=torch.float32)
+    direction = torch.tensor([1.0, -1.0], dtype=torch.float32)
+
+    proxy, mass, heads, reconstructed = head_source_graph(
+        attention,
+        values,
+        output_weight,
+        direction,
+        query_position=0,
+    )
+
+    assert proxy.shape == (1, 3)
+    assert mass.shape == (1, 3)
+    assert heads.shape == (1, 2)
+    assert reconstructed.shape == (2,)
 
 
 def test_replay_rejects_future_query_or_key_positions() -> None:
@@ -175,5 +226,44 @@ def test_decision_trace_extractor_keeps_heads_and_source_tokens() -> None:
     assert artifact.decision_position == 2
     assert artifact.attn_head_output.shape == (1, 1, 2)
     assert artifact.attn_edge_mass.shape == (1, 1, 3)
+    assert artifact.attn_edge_mass.dtype == np.float32
     assert artifact.attn_edge_margin_proxy.shape == (1, 1, 3)
     assert artifact.metadata["attention_reconstruction_max_relative_error"] < 1e-6
+
+
+def test_decision_trace_extractor_uses_real_llama_cache_contract() -> None:
+    pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    config = transformers.LlamaConfig(
+        vocab_size=32,
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        max_position_embeddings=32,
+    )
+    config._attn_implementation = "eager"
+    model = transformers.LlamaForCausalLM(config).eval()
+
+    artifact = DecisionTraceExtractor(layers=(1, 2), topk=4).extract(
+        model=model,
+        input_ids=np.asarray([1, 2, 3, 4], dtype=np.int64),
+        source_step_ids=np.asarray([-1, -1, 0, 0], dtype=np.int16),
+        correct_token_id=5,
+        wrong_token_id=6,
+        metadata={
+            "case_id": "tiny-llama",
+            "model_name": "tiny-random-llama",
+            "model_revision_or_unknown": "test",
+            "tokenizer_name": "none",
+            "tokenizer_revision_or_unknown": "test",
+            "source_trace_fingerprint": "trace",
+            "pair_file_fingerprint": "pairs",
+        },
+    )
+
+    assert artifact.attn_edge_mass.shape == (2, 2, 4)
+    np.testing.assert_allclose(
+        artifact.attn_edge_mass.sum(axis=-1), 1.0, rtol=1e-5, atol=1e-5
+    )

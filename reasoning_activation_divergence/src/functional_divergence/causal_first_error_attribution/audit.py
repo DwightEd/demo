@@ -104,7 +104,7 @@ class PairAuditor:
             return 0, 0, 0, 0
         with np.load(path, allow_pickle=True) as archive:
             if "gold_error_step" not in archive.files:
-                raise ValueError(f"{path}: trace lacks gold_error_step")
+                return 0, 0, 0, 0
             gold = np.asarray(archive["gold_error_step"], dtype=np.int64).reshape(-1)
             group_name = next(
                 (

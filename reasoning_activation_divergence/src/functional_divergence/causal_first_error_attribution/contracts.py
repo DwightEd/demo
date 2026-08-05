@@ -59,6 +59,8 @@ class OnsetPair:
     counterfactual_decision_position: int | None = None
     intervention_variable: str | None = None
     donor_alignment: Any | None = None
+    target_token_ids: tuple[int, ...] = ()
+    counterfactual_target_token_ids: tuple[int, ...] = ()
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> OnsetPair:
@@ -70,8 +72,8 @@ class OnsetPair:
 
         start = _integer(values, "error_step_token_start")
         end = _integer(values, "error_step_token_end")
-        if start < 1 or end <= start:
-            raise ValueError("error step must be a non-empty token interval")
+        if start < 1 or end < start:
+            raise ValueError("error step must be a non-empty inclusive token interval")
         first_error_step = _integer(values, "first_error_step")
         if first_error_step < 0:
             raise ValueError("an onset pair requires a natural first-error step")
@@ -80,7 +82,7 @@ class OnsetPair:
         controlled: dict[str, Any] = {}
         if kind == "target_correction":
             divergent = _integer(values, "first_divergent_token_index")
-            if divergent < start or divergent >= end:
+            if divergent < start or divergent > end:
                 raise ValueError(
                     "first_divergent_token_index must lie inside the error step"
                 )
@@ -118,6 +120,10 @@ class OnsetPair:
                 "counterfactual_decision_position": counterfactual_position,
                 "intervention_variable": _text(values, "intervention_variable"),
                 "donor_alignment": values.get("donor_alignment"),
+                "target_token_ids": _token_ids(values, "target_token_ids"),
+                "counterfactual_target_token_ids": _token_ids(
+                    values, "counterfactual_target_token_ids"
+                ),
             }
             if controlled["donor_alignment"] is None:
                 raise ValueError("controlled_root requires donor_alignment")
@@ -142,6 +148,8 @@ class OnsetPair:
     def __post_init__(self) -> None:
         if not self.error_chain_id:
             raise ValueError("error_chain_id cannot be empty")
+        if "/" in self.case_id or "\\" in self.case_id:
+            raise ValueError("case_id must be a file-safe identifier")
         if self.error_trace_record < 0:
             raise ValueError("error_trace_record must be nonnegative")
 
@@ -161,6 +169,14 @@ class OnsetPair:
                 "root-cause intervention requires pair_kind='controlled_root'; "
                 "a target_correction can support only target reference or rescue"
             )
+
+    def outcome_token_ids(self) -> tuple[int, int]:
+        """Return (desired, baseline) token ids for the intervention margin."""
+        if self.pair_kind == "target_correction":
+            if self.correct_token_id is None or self.wrong_token_id is None:
+                raise ValueError("target correction lacks outcome token ids")
+            return self.correct_token_id, self.wrong_token_id
+        return self.counterfactual_target_token_ids[0], self.target_token_ids[0]
 
 
 @dataclass(frozen=True)
@@ -219,8 +235,10 @@ class OnsetTraceArtifact:
             raise ValueError("source_token_positions must cover the observable prefix")
         if source_steps.shape != (token_count,):
             raise ValueError("source_step_ids must align with source_token_positions")
-        if np.any(source_steps < -1):
-            raise ValueError("source_step_ids must use -1 for prompt or a step index")
+        if np.any(source_steps < -2):
+            raise ValueError(
+                "source_step_ids must use -2 separator, -1 prompt, or a step index"
+            )
         if layers.size < 1 or len(np.unique(layers)) != len(layers):
             raise ValueError("selected_layers must contain unique layer ids")
         if self.correct_token_id < 0 or self.wrong_token_id < 0:
@@ -336,6 +354,16 @@ def _integer_array(values: np.ndarray, name: str, *, rank: int) -> np.ndarray:
     if array.ndim != rank or not np.issubdtype(array.dtype, np.integer):
         raise ValueError(f"{name} must be a rank-{rank} integer array")
     return array
+
+
+def _token_ids(values: Mapping[str, Any], name: str) -> tuple[int, ...]:
+    raw = values.get(name)
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise ValueError(f"{name} must be a non-empty token-id list")
+    result = tuple(int(value) for value in raw)
+    if any(value < 0 for value in result):
+        raise ValueError(f"{name} cannot contain negative token ids")
+    return result
 
 
 def _float_array(values: np.ndarray, name: str, *, rank: int) -> np.ndarray:

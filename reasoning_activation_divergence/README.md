@@ -1,66 +1,115 @@
 # Reasoning Activation Divergence
 
-本项目只把行对齐的真实 response-token residual stream 作为实验输入。本地
-`geometry_audit.npz` 标量代理结果不属于当前证据链。
+当前推荐方法是 **CFEA（Controlled First-Error Attribution and Repair）**。它把首错检测、错误传播、修复和机制根因分开，避免把一个预测探针的分数误写成 Attention/FFN 的因果解释。
 
-## 方法
+完整方案见 [GPT56_CFEA_DESIGN.md](refine-logs/GPT56_CFEA_DESIGN.md)。旧的 `hidden_state_geometry` 与 `component_resolved_hazard` 保留用于复现实验历史，不再是机制归因的推荐入口。
 
-状态保持为 `[sample, time, layer, hidden]`。每个 component-grouped
-cross-validation fold 只使用训练集中的全正确样本拟合：
+## CFEA 的执行路径
 
-1. sklearn randomized SVD 共享坐标系；
-2. sklearn Ridge 深度与 token-time 仿射算子；
-3. held-out 径向变化、深度残差、时间残差和 plaquette 路径分歧；
-4. 特征值相位、proper polar rotation、orientation reversal、谱半径、条件数、
-   有效秩和 Henrici 非正规性；
-5. 匹配对 AUROC、bootstrap 区间、sign-flip 检验和方法差值。
+入口是：
 
-这些是存储 residual states 上的经验局部算子，不是 autograd Jacobian，也不是
-model-native logits Fisher。
-
-另有 `hidden_state_geometry` 子系统，不拟合“正常流形”，而是直接检验完整 raw hidden
-trajectory 在 entropy/NLL 输出摘要之外是否提供跨数据集判别增量。它把 whole-chain
-retrospective 分析与 strict-prefix prospective 分析严格分开，见
-[HIDDEN_STATE_GEOMETRY_METHOD.md](HIDDEN_STATE_GEOMETRY_METHOD.md)。
-
-## 工程结构
-
-```text
-config.py       参数与数据来源配置
-domain.py       provenance、cohort、dataset、result 领域对象
-source.py       audited manifest 与 mmap shard repository
-matching.py     first-error/control 匹配窗口 builder
-analysis.py     joint token-times-layer operator analyzer
-statistics.py   唯一的配对统计实现
-reporting.py    JSON、CSV、figure artifact writer
-runner.py       单一实验应用服务
-progress.py     tqdm/测试进度接口
-raw_residual_experiment.py  CLI 与兼容入口
-hidden_state_geometry/     可插拔 hidden 方法、通用任务、LODO 与 artifact runner
+```bash
+python -m functional_divergence.causal_first_error_attribution.main <command>
 ```
 
-manifest 元数据不会作为大字典贯穿调用链。`SourceProvenance` 与
-`CohortSummary` 在内存中保持类型化，只在 `ArtifactWriter` 输出边界序列化。
+主流程为：
 
-## 数据门禁
+```text
+audit
+  -> extract recipient/counterfactual decision graphs
+  -> intervene with Attention x FFN x pre-state patches
+  -> summarize claim scope
+  -> evaluate first-error localization separately
+```
 
-- generator 必须按 manifest 行显式过滤；
-- 标签、step/token ranges 和 shard path 使用同一个行掩码；
-- snapshot 必须声明 `raw_residual_stream`；
-- first-error 与 fully-correct 两类都必须存在；
-- reused row/problem group 必须留在同一个 fold；
-- sklearn、tqdm 等依赖缺失时直接失败，不存在退化实现。
+各命令的职责：
 
-设计与迁移边界见 [REFACTOR_PLAN.md](REFACTOR_PLAN.md)，研究方法见
-[REAL_RAW_RESIDUAL_METHOD.md](REAL_RAW_RESIDUAL_METHOD.md)，远端前台运行见
-[RUN_RAW_REMOTE.md](RUN_RAW_REMOTE.md)。
+- `audit`：不加载模型，核验数据究竟支持自然 repair 还是受控 root-cause 分析。
+- `extract`：在目标 token 前物理截断 prefix，提取 layer/head/source-token residual-message graph。
+- `intervene`：仅对 `controlled_root` pair 做 Attention×FFN 四格 patch 与 pre-state patch。
+- `summarize`：汇总已保存干预；null controls 缺失时只报告 `controls_pending`。
+- `evaluate-monitor`：按链计算首错 Top-1、MRR 和正确链/步骤 false alarm。
 
-新 hidden 判别实验的远端前台命令见
-[RUN_HIDDEN_GEOMETRY_REMOTE.md](RUN_HIDDEN_GEOMETRY_REMOTE.md)。
+## 文件职责
+
+```text
+src/functional_divergence/causal_first_error_attribution/
+├── main.py           CLI 参数解析与线性调度
+├── contracts.py      pair 与 onset-trace 数据契约
+├── audit.py          无模型可识别性审计
+├── pairs.py          pair 读取与首分歧边界
+├── trace_data.py     从 trace.npz 读取并裁剪决策 prefix
+├── replay.py         residual-message graph 提取
+├── extraction.py     多域/多 pair 前台提取流程
+├── interventions.py Attention、FFN、pre-state rerun patch
+├── experiment.py    受控干预保存与汇总
+├── analysis.py       分组 bootstrap 与 claim gate
+└── evaluation.py     LODO 分组与链内首错定位
+```
+
+核心类与公开方法：
+
+- `PairAuditor(...).run()`
+- `OnsetTraceExtraction(config).run(model)`
+- `InterventionExperiment(config).run(model)`
+- `CausalInterventionRunner(layer=...).run(...)`
+
+参数只从 CLI 进入，经 dataclass 配置传给工作流类。模型只在 `extract` 或 `intervene` 已确认存在有效 pair 后加载。
+
+## 数据布局
+
+默认根目录：
+
+```text
+/share/home/tm902089733300000/a903202310/lys/data/RAGTruth/
+└── processbench_observer_llama31_full/
+    ├── gsm8k/selected/
+    ├── math/selected/
+    ├── olympiadbench/selected/
+    ├── omnimath/selected/
+    └── controlled_math/selected/       # 生成后通过 CAUSAL_DOMAINS 加入
+```
+
+每个域的 CFEA 输入为：
+
+```text
+selected/
+├── trace.npz
+└── causal_first_error_v1/
+    └── onset_pairs_v1.jsonl
+```
+
+`target_correction` 只支持 target reference / mediation / repair；只有 `controlled_root` 可以进入 root-cause candidate。纯受控域不要求 ProcessBench 的 `gold_error_step`。
+
+## 远端前台运行
+
+先审计，不加载模型：
+
+```bash
+bash run_hidden_geometry_remote.sh causal-audit
+```
+
+有已验证 pair 后运行 smoke：
+
+```bash
+bash run_hidden_geometry_remote.sh causal-extract-smoke
+bash run_hidden_geometry_remote.sh causal-intervene-smoke
+```
+
+加入受控域：
+
+```bash
+CAUSAL_DOMAINS=controlled_math bash run_hidden_geometry_remote.sh causal-full
+```
+
+脚本在前台运行并显示 `tqdm` 进度，不使用 `nohup`、`screen` 或 `tmux`。
+
+## 结论门槛
+
+图分数是描述性候选，不是因果效应。干预改变 margin 也不能自动升级成根因。正式路由/FFN 结论还必须超过 random donor、wrong source/head/layer、norm-matched noise 等对照，并产生 token/step rescue，再按 domain → problem/template 分组 bootstrap。
 
 ## 验证
 
 ```bash
-python -m pip install -e './reasoning_activation_divergence[test]'
-python -m pytest reasoning_activation_divergence/tests -q
+python -m pytest tests/causal_first_error_attribution tests/test_remote_runner.py -q
 ```

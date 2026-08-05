@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+import pytest
+
+from functional_divergence.causal_first_error_attribution import main as cli
+
+
+def test_cli_exposes_separate_audit_extract_intervene_and_evaluate_commands(
+    tmp_path,
+) -> None:
+    parser = cli.build_parser()
+    extract = parser.parse_args(
+        [
+            "extract",
+            "--data-root",
+            str(tmp_path),
+            "--model-dir",
+            str(tmp_path / "model"),
+            "--layers",
+            "8,12",
+        ]
+    )
+    intervene = parser.parse_args(
+        [
+            "intervene",
+            "--data-root",
+            str(tmp_path),
+            "--model-dir",
+            str(tmp_path / "model"),
+            "--layers",
+            "8,12",
+        ]
+    )
+
+    assert extract.layers == (8, 12)
+    assert intervene.layers == (8, 12)
+    assert parser.parse_args(["summarize", "--data-root", str(tmp_path)]).command == (
+        "summarize"
+    )
+    assert parser.parse_args(
+        ["evaluate-monitor", "--scores", str(tmp_path / "scores.jsonl")]
+    ).command == "evaluate-monitor"
+
+
+def test_extract_checks_pair_availability_before_loading_model(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    def forbidden_model_load(_args):
+        raise AssertionError("model must not load without verified onset pairs")
+
+    monkeypatch.setattr(cli, "_load_model", forbidden_model_load)
+
+    with pytest.raises(SystemExit, match="no verified onset pairs"):
+        cli.main(
+            [
+                "extract",
+                "--data-root",
+                str(tmp_path),
+                "--domains",
+                "gsm8k",
+                "--model-dir",
+                str(tmp_path / "model"),
+                "--layers",
+                "8,12",
+            ]
+        )
+
+    assert "run causal-audit first" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("layers", ["0", "8,8", "-1,8"])
+def test_cli_rejects_invalid_layers_before_execution(tmp_path, layers) -> None:
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "extract",
+                "--data-root",
+                str(tmp_path),
+                "--model-dir",
+                str(tmp_path / "model"),
+                "--layers",
+                layers,
+            ]
+        )
+
+
+def test_cli_rejects_negative_case_limit(tmp_path) -> None:
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "extract",
+                "--data-root",
+                str(tmp_path),
+                "--model-dir",
+                str(tmp_path / "model"),
+                "--layers",
+                "8",
+                "--max-cases-per-domain",
+                "-1",
+            ]
+        )

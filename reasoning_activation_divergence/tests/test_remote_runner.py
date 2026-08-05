@@ -36,7 +36,7 @@ def test_remote_runner_checks_the_active_python_environment_and_runs_foreground(
     assert "screen -dmS" not in script
 
 
-def test_hidden_geometry_runner_has_component_extraction_modes() -> None:
+def test_hidden_geometry_runner_has_causal_first_error_modes() -> None:
     runner = Path(__file__).resolve().parents[1] / "run_hidden_geometry_remote.sh"
     script = runner.read_text(encoding="utf-8")
 
@@ -45,17 +45,30 @@ def test_hidden_geometry_runner_has_component_extraction_modes() -> None:
         in script
     )
     assert 'GPU_ID="${GPU_ID:-0}"' in script
-    assert 'COMPONENT_LAYERS="${COMPONENT_LAYERS:-' in script
-    assert 'COMPONENT_LAYERS="${COMPONENT_LAYERS:-8,12,16,20,24,28}"' in script
-    assert 'DATA_ROOT="${DATA_ROOT:-' in script
+    assert 'CAUSAL_LAYERS="${CAUSAL_LAYERS:-8,12,16,20,24,28}"' in script
+    assert 'CAUSAL_DOMAINS="${CAUSAL_DOMAINS:-gsm8k,math,olympiadbench,omnimath}"' in script
+    assert (
+        'DATA_ROOT="${DATA_ROOT:-/share/home/tm902089733300000/a903202310/lys/data/RAGTruth/processbench_observer_llama31_full}"'
+        in script
+    )
+    assert '--domains "${CAUSAL_DOMAINS}"' in script
     assert "export CUDA_VISIBLE_DEVICES" in script
-    assert "component-smoke)" in script
-    assert "component-full)" in script
-    assert "-m functional_divergence.hidden_state_geometry.component_extract_cli" in script
-    assert "--max-records-per-domain 32" in script
-    assert "--method component_resolved_hazard" in script
-    assert "--tasks post_step" in script
-    assert "--bootstrap 2000" in script
+    for mode in (
+        "causal-audit",
+        "causal-extract-smoke",
+        "causal-intervene-smoke",
+        "causal-summarize-smoke",
+        "causal-monitor-smoke",
+        "causal-full",
+    ):
+        assert f"  {mode})" in script
+    assert "causal_first_error_attribution.main extract" in script
+    assert "causal_first_error_attribution.main intervene" in script
+    assert "causal_first_error_attribution.main summarize" in script
+    assert "causal_first_error_attribution.main evaluate-monitor" in script
+    assert "component-smoke)" not in script
+    assert "component-full)" not in script
+    assert "--method component_resolved_hazard" not in script
     assert "source activate" not in script
     assert "conda activate" not in script
 

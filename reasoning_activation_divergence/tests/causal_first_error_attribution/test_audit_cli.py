@@ -61,3 +61,46 @@ def test_audit_cli_finishes_without_loading_a_model(tmp_path, capsys) -> None:
     assert "root-cause analysis: not identifiable" in text
     assert "next required artifact:" in text
 
+
+def test_audit_accepts_a_controlled_trace_without_processbench_labels(tmp_path) -> None:
+    selected = tmp_path / "controlled_math" / "selected"
+    selected.mkdir(parents=True)
+    np.savez_compressed(
+        selected / "trace.npz",
+        full_input_ids=np.asarray([[1, 2, 3], [1, 2, 4]]),
+    )
+    pair_dir = selected / "causal_first_error_v1"
+    pair_dir.mkdir()
+    pair = {
+        "schema_version": "onset_pair_v1",
+        "case_id": "controlled-1",
+        "dataset": "controlled_math",
+        "problem_hash": "template:sum",
+        "error_chain_id": "condition-a",
+        "error_trace_record": 0,
+        "first_error_step": 0,
+        "error_step_token_start": 1,
+        "error_step_token_end": 3,
+        "pair_kind": "controlled_root",
+        "correctness_verifier": "python_exact",
+        "verification_evidence": "exact targets",
+        "decision_position": 1,
+        "counterfactual_decision_position": 1,
+        "counterfactual_trace_record": 1,
+        "template_id": "arithmetic-op",
+        "condition_id": "sum",
+        "counterfactual_condition_id": "product",
+        "intervention_variable": "operator",
+        "donor_alignment": {"source": [0, 1], "target": [0, 1]},
+        "target_token_ids": [3],
+        "counterfactual_target_token_ids": [4],
+    }
+    (pair_dir / "onset_pairs_v1.jsonl").write_text(
+        json.dumps(pair) + "\n", encoding="utf-8"
+    )
+
+    report = PairAuditor(tmp_path, ("controlled_math",)).run()
+
+    assert report["natural_chains"] == 0
+    assert report["valid_controlled_root_pairs"] == 1
+    assert report["root_cause_claim"] == "controlled_pairs_available"

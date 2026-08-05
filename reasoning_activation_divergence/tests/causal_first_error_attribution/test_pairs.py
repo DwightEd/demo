@@ -71,3 +71,47 @@ def test_pair_loader_rejects_unverified_correction(tmp_path) -> None:
     with pytest.raises(ValueError, match="verification_evidence"):
         OnsetPair.from_mapping(payload)
 
+
+def test_controlled_pair_exposes_predecision_target_shift() -> None:
+    pair = OnsetPair.from_mapping(
+        {
+            "schema_version": "onset_pair_v1",
+            "case_id": "controlled-1",
+            "dataset": "controlled_math",
+            "problem_hash": "template:sum",
+            "error_chain_id": "condition-a",
+            "error_trace_record": 1,
+            "first_error_step": 0,
+            "error_step_token_start": 5,
+            "error_step_token_end": 7,
+            "pair_kind": "controlled_root",
+            "correctness_verifier": "python_exact",
+            "verification_evidence": "2+3=5; 2*3=6",
+            "decision_position": 4,
+            "counterfactual_decision_position": 4,
+            "counterfactual_trace_record": 2,
+            "template_id": "arithmetic-op",
+            "condition_id": "sum",
+            "counterfactual_condition_id": "product",
+            "intervention_variable": "operator",
+            "donor_alignment": {"source": [0, 4], "target": [0, 4]},
+            "target_token_ids": [5],
+            "counterfactual_target_token_ids": [6],
+        }
+    )
+
+    assert pair.root_cause_eligible is True
+    assert pair.outcome_token_ids() == (6, 5)
+
+
+def test_pair_step_range_uses_the_trace_inclusive_end_convention() -> None:
+    payload = _target_pair()
+    payload.update(
+        error_step_token_start=12,
+        error_step_token_end=12,
+        first_divergent_token_index=12,
+    )
+
+    pair = OnsetPair.from_mapping(payload)
+
+    assert pair.decision_position == 11

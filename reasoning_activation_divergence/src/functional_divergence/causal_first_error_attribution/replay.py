@@ -32,6 +32,25 @@ def head_source_residual_messages(
     """
     import torch
 
+    contexts, mass, head_projection = _decision_contexts(
+        attention,
+        expanded_values,
+        output_weight,
+        query_position=query_position,
+    )
+    messages = torch.einsum("hkd,ohd->hko", contexts, head_projection)
+    return messages, mass, contexts.sum(dim=1)
+
+
+def _decision_contexts(
+    attention,
+    expanded_values,
+    output_weight,
+    *,
+    query_position: int,
+):
+    import torch
+
     weights = torch.as_tensor(attention)
     values = torch.as_tensor(expanded_values)
     projection = torch.as_tensor(output_weight)
@@ -41,8 +60,6 @@ def head_source_residual_messages(
         raise ValueError("expanded_values must have shape [1,K,H,Dh]")
     if int(query_position) != int(weights.shape[2]) - 1:
         raise ValueError("decision query must be the final observable token")
-    if weights.shape[2] != weights.shape[3]:
-        raise ValueError("decision replay requires a square causal prefix")
     if values.shape[1] != weights.shape[3] or values.shape[2] != weights.shape[1]:
         raise ValueError("attention and expanded value topology disagree")
 
@@ -56,8 +73,36 @@ def head_source_residual_messages(
     value_by_head = values[0].permute(1, 0, 2).float()
     contexts = mass[:, :, None] * value_by_head
     head_projection = projection.float().reshape(hidden, heads, head_dim)
-    messages = torch.einsum("hkd,ohd->hko", contexts, head_projection)
-    return messages, mass, contexts.sum(dim=1)
+    return contexts, mass, head_projection
+
+
+def head_source_graph(
+    attention,
+    expanded_values,
+    output_weight,
+    output_direction,
+    *,
+    query_position: int,
+):
+    """Compute edge scores without materializing [head, source, hidden]."""
+    import torch
+
+    contexts, mass, head_projection = _decision_contexts(
+        attention,
+        expanded_values,
+        output_weight,
+        query_position=query_position,
+    )
+    direction = torch.as_tensor(output_direction, device=contexts.device)
+    if direction.ndim != 1 or direction.shape[0] != head_projection.shape[0]:
+        raise ValueError("output_direction must have shape [D]")
+    direction_by_head = torch.einsum(
+        "ohd,o->hd", head_projection, direction.float()
+    )
+    proxy = torch.einsum("hkd,hd->hk", contexts, direction_by_head)
+    head_output = contexts.sum(dim=1)
+    reconstructed = torch.einsum("hd,ohd->o", head_output, head_projection)
+    return proxy, mass, head_output, reconstructed
 
 
 def edge_margin_proxy(messages, output_direction):
@@ -81,12 +126,14 @@ class _DecisionCapture:
         layers: tuple[int, ...],
         output_direction,
         reconstruction_rtol: float,
+        prefix_values: dict[int, object] | None = None,
     ) -> None:
         self.model = model
         self.blocks = blocks
         self.layers = layers
         self.output_direction = output_direction
         self.reconstruction_rtol = float(reconstruction_rtol)
+        self.prefix_values = prefix_values or {}
         self.pre: dict[int, object] = {}
         self.raw_values: dict[int, object] = {}
         self.head_output: dict[int, object] = {}
@@ -147,6 +194,11 @@ class _DecisionCapture:
         raw_values = self.raw_values.pop(position, None)
         if raw_values is None:
             raise RuntimeError("v_proj capture did not run before attention output")
+        previous = self.prefix_values.get(position)
+        if previous is not None:
+            raw_values = torch.cat(
+                (previous.to(raw_values.device), raw_values), dim=1
+            )
         heads, kv_heads, head_dim = _head_topology(self.model, module)
         values = _reshape_value_projection(
             raw_values, kv_heads=kv_heads, head_dim=head_dim
@@ -155,14 +207,14 @@ class _DecisionCapture:
         output_projection = getattr(module, "o_proj", None)
         if output_projection is None or not hasattr(output_projection, "weight"):
             raise TypeError("attention module does not expose o_proj.weight")
-        messages, mass, head_output = head_source_residual_messages(
+        proxy, mass, head_output, reconstructed = head_source_graph(
             attention,
             expanded,
             output_projection.weight,
+            self.output_direction,
             query_position=int(attention.shape[2]) - 1,
         )
         actual = _as_hidden(output)[0, -1].float()
-        reconstructed = messages.sum(dim=(0, 1)).float()
         relative = torch.linalg.vector_norm(reconstructed - actual) / torch.clamp(
             torch.linalg.vector_norm(actual), min=1e-12
         )
@@ -174,9 +226,7 @@ class _DecisionCapture:
             )
         self.head_output[position] = head_output.detach()
         self.attn_output[position] = actual.detach()
-        self.edge_proxy[position] = edge_margin_proxy(
-            messages, self.output_direction
-        ).detach()
+        self.edge_proxy[position] = proxy.detach()
         self.edge_mass[position] = mass.detach()
         self.relative_error[position] = value
 
@@ -198,6 +248,35 @@ class _DecisionCapture:
             )
 
         return tuple(stack(store) for store in stores)
+
+
+class _PrefixValueCapture:
+    """Capture selected V projections while a cache is built without attentions."""
+
+    def __init__(self, blocks: Sequence[object], layers: tuple[int, ...]) -> None:
+        self.blocks = blocks
+        self.layers = layers
+        self.values: dict[int, object] = {}
+        self.handles: list[object] = []
+
+    def __enter__(self) -> Self:
+        for position, depth in enumerate(self.layers):
+            attention = _attention_module(self.blocks[depth - 1])
+            value_projection = getattr(attention, "v_proj", None)
+            if value_projection is None:
+                raise TypeError("attention module does not expose v_proj")
+
+            def capture(_module, _inputs, output, *, index=position):
+                values = output[0] if isinstance(output, (tuple, list)) else output
+                self.values[index] = values.detach()
+
+            self.handles.append(value_projection.register_forward_hook(capture))
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        for handle in self.handles:
+            handle.remove()
+        self.handles.clear()
 
 
 class DecisionTraceExtractor:
@@ -259,20 +338,47 @@ class DecisionTraceExtractor:
         attention_mask = torch.ones_like(token_tensor)
         model.eval()
         with torch.inference_mode():
+            past_key_values = None
+            prefix_values: dict[int, object] = {}
+            if token_tensor.shape[1] > 1:
+                with _PrefixValueCapture(
+                    topology.blocks, self.layers
+                ) as prefix_capture:
+                    prefix_result = topology.backbone(
+                        input_ids=token_tensor[:, :-1],
+                        attention_mask=attention_mask[:, :-1],
+                        use_cache=True,
+                        output_attentions=False,
+                        return_dict=True,
+                    )
+                past_key_values = getattr(prefix_result, "past_key_values", None)
+                if past_key_values is not None:
+                    prefix_values = prefix_capture.values
+                del prefix_result
+
+            cached_decision = past_key_values is not None
+            replay_tokens = token_tensor[:, -1:] if cached_decision else token_tensor
+            forward_arguments = {
+                "input_ids": replay_tokens,
+                "attention_mask": attention_mask,
+                "use_cache": cached_decision,
+                "output_attentions": True,
+                "return_dict": True,
+            }
+            if cached_decision:
+                forward_arguments["past_key_values"] = past_key_values
+                forward_arguments["position_ids"] = torch.full_like(
+                    replay_tokens, len(tokens) - 1
+                )
             with _DecisionCapture(
                 model,
                 topology.blocks,
                 self.layers,
                 output_direction,
                 self.reconstruction_rtol,
+                prefix_values,
             ) as capture:
-                result = model(
-                    input_ids=token_tensor,
-                    attention_mask=attention_mask,
-                    use_cache=False,
-                    output_attentions=True,
-                    return_dict=True,
-                )
+                result = model(**forward_arguments)
             (
                 resid,
                 head_output,
@@ -311,7 +417,9 @@ class DecisionTraceExtractor:
             attn_branch_output=attn_output.astype(np.float16),
             mlp_output=mlp_output.astype(np.float16),
             attn_edge_margin_proxy=edge_proxy.astype(np.float16),
-            attn_edge_mass=edge_mass.astype(np.float16),
+            # Keep normalized probabilities in float32. Long prefixes can make
+            # float16 row sums fail the artifact's probability invariant.
+            attn_edge_mass=edge_mass.astype(np.float32),
             metadata=artifact_metadata,
         )
         artifact.validate()
@@ -321,5 +429,6 @@ class DecisionTraceExtractor:
 __all__ = [
     "DecisionTraceExtractor",
     "edge_margin_proxy",
+    "head_source_graph",
     "head_source_residual_messages",
 ]
