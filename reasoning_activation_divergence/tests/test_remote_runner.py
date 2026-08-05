@@ -97,3 +97,15 @@ def test_hidden_geometry_runner_audits_causal_pairs_without_loading_model() -> N
     assert "nohup" not in script
     assert "screen -dmS" not in script
     assert "tmux" not in script
+
+
+def test_hidden_geometry_runner_keeps_interactive_terminal_visible_on_failure() -> None:
+    runner = Path(__file__).resolve().parents[1] / "run_hidden_geometry_remote.sh"
+    script = runner.read_text(encoding="utf-8")
+
+    assert "set -uo pipefail" in script
+    assert "set -e" not in script
+    assert "stop_on_failure()" in script
+    assert "trap stop_on_failure ERR" in script
+    assert "[[ -t 0 && -t 1 ]]" in script
+    assert 'exit "${status}"' in script

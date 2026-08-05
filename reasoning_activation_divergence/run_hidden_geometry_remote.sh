@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
+set -o errtrace
+
+stop_on_failure() {
+  local status=$?
+  trap - ERR EXIT
+  if (( status != 0 )); then
+    printf '\nRun failed with exit code %d. The traceback above is the original error.\n' "${status}" >&2
+    if [[ -t 0 && -t 1 ]]; then
+      read -r -p "Press Enter to return to the terminal..." || true
+    fi
+  fi
+  exit "${status}"
+}
+
+trap stop_on_failure ERR EXIT
 
 MODE="${1:-preflight}"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
