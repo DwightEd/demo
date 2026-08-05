@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 
 from functional_divergence.causal_first_error_attribution.audit import PairAuditor
 from functional_divergence.causal_first_error_attribution.main import main
@@ -37,6 +38,15 @@ def test_processbench_audit_reports_root_cause_unidentifiable_without_pairs(
     assert report["next_required_artifact"].endswith(
         "gsm8k/selected/causal_first_error_v1/onset_pairs_v1.jsonl"
     )
+
+
+def test_audit_fails_instead_of_reporting_zero_for_a_missing_trace(tmp_path) -> None:
+    expected = tmp_path / "gsm8k" / "selected" / "trace.npz"
+
+    with pytest.raises(FileNotFoundError, match="required trace file not found") as exc:
+        PairAuditor(tmp_path, ("gsm8k",)).run()
+
+    assert str(expected) in str(exc.value)
 
 
 def test_audit_cli_finishes_without_loading_a_model(tmp_path, capsys) -> None:

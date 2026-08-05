@@ -101,7 +101,7 @@ class PairAuditor:
     @staticmethod
     def _trace_counts(path: Path) -> tuple[int, int, int, int]:
         if not path.is_file():
-            return 0, 0, 0, 0
+            raise FileNotFoundError(f"required trace file not found: {path}")
         with np.load(path, allow_pickle=True) as archive:
             if "gold_error_step" not in archive.files:
                 return 0, 0, 0, 0

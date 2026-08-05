@@ -58,10 +58,10 @@ src/functional_divergence/causal_first_error_attribution/
 
 ## 数据布局
 
-默认根目录：
+当前服务器上已经核验的根目录：
 
 ```text
-/share/home/tm902089733300000/a903202310/lys/data/RAGTruth/
+/share/home/tm902089733300000/a903202310/lys/research/demo/data/exact/
 └── processbench_observer_llama31_full/
     ├── gsm8k/selected/
     ├── math/selected/

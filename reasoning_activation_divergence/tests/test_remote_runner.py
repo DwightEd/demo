@@ -48,7 +48,7 @@ def test_hidden_geometry_runner_has_causal_first_error_modes() -> None:
     assert 'CAUSAL_LAYERS="${CAUSAL_LAYERS:-8,12,16,20,24,28}"' in script
     assert 'CAUSAL_DOMAINS="${CAUSAL_DOMAINS:-gsm8k,math,olympiadbench,omnimath}"' in script
     assert (
-        'DATA_ROOT="${DATA_ROOT:-/share/home/tm902089733300000/a903202310/lys/data/RAGTruth/processbench_observer_llama31_full}"'
+        'DATA_ROOT="${DATA_ROOT:-/share/home/tm902089733300000/a903202310/lys/research/demo/data/exact/processbench_observer_llama31_full}"'
         in script
     )
     assert '--domains "${CAUSAL_DOMAINS}"' in script
@@ -71,6 +71,7 @@ def test_hidden_geometry_runner_has_causal_first_error_modes() -> None:
     assert "--method component_resolved_hazard" not in script
     assert "source activate" not in script
     assert "conda activate" not in script
+    assert 'if [[ ! -f "${aligned_trace}" ]]; then' in script
 
 
 def test_hidden_geometry_runner_audits_causal_pairs_without_loading_model() -> None:

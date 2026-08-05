@@ -4,7 +4,7 @@ set -euo pipefail
 MODE="${1:-preflight}"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 DEMO_ROOT="${DEMO_ROOT:-$(dirname "${PROJECT_ROOT}")}"
-DATA_ROOT="${DATA_ROOT:-/share/home/tm902089733300000/a903202310/lys/data/RAGTruth/processbench_observer_llama31_full}"
+DATA_ROOT="${DATA_ROOT:-/share/home/tm902089733300000/a903202310/lys/research/demo/data/exact/processbench_observer_llama31_full}"
 MODEL_DIR="${MODEL_DIR:-/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct}"
 MODEL_NAME="${MODEL_NAME:-meta-llama/Llama-3.1-8B-Instruct}"
 MODEL_REVISION="${MODEL_REVISION:-auto}"
@@ -48,7 +48,7 @@ for domain in "${inspected_domains[@]}"; do
     echo "trace.npz alone is insufficient; extract response-token hidden-state shards first." >&2
     exit 3
   fi
-  if [[ "${MODE}" != causal-* && ! -f "${aligned_trace}" ]]; then
+  if [[ ! -f "${aligned_trace}" ]]; then
     echo "missing aligned trace with full token IDs: ${aligned_trace}" >&2
     exit 3
   fi

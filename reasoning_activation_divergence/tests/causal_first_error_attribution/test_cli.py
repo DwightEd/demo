@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from functional_divergence.causal_first_error_attribution import main as cli
@@ -45,6 +46,14 @@ def test_cli_exposes_separate_audit_extract_intervene_and_evaluate_commands(
 def test_extract_checks_pair_availability_before_loading_model(
     tmp_path, monkeypatch, capsys
 ) -> None:
+    selected = tmp_path / "gsm8k" / "selected"
+    selected.mkdir(parents=True)
+    np.savez_compressed(
+        selected / "trace.npz",
+        gold_error_step=np.asarray([0, -1], dtype=np.int32),
+        problem_ids=np.asarray(["error", "correct"]),
+    )
+
     def forbidden_model_load(_args):
         raise AssertionError("model must not load without verified onset pairs")
 

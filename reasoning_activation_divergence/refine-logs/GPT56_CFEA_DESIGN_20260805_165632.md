@@ -187,7 +187,7 @@ q_t=mathrm{step_token_start}[t]-1.
 
 ## 8. 数据契约
 
-推荐数据布局：
+推荐数据布局如下；当前服务器的已核验源目录仍为 `research/demo/data/exact/processbench_observer_llama31_full`，此前在 `data/RAGTruth/manifests` 中生成的只是迁移清单，并未移动这些源文件。
 
 ```text
 RAGTruth/processbench_observer_llama31_full/
