@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Iterable
@@ -45,12 +45,35 @@ class ProcessBenchMonitorData:
     layer_ids: np.ndarray
     hidden_size: int
     output_feature_names: tuple[str, ...]
+    _history_state_indices: tuple[tuple[int, ...], ...] = field(
+        init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if not self.rows:
             raise ValueError("monitor dataset contains no eligible boundary rows")
         if not self.stores:
             raise ValueError("monitor dataset contains no boundary-state stores")
+        row_lookup = {
+            (row.chain_id, row.candidate_step): row for row in self.rows
+        }
+        if len(row_lookup) != len(self.rows):
+            raise ValueError("monitor rows must be unique by chain and candidate step")
+        histories = []
+        for row in self.rows:
+            preceding = [
+                row_lookup.get((row.chain_id, step))
+                for step in range(row.candidate_step + 1)
+            ]
+            if any(value is None for value in preceding):
+                raise ValueError(
+                    f"chain {row.chain_id}: history is incomplete through "
+                    f"step {row.candidate_step}"
+                )
+            if any(value.store_index != row.store_index for value in preceding):
+                raise ValueError(f"chain {row.chain_id}: history spans state stores")
+            histories.append(tuple(value.state_index for value in preceding))
+        object.__setattr__(self, "_history_state_indices", tuple(histories))
 
     def state(self, row_index: int) -> np.ndarray:
         row = self.rows[int(row_index)]
@@ -69,6 +92,33 @@ class ProcessBenchMonitorData:
                 "pre-step state contains non-finite values"
             )
         return value
+
+    def history(self, row_index: int, *, max_steps: int = 0) -> np.ndarray:
+        """Return same-chain pre-step states from step 0 through this candidate."""
+
+        if int(max_steps) < 0:
+            raise ValueError("max_steps must be nonnegative")
+        position = int(row_index)
+        row = self.rows[position]
+        state_indices = self._history_state_indices[position]
+        if max_steps:
+            state_indices = state_indices[-int(max_steps) :]
+        values = np.asarray(
+            self.stores[row.store_index].values[list(state_indices)],
+            dtype=np.float32,
+        )
+        expected = (len(state_indices), len(self.layer_ids), self.hidden_size)
+        if values.shape != expected:
+            raise ValueError(
+                f"chain {row.chain_id} step {row.candidate_step}: expected history "
+                f"{expected}, got {values.shape}"
+            )
+        if not np.isfinite(values).all():
+            raise ValueError(
+                f"chain {row.chain_id} step {row.candidate_step}: "
+                "history contains non-finite values"
+            )
+        return values
 
     @property
     def labels(self) -> np.ndarray:

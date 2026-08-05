@@ -128,6 +128,35 @@ def test_monitor_risk_set_includes_step_zero_and_excludes_post_error(tmp_path) -
     assert data.layer_ids.tolist() == [1, 2, 3]
 
 
+def test_monitor_history_contains_only_same_chain_states_through_candidate(
+    tmp_path,
+) -> None:
+    states = np.arange(5 * 3 * 4, dtype=np.float32).reshape(5, 3, 4)
+    _write_domain(
+        tmp_path,
+        "gsm8k",
+        pre_states=states,
+        chain_ids=np.asarray([10, 11]),
+        first_errors=np.asarray([1, -1]),
+        step_ranges=np.asarray(
+            [
+                [[3, 4], [5, 7], [8, 10]],
+                [[3, 3], [4, 6], [-1, -1]],
+            ]
+        ),
+        n_steps=np.asarray([3, 2]),
+        point_chain_ids=np.asarray([10, 10, 10, 11, 11]),
+        point_step_ids=np.asarray([0, 1, 2, 0, 1]),
+        step_scores=np.zeros((2, 3, 2), dtype=np.float32),
+    )
+
+    data = load_processbench_monitor_data(tmp_path, ("gsm8k",))
+
+    np.testing.assert_array_equal(data.history(1), states[[0, 1]])
+    np.testing.assert_array_equal(data.history(1, max_steps=1), states[[1]])
+    np.testing.assert_array_equal(data.history(2), states[[3]])
+
+
 def test_output_context_uses_only_completed_steps(tmp_path) -> None:
     states = np.ones((2, 3, 4), dtype=np.float32)
     _write_domain(
