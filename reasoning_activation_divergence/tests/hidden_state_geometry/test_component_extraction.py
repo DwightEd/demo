@@ -4,9 +4,13 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from functional_divergence.hidden_state_geometry import component_extraction
 from functional_divergence.hidden_state_geometry.component_contract import (
     SOURCE_STEP_PADDING,
     ComponentStepArtifact,
+)
+from functional_divergence.hidden_state_geometry.component_extract_cli import (
+    build_parser as build_component_parser,
 )
 from functional_divergence.hidden_state_geometry.component_extraction import (
     ComponentExtractionConfig,
@@ -205,6 +209,25 @@ def test_final_normalized_hidden_depth_is_not_treated_as_a_block_output() -> Non
         _validate_model_for_replay(model, (2,))
 
 
+def test_component_cli_makes_replay_fidelity_an_explicit_audit() -> None:
+    parser = build_component_parser()
+    required = [
+        "--data-root",
+        "/data",
+        "--model-dir",
+        "/model",
+        "--component-layers",
+        "8,12",
+    ]
+
+    assert parser.parse_args(required).verify_replay_fidelity is False
+    assert (
+        parser.parse_args([*required, "--verify-replay-fidelity"])
+        .verify_replay_fidelity
+        is True
+    )
+
+
 def test_load_trace_replay_record_joins_by_chain_and_rejects_interior_padding(
     tmp_path,
 ) -> None:
@@ -341,6 +364,45 @@ def test_aligned_existing_component_artifact_is_skipped_without_replay(
 
     assert result.written == ()
     assert result.skipped == (sample.component_path,)
+
+
+def test_component_extraction_does_not_require_hidden_shard_fidelity_by_default(
+    tmp_path, monkeypatch
+) -> None:
+    source = _trace(tmp_path)
+    sample = _sample(
+        tmp_path,
+        component_path=source.component_dir / "chain_11.component_step_v1.npz",
+    )
+    config = ComponentExtractionConfig(
+        layers=(1, 2),
+        model_name="meta-llama/Llama-3.1-8B-Instruct",
+        model_revision="main",
+        tokenizer_name="meta-llama/Llama-3.1-8B-Instruct",
+        tokenizer_revision="main",
+        extractor_commit="abc123",
+        verify_replay_fidelity=False,
+    )
+    monkeypatch.setattr(
+        component_extraction,
+        "_replay_components",
+        lambda *args, **kwargs: (
+            np.zeros((3, 2, 4), dtype=np.float32),
+            np.zeros((2, 2, 3, 4), dtype=np.float32),
+            np.zeros((2, 2, 4), dtype=np.float32),
+            np.zeros((2, 2, 4), dtype=np.float32),
+            0.0,
+        ),
+    )
+
+    result = ComponentTraceExtractor(config).extract(
+        model=object(), samples=(sample,), sources=(source,)
+    )
+
+    assert result.written == (sample.component_path,)
+    artifact = ComponentStepArtifact.load(sample.component_path)
+    assert artifact.residual_layers.tolist() == [1, 2]
+    assert artifact.metadata["replay_fidelity_checked"] is False
 
 
 def test_replay_fidelity_failure_is_hard_error(tmp_path) -> None:

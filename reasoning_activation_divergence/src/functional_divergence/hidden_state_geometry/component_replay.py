@@ -22,6 +22,7 @@ class ComponentExtractionConfig:
     attention_reconstruction_atol: float = ATTN_SUM_ATOL
     attention_reconstruction_rtol: float = ATTN_SUM_RTOL
     replay_fidelity_rtol: float = ATTN_SUM_RTOL
+    verify_replay_fidelity: bool = False
     overwrite: bool = False
 
     def __post_init__(self) -> None:
@@ -52,6 +53,8 @@ class ComponentExtractionConfig:
             if not np.isfinite(value) or value < 0.0:
                 raise ValueError(f"{name} must be finite and nonnegative")
             object.__setattr__(self, name, value)
+        if not isinstance(self.verify_replay_fidelity, bool):
+            raise TypeError("verify_replay_fidelity must be boolean")
 
     def replay_config_sha256(self) -> str:
         payload = {

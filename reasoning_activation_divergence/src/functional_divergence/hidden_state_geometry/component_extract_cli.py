@@ -137,6 +137,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=3e-2,
     )
     parser.add_argument("--replay-fidelity-rtol", type=float, default=3e-2)
+    parser.add_argument(
+        "--verify-replay-fidelity",
+        action="store_true",
+        help="audit replayed step states against stored hidden shards",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -181,6 +186,7 @@ def main(argv: list[str] | None = None) -> None:
         attention_reconstruction_atol=args.attention_reconstruction_atol,
         attention_reconstruction_rtol=args.attention_reconstruction_rtol,
         replay_fidelity_rtol=args.replay_fidelity_rtol,
+        verify_replay_fidelity=bool(args.verify_replay_fidelity),
         overwrite=bool(args.overwrite),
     )
     reporter = TqdmProgress()

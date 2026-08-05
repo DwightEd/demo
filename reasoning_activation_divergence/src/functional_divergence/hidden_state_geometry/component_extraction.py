@@ -531,7 +531,7 @@ def _metadata_for_artifact(
     config: ComponentExtractionConfig,
     source_trace_sha256: str,
     max_attention_reconstruction_error: float,
-    max_replay_relative_error: float,
+    max_replay_relative_error: float | None,
 ) -> dict[str, Any]:
     model_revision = (
         record.provenance["model_revision"]
@@ -563,6 +563,8 @@ def _metadata_for_artifact(
         "extraction_mode": "teacher_forced_backbone_attention_components_v1",
         "model_identity_verification": (
             "selected_layer_step_end_activation_replay_fidelity"
+            if config.verify_replay_fidelity
+            else "not_checked"
         ),
         "tokenizer_identity_verification": "stored_input_ids_without_retokenization",
         "attention_reconstruction_atol": float(config.attention_reconstruction_atol),
@@ -570,7 +572,12 @@ def _metadata_for_artifact(
         "max_attention_reconstruction_relative_error": float(
             max_attention_reconstruction_error
         ),
-        "replay_fidelity_max_relative_error": float(max_replay_relative_error),
+        "replay_fidelity_checked": bool(config.verify_replay_fidelity),
+        "replay_fidelity_max_relative_error": (
+            None
+            if max_replay_relative_error is None
+            else float(max_replay_relative_error)
+        ),
         "replay_fidelity_rtol": float(config.replay_fidelity_rtol),
     }
 
@@ -586,7 +593,7 @@ def _artifact_for_replay(
     attn_out_step: np.ndarray,
     mlp_out_step: np.ndarray,
     max_attention_reconstruction_error: float,
-    max_replay_relative_error: float,
+    max_replay_relative_error: float | None,
 ) -> ComponentStepArtifact:
     layout = _build_component_layout(sample)
     layers = np.asarray(config.layers, dtype=np.int16)
@@ -788,12 +795,14 @@ class ComponentTraceExtractor:
                 ),
                 config=self.config,
             )
-            replay_error = validate_replay_fidelity(
-                sample,
-                layers=np.asarray(self.config.layers, dtype=np.int64),
-                replayed_step_states=resid_boundary[1:],
-                max_relative_error=self.config.replay_fidelity_rtol,
-            )
+            replay_error = None
+            if self.config.verify_replay_fidelity:
+                replay_error = validate_replay_fidelity(
+                    sample,
+                    layers=np.asarray(self.config.layers, dtype=np.int64),
+                    replayed_step_states=resid_boundary[1:],
+                    max_relative_error=self.config.replay_fidelity_rtol,
+                )
             artifact = _artifact_for_replay(
                 sample=sample,
                 record=record,
