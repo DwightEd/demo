@@ -681,7 +681,6 @@ def _validate_existing_artifact(
             if config.tokenizer_revision == "auto"
             else config.tokenizer_revision
         ),
-        "extractor_commit": config.extractor_commit,
         "source_trace_sha256": source_trace_sha256,
         "generation_config_sha256": config.replay_config_sha256(),
     }

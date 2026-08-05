@@ -340,7 +340,7 @@ def test_gqa_values_expand_and_residual_writes_reconstruct_attention_output() ->
     assert torch.allclose(writes.sum(dim=1)[0], actual_by_head.reshape(-1))
 
 
-def test_aligned_existing_component_artifact_is_skipped_without_replay(
+def test_aligned_existing_component_artifact_from_an_older_commit_is_skipped(
     tmp_path,
 ) -> None:
     source = _trace(tmp_path)
@@ -348,7 +348,7 @@ def test_aligned_existing_component_artifact_is_skipped_without_replay(
         tmp_path,
         component_path=source.component_dir / "chain_11.component_step_v1.npz",
     )
-    config = ComponentExtractionConfig(
+    old_config = ComponentExtractionConfig(
         layers=(1,),
         model_name="meta-llama/Llama-3.1-8B-Instruct",
         model_revision="main",
@@ -356,9 +356,12 @@ def test_aligned_existing_component_artifact_is_skipped_without_replay(
         tokenizer_revision="main",
         extractor_commit="abc123",
     )
+    config = ComponentExtractionConfig(
+        **{**old_config.__dict__, "extractor_commit": "new456"}
+    )
     extractor = ComponentTraceExtractor(config)
     source_sha = extractor.source_trace_sha256(source.exact_trace)
-    _artifact(sample, config, source_sha).save(sample.component_path)
+    _artifact(sample, old_config, source_sha).save(sample.component_path)
 
     result = extractor.extract(model=object(), samples=(sample,), sources=(source,))
 
