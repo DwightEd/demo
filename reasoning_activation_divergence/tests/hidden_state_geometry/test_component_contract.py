@@ -85,6 +85,18 @@ def test_round_trip_uses_compressed_npz_with_scalar_metadata(tmp_path):
         )
 
 
+def test_step_ranges_allow_unassigned_separator_tokens_between_steps():
+    artifact = _valid_artifact()
+    separated = ComponentStepArtifact(
+        **{
+            **artifact.__dict__,
+            "step_token_start": np.asarray([1, 3, 4], dtype=np.int32),
+        }
+    )
+
+    separated.validate()
+
+
 def test_raw_attention_weights_cannot_substitute_for_required_message_array(tmp_path):
     artifact = _valid_artifact()
     path = tmp_path / "raw_attention_only.npz"

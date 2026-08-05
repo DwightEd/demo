@@ -321,14 +321,14 @@ def _validate_token_boundaries(
         raise ValueError("boundary_token_end must lie within input_ids")
     if np.any(np.diff(boundary_token_end) <= 0):
         raise ValueError("boundary_token_end must be strictly increasing")
-    if not np.array_equal(step_token_start, boundary_token_end[:-1]):
-        raise ValueError("step_token_start must align exactly with boundary_token_end")
     if not np.array_equal(step_token_end, boundary_token_end[1:]):
         raise ValueError("step_token_end must align exactly with boundary_token_end")
     if np.any(step_token_start < 0) or np.any(step_token_end > token_count):
         raise ValueError("step token ranges must lie within input_ids")
     if np.any(step_token_end <= step_token_start):
         raise ValueError("step token ranges must be non-empty half-open intervals")
+    if np.any(step_token_start < boundary_token_end[:-1]):
+        raise ValueError("step token ranges must not overlap earlier steps")
     if boundary_token_end[0] < 1 or boundary_token_end[-1] != token_count:
         raise ValueError(
             "boundary_token_end must start after a non-empty prompt and end at input_ids"
