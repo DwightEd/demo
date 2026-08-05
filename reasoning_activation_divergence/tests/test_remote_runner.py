@@ -58,3 +58,19 @@ def test_hidden_geometry_runner_has_component_extraction_modes() -> None:
     assert "--bootstrap 2000" in script
     assert "source activate" not in script
     assert "conda activate" not in script
+
+
+def test_hidden_geometry_runner_audits_causal_pairs_without_loading_model() -> None:
+    runner = Path(__file__).resolve().parents[1] / "run_hidden_geometry_remote.sh"
+    script = runner.read_text(encoding="utf-8")
+
+    marker = "  causal-audit)"
+    assert marker in script
+    start = script.index(marker)
+    branch = script[start : script.index("    ;;", start)]
+    assert "causal_first_error_attribution.main audit" in branch
+    assert "require_component_runtime" not in branch
+    assert '--output "${OUTPUT_ROOT}/causal_audit_${RUN_TAG}.json"' in branch
+    assert "nohup" not in script
+    assert "screen -dmS" not in script
+    assert "tmux" not in script

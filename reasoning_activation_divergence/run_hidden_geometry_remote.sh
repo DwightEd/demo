@@ -113,6 +113,12 @@ common=(
 )
 
 case "${MODE}" in
+  causal-audit)
+    "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main audit \
+      --data-root "${DATA_ROOT}" \
+      --domains gsm8k,math,olympiadbench,omnimath \
+      --output "${OUTPUT_ROOT}/causal_audit_${RUN_TAG}.json"
+    ;;
   preflight)
     "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli \
       preflight "${common[@]}" --max-records-per-domain 0
@@ -189,7 +195,7 @@ case "${MODE}" in
       --output-dir "${OUTPUT_ROOT}/component_full_${RUN_TAG}"
     ;;
   *)
-    echo "usage: $0 preflight|smoke|full|ridge-smoke|ridge-full|innovation-smoke|innovation-full|component-smoke|component-full" >&2
+    echo "usage: $0 causal-audit|preflight|smoke|full|ridge-smoke|ridge-full|innovation-smoke|innovation-full|component-smoke|component-full" >&2
     exit 2
     ;;
 esac
