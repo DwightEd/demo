@@ -11,7 +11,7 @@ RDGM 是 CFEA 中面向自然 ProcessBench 的检测分支。它不要求 `onset
   -> error risk set: 0..first_error_step
   -> correct risk set: all steps
   -> grouped inner validation + outer LODO
-  -> nuisance / output / layer-set / shuffled-graph / depth-graph
+  -> nuisance / output / layer-set / 3 shuffled topologies / depth-graph
   -> chain localization + false alarm + paired bootstrap
 ```
 
@@ -50,6 +50,6 @@ paired_contrasts.depth_graph_vs_layer_set
 paired_contrasts.depth_graph_vs_depth_graph_shuffled
 ```
 
-只有图模型稳定胜过 `layer_set` 和 `depth_graph_shuffled`，才能说真实层深结构提供了预测增量。该结果仍不是 Attention 路由或 FFN 更新的因果证据。
+每个 shuffled topology 都禁止保留原深度链的无向邻接边，并以独立 topology seed 训练；报告同时保存每个 seed 和 ensemble 的比较。只有图模型稳定胜过 `layer_set`、shuffled ensemble 及各 topology seed，才能说真实层深结构提供了预测增量。该结果仍不是 Attention 路由或 FFN 更新的因果证据。
 
 完整冻结计划见 [EXPERIMENT_PLAN.md](refine-logs/EXPERIMENT_PLAN.md)。

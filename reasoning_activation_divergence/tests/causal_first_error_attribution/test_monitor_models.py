@@ -8,6 +8,7 @@ from functional_divergence.causal_first_error_attribution.monitor_models import 
     LayerSetMonitor,
     depth_neighbor_mean,
     fixed_layer_permutation,
+    path_edge_overlap,
 )
 
 
@@ -63,3 +64,15 @@ def test_fixed_layer_permutation_is_reproducible_and_nontrivial() -> None:
     np.testing.assert_array_equal(first, second)
     assert sorted(first.tolist()) == list(range(8))
     assert not np.array_equal(first, np.arange(8))
+    assert path_edge_overlap(first) == 0
+
+
+def test_reversing_depth_is_not_accepted_as_a_shuffled_adjacency() -> None:
+    assert path_edge_overlap(np.arange(8)[::-1]) == 7
+
+
+def test_topology_seeds_produce_distinct_zero_overlap_paths() -> None:
+    paths = [fixed_layer_permutation(16, seed) for seed in (17, 18, 19)]
+
+    assert len({tuple(path.tolist()) for path in paths}) == 3
+    assert all(path_edge_overlap(path) == 0 for path in paths)

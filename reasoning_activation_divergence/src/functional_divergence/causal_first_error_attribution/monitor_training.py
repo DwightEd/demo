@@ -102,9 +102,27 @@ def build_inner_group_split(
         )
         if len(names) < 2:
             continue
+        event_groups = [
+            name
+            for name in names
+            if any(rows[index].label == 1 for index in groups[name])
+        ]
+        correct_groups = [
+            name
+            for name in names
+            if any(rows[index].first_error_step == -1 for index in groups[name])
+        ]
         validation_count = max(1, int(math.ceil(validation_fraction * len(names))))
+        if event_groups and correct_groups:
+            validation_count = max(validation_count, 2)
         validation_count = min(validation_count, len(names) - 1)
-        validation_groups.update(names[:validation_count])
+        chosen: list[str] = []
+        if event_groups:
+            chosen.append(event_groups[0])
+        if correct_groups and correct_groups[0] not in chosen:
+            chosen.append(correct_groups[0])
+        chosen.extend(name for name in names if name not in chosen)
+        validation_groups.update(chosen[:validation_count])
     validation = np.asarray(
         [i for i in indices if rows[int(i)].sibling_group in validation_groups],
         dtype=np.int64,
@@ -115,6 +133,12 @@ def build_inner_group_split(
     )
     if train.size == 0 or validation.size == 0:
         raise ValueError("could not construct non-empty group-disjoint train/validation sets")
+    if not any(rows[int(index)].label == 1 for index in validation):
+        raise ValueError("validation split must contain a first-error event")
+    if not any(rows[int(index)].first_error_step == -1 for index in validation):
+        raise ValueError("validation split must contain a fully-correct chain")
+    if not any(rows[int(index)].label == 1 for index in train):
+        raise ValueError("training split must contain a first-error event")
     return train, validation
 
 
@@ -302,6 +326,7 @@ def train_monitor_arm(
     config: MonitorTrainingConfig,
     seed: int,
     state_normalizer: StateNormalizer | None = None,
+    permutation_seed: int | None = None,
 ) -> TrainedMonitor:
     if arm not in MONITOR_ARMS:
         raise ValueError(f"unknown monitor arm {arm!r}; available={list(MONITOR_ARMS)}")
@@ -318,7 +343,10 @@ def train_monitor_arm(
     context = _context_matrix(data, arm)
     feature_normalizer = fit_feature_normalizer(context, train_indices)
     permutation = (
-        fixed_layer_permutation(len(data.layer_ids), seed)
+        fixed_layer_permutation(
+            len(data.layer_ids),
+            int(seed if permutation_seed is None else permutation_seed),
+        )
         if arm == "depth_graph_shuffled"
         else None
     )

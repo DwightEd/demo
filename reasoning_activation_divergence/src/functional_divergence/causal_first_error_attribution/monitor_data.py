@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Iterable
 
@@ -72,6 +73,14 @@ class ProcessBenchMonitorData:
     @property
     def output_context(self) -> np.ndarray:
         return np.stack([row.output_context for row in self.rows]).astype(np.float32)
+
+    @property
+    def layer_axis_kind(self) -> str:
+        return (
+            "full_contiguous_depth_path"
+            if np.all(np.diff(self.layer_ids) == 1)
+            else "selected_depth_path"
+        )
 
 
 def _record_vector(
@@ -154,6 +163,47 @@ def _problem_hash(domain: str, value: object) -> str:
     return text if text.startswith("problem_sha256:") else f"{domain}::{text}"
 
 
+def _select_chain_rows(
+    groups: np.ndarray, first_errors: np.ndarray, max_chains: int
+) -> np.ndarray:
+    if max_chains == 0 or max_chains >= len(groups):
+        return np.arange(len(groups), dtype=np.int64)
+    members: dict[str, list[int]] = {}
+    for row, group in enumerate(groups):
+        members.setdefault(str(group), []).append(row)
+    error_groups = []
+    correct_groups = []
+    mixed_groups = []
+    for group, rows in members.items():
+        labels = {int(first_errors[row]) for row in rows}
+        has_error = any(value >= 0 for value in labels)
+        has_correct = -1 in labels
+        if has_error and has_correct:
+            mixed_groups.append(group)
+        elif has_error:
+            error_groups.append(group)
+        elif has_correct:
+            correct_groups.append(group)
+    ordered = list(mixed_groups)
+    for position in range(max(len(error_groups), len(correct_groups))):
+        if position < len(error_groups):
+            ordered.append(error_groups[position])
+        if position < len(correct_groups):
+            ordered.append(correct_groups[position])
+    ordered.extend(group for group in members if group not in set(ordered))
+    selected: list[int] = []
+    for group in ordered:
+        group_rows = members[group]
+        if selected and len(selected) + len(group_rows) > max_chains:
+            continue
+        selected.extend(group_rows)
+        if len(selected) >= max_chains:
+            break
+    if not selected:
+        selected.extend(members[ordered[0]])
+    return np.asarray(sorted(selected), dtype=np.int64)
+
+
 def _load_domain(
     data_root: Path,
     domain: str,
@@ -181,6 +231,10 @@ def _load_domain(
             "step_pre_state_vector_chain_idx",
             "step_pre_state_vector_step_idx",
             "step_layer_state_vector_layers",
+            "state_representation_kind",
+            "hidden_state_token_semantics",
+            "step_prediction_position_shift",
+            "metadata_json",
         }
         missing = sorted(required.difference(archive.files))
         if missing:
@@ -190,8 +244,6 @@ def _load_domain(
         count = len(chain_ids)
         if len(np.unique(chain_ids)) != count:
             raise ValueError(f"{trace_path}: chain_idx must be unique")
-        selected_count = count if max_chains == 0 else min(count, int(max_chains))
-        selected_chain_ids = set(int(value) for value in chain_ids[:selected_count])
         first_errors = np.asarray(archive["gold_error_step"], dtype=np.int64).reshape(-1)
         n_steps = np.asarray(archive["n_steps"], dtype=np.int64).reshape(-1)
         if first_errors.shape != (count,) or n_steps.shape != (count,):
@@ -217,12 +269,40 @@ def _load_domain(
         groups = _record_vector(
             archive, ("problem_group_id", "problem_group_ids", "problem_ids"), count
         )
+        selected_rows = _select_chain_rows(groups, first_errors, int(max_chains))
+        selected_chain_ids = set(int(chain_ids[row]) for row in selected_rows)
         hashes = _record_vector(
             archive, ("problem_ids", "problem_group_id", "problem_group_ids"), count
         )
         datasets = _record_vector(archive, ("dataset",), count, default=domain)
-        if any(str(value) and str(value) != domain for value in datasets[:selected_count]):
+        if any(
+            str(datasets[row]) and str(datasets[row]) != domain
+            for row in selected_rows
+        ):
             raise ValueError(f"{trace_path}: dataset field disagrees with directory {domain}")
+        representation = str(np.asarray(archive["state_representation_kind"]).item())
+        token_semantics = str(
+            np.asarray(archive["hidden_state_token_semantics"]).item()
+        )
+        prediction_shift = int(
+            np.asarray(archive["step_prediction_position_shift"]).item()
+        )
+        if representation != "hidden_state":
+            raise ValueError(f"{trace_path}: pre-step states must be raw hidden_state")
+        if token_semantics != "h_i_after_reading_token_i" or prediction_shift != -1:
+            raise ValueError(f"{trace_path}: incompatible causal token-state semantics")
+        metadata = _record_vector(archive, ("metadata_json",), count)
+        for chain_row in selected_rows:
+            try:
+                item = json.loads(str(metadata[chain_row]))
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{trace_path}: metadata_json is invalid") from exc
+            if item.get("step_pre_state_temporal_semantics") != (
+                "causal_before_first_step_token"
+            ):
+                raise ValueError(
+                    f"{trace_path}: trace does not declare causal pre-step semantics"
+                )
 
         point_chain_ids = np.asarray(
             archive["step_pre_state_vector_chain_idx"], dtype=np.int64
@@ -246,9 +326,15 @@ def _load_domain(
         layers = np.asarray(
             archive["step_layer_state_vector_layers"], dtype=np.int64
         ).reshape(-1)
+        if layers.size < 2 or len(np.unique(layers)) != len(layers) or np.any(
+            np.diff(layers) <= 0
+        ):
+            raise ValueError(
+                f"{trace_path}: layer IDs must be unique and strictly increasing"
+            )
 
         rows: list[MonitorBoundaryRow] = []
-        for chain_row in range(selected_count):
+        for chain_row in selected_rows:
             chain_id = int(chain_ids[chain_row])
             step_count = int(n_steps[chain_row])
             first_error = int(first_errors[chain_row])

@@ -18,7 +18,7 @@
 | `nuisance` | 可见长度、位置、过去步长 | 测量长度/难度污染 |
 | `output_history` | nuisance + 过去 entropy/NLL | 强输出基线 |
 | `layer_set` | 完整 `[L,D]`，无层序 pooling | hidden 信息但无图结构 |
-| `depth_graph_shuffled` | 完整 `[L,D]`，随机重接邻接 | 容量/错误邻接对照 |
+| `depth_graph_shuffled` | 完整 `[L,D]`，3 个零原边重接拓扑 | 容量/错误邻接对照 |
 | `depth_graph` | 完整 `[L,D]`，真实深度链消息传递 | 主模型 |
 
 主模型不先计算方向一致性、秩、范数、PCA/Ridge innovation 等手工指标。hidden 各维通过共享可学习投影进入层深图。
@@ -42,7 +42,7 @@ depth_graph - layer_set
 depth_graph - depth_graph_shuffled
 ```
 
-若图模型只胜输出基线而不胜 `layer_set`/`shuffled`，结论只能是完整 hidden tensor 有预测信息，不能声称图结构有效。若 shuffled 不差于真实邻接，层深路由假设被否证。
+若图模型只胜输出基线而不胜 `layer_set`/shuffled ensemble/各 topology seed，结论只能是完整 hidden tensor 有预测信息，不能声称图结构有效。若任一合法 shuffled topology 稳定不差于真实邻接，层深结构主张不成立。
 
 本实验的结论范围固定为预测关联；Attention/FFN 根因必须由 CFEA 受控反事实干预另行验证。
 

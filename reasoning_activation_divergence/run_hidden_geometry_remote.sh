@@ -49,7 +49,7 @@ for domain in "${inspected_domains[@]}"; do
     echo "trace.npz alone is insufficient; extract response-token hidden-state shards first." >&2
     exit 3
   fi
-  if [[ ! -f "${aligned_trace}" ]]; then
+  if [[ "${MODE}" != causal-monitor-* && ! -f "${aligned_trace}" ]]; then
     echo "missing aligned trace with full token IDs: ${aligned_trace}" >&2
     exit 3
   fi
@@ -157,7 +157,8 @@ case "${MODE}" in
       --data-root "${DATA_ROOT}" --domains "${CAUSAL_DOMAINS}" \
       --output-dir "${OUTPUT_ROOT}/causal_monitor_smoke_${RUN_TAG}" \
       --max-chains-per-domain 32 --width 32 --message-passing-steps 2 \
-      --epochs 3 --patience 2 --batch-size 16 --bootstrap 200 --device cuda
+      --epochs 3 --patience 2 --batch-size 16 --bootstrap 200 \
+      --shuffle-repeats 2 --device cuda
     ;;
   causal-monitor-full)
     run_causal_pytest_if_available
@@ -166,7 +167,8 @@ case "${MODE}" in
       --data-root "${DATA_ROOT}" --domains "${CAUSAL_DOMAINS}" \
       --output-dir "${OUTPUT_ROOT}/causal_monitor_full_${RUN_TAG}" \
       --max-chains-per-domain 0 --width 64 --message-passing-steps 2 \
-      --epochs 20 --patience 4 --batch-size 32 --bootstrap 2000 --device cuda
+      --epochs 20 --patience 4 --batch-size 32 --bootstrap 2000 \
+      --shuffle-repeats 3 --device cuda
     ;;
   causal-full)
     "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main audit \

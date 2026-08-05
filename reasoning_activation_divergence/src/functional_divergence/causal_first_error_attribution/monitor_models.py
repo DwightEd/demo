@@ -21,14 +21,30 @@ def depth_neighbor_mean(values: torch.Tensor) -> torch.Tensor:
     return result / counts
 
 
+def path_edge_overlap(permutation: np.ndarray) -> int:
+    order = np.asarray(permutation, dtype=np.int64).reshape(-1)
+    if len(np.unique(order)) != len(order) or sorted(order.tolist()) != list(
+        range(len(order))
+    ):
+        raise ValueError("permutation must contain every layer position exactly once")
+    return int(np.sum(np.abs(np.diff(order)) == 1))
+
+
 def fixed_layer_permutation(layer_count: int, seed: int) -> np.ndarray:
     if int(layer_count) < 2:
         raise ValueError("layer_count must be at least two")
     rng = np.random.default_rng(int(seed))
-    result = rng.permutation(int(layer_count))
-    if np.array_equal(result, np.arange(int(layer_count))):
-        result = np.roll(result, 1)
-    return result.astype(np.int64)
+    best = np.arange(int(layer_count), dtype=np.int64)
+    best_overlap = path_edge_overlap(best)
+    for _ in range(10_000):
+        candidate = rng.permutation(int(layer_count)).astype(np.int64)
+        overlap = path_edge_overlap(candidate)
+        if overlap < best_overlap:
+            best = candidate
+            best_overlap = overlap
+        if overlap == 0:
+            return candidate
+    return best
 
 
 class ContextMonitor(nn.Module):
@@ -142,4 +158,5 @@ __all__ = [
     "LayerSetMonitor",
     "depth_neighbor_mean",
     "fixed_layer_permutation",
+    "path_edge_overlap",
 ]

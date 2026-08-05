@@ -6,7 +6,7 @@
 | Run | 目标 | 输入 | 主要输出 | 状态 |
 |---|---|---|---|---|
 | RDGM-00 | pre-step 数据契约测试 | 合成 geometry trace/memmap | step 0、风险集、无未来泄漏 | complete（本地） |
-| RDGM-01 | 模型结构测试 | 合成 `[B,L,D]` | depth adjacency、set invariance、shuffle | complete（本地） |
+| RDGM-01 | 模型结构测试 | 合成 `[B,L,D]` | depth adjacency、set invariance、零原边多拓扑 shuffle | complete（本地） |
 | RDGM-02 | 训练与分组测试 | 合成三域数据 | grouped validation、train-only normalization、5 arms | complete（本地） |
 | RDGM-03 | 评估测试 | 合成首错链 | threshold、Top-1/MRR、paired bootstrap | complete（本地） |
 | RDGM-04 | 真实四域 smoke | 每域 32 chain | `causal_monitor_smoke_<tag>/summary.json` | pending（远端） |

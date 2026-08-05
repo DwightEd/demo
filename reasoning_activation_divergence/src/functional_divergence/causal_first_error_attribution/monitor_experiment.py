@@ -36,6 +36,7 @@ class MonitorExperimentConfig:
     validation_fraction: float = 0.15
     target_correct_chain_false_alarm: float = 0.1
     bootstrap_repeats: int = 1000
+    shuffle_repeats: int = 3
     seed: int = 17
     training: MonitorTrainingConfig = MonitorTrainingConfig()
 
@@ -47,7 +48,11 @@ class MonitorExperimentConfig:
             raise ValueError("LODO monitoring requires at least two domains")
         if not 0.0 <= self.target_correct_chain_false_alarm < 1.0:
             raise ValueError("target false-alarm rate must lie in [0,1)")
-        if self.bootstrap_repeats < 1 or self.max_chains_per_domain < 0:
+        if (
+            self.bootstrap_repeats < 1
+            or self.shuffle_repeats < 2
+            or self.max_chains_per_domain < 0
+        ):
             raise ValueError("bootstrap count must be positive and chain limit nonnegative")
 
 
@@ -70,7 +75,9 @@ def correct_chain_threshold(
         if row.first_error_step == -1:
             maxima[row.chain_id] = max(maxima.get(row.chain_id, -np.inf), float(score))
     if not maxima:
-        return 0.5
+        raise ValueError(
+            "false-alarm calibration requires a fully-correct validation chain"
+        )
     values = np.sort(np.asarray(list(maxima.values()), dtype=np.float64))[::-1]
     allowed = int(np.floor(float(target_false_alarm_rate) * len(values)))
     if allowed == 0:
@@ -414,6 +421,13 @@ class ProcessBenchMonitorExperiment:
             for arm in config.arms
         }
         thresholds: dict[str, dict[str, float]] = {arm: {} for arm in config.arms}
+        topology_scores = {
+            index: np.full(len(data.rows), np.nan, dtype=np.float64)
+            for index in range(config.shuffle_repeats)
+        }
+        topology_thresholds = {
+            index: {} for index in range(config.shuffle_repeats)
+        }
         folds: dict[str, dict[str, Any]] = {}
         prediction_lines: list[str] = []
         for fold_number, held_domain in enumerate(
@@ -439,36 +453,57 @@ class ProcessBenchMonitorExperiment:
                 "arms": {},
             }
             for arm in config.arms:
-                trained = train_monitor_arm(
-                    data,
-                    train,
-                    validation,
-                    arm=arm,
-                    config=config.training,
-                    seed=config.seed + fold_number,
-                    state_normalizer=(
-                        state_normalizer
-                        if arm not in ("nuisance", "output_history")
-                        else None
-                    ),
+                topology_indices = (
+                    tuple(range(config.shuffle_repeats))
+                    if arm == "depth_graph_shuffled"
+                    else (None,)
                 )
-                validation_scores = trained.predict(
-                    data,
-                    validation,
-                    batch_size=config.training.batch_size,
-                    device=config.training.device,
-                )
+                trained_runs = []
+                validation_runs = []
+                test_runs = []
+                for topology_index in topology_indices:
+                    trained = train_monitor_arm(
+                        data,
+                        train,
+                        validation,
+                        arm=arm,
+                        config=config.training,
+                        seed=config.seed + fold_number,
+                        state_normalizer=(
+                            state_normalizer
+                            if arm not in ("nuisance", "output_history")
+                            else None
+                        ),
+                        permutation_seed=(
+                            config.seed + 10_000 + int(topology_index)
+                            if topology_index is not None
+                            else None
+                        ),
+                    )
+                    trained_runs.append(trained)
+                    validation_runs.append(
+                        trained.predict(
+                            data,
+                            validation,
+                            batch_size=config.training.batch_size,
+                            device=config.training.device,
+                        )
+                    )
+                    test_runs.append(
+                        trained.predict(
+                            data,
+                            test,
+                            batch_size=config.training.batch_size,
+                            device=config.training.device,
+                        )
+                    )
+                validation_scores = np.mean(validation_runs, axis=0)
+                test_scores = np.mean(test_runs, axis=0)
                 threshold = correct_chain_threshold(
                     data.rows,
                     validation,
                     validation_scores,
                     target_false_alarm_rate=config.target_correct_chain_false_alarm,
-                )
-                test_scores = trained.predict(
-                    data,
-                    test,
-                    batch_size=config.training.batch_size,
-                    device=config.training.device,
                 )
                 global_scores[arm][test] = test_scores
                 thresholds[arm][held_domain] = threshold
@@ -480,13 +515,58 @@ class ProcessBenchMonitorExperiment:
                 )
                 metrics.update(
                     {
-                        "validation_nll": trained.validation_nll,
-                        "epochs_trained": trained.epochs_trained,
+                        "validation_nll": float(
+                            np.mean([run.validation_nll for run in trained_runs])
+                        ),
+                        "epochs_trained": [
+                            run.epochs_trained for run in trained_runs
+                        ],
                         "parameters": int(
-                            sum(value.numel() for value in trained.model.parameters())
+                            sum(
+                                value.numel()
+                                for value in trained_runs[0].model.parameters()
+                            )
                         ),
                     }
                 )
+                if arm == "depth_graph_shuffled":
+                    metrics["topology_runs"] = []
+                    for topology_index, run_validation, run_test, run in zip(
+                        topology_indices,
+                        validation_runs,
+                        test_runs,
+                        trained_runs,
+                    ):
+                        assert topology_index is not None
+                        run_threshold = correct_chain_threshold(
+                            data.rows,
+                            validation,
+                            run_validation,
+                            target_false_alarm_rate=(
+                                config.target_correct_chain_false_alarm
+                            ),
+                        )
+                        topology_scores[int(topology_index)][test] = run_test
+                        topology_thresholds[int(topology_index)][
+                            held_domain
+                        ] = run_threshold
+                        run_metrics = evaluate_boundary_scores(
+                            data.rows,
+                            test,
+                            run_test,
+                            false_alarm_threshold=run_threshold,
+                        )
+                        run_metrics.update(
+                            {
+                                "topology_index": int(topology_index),
+                                "permutation_seed": (
+                                    config.seed + 10_000 + int(topology_index)
+                                ),
+                                "validation_nll": run.validation_nll,
+                                "epochs_trained": run.epochs_trained,
+                            }
+                        )
+                        metrics["topology_runs"].append(run_metrics)
                 fold_report["arms"][arm] = metrics
                 for index, score in zip(test, test_scores):
                     row = data.rows[int(index)]
@@ -506,11 +586,44 @@ class ProcessBenchMonitorExperiment:
                             ensure_ascii=False,
                         )
                     )
+                if arm == "depth_graph_shuffled":
+                    for topology_index, run_test in zip(topology_indices, test_runs):
+                        for index, score in zip(test, run_test):
+                            row = data.rows[int(index)]
+                            prediction_lines.append(
+                                json.dumps(
+                                    {
+                                        "arm": (
+                                            "depth_graph_shuffled_seed_"
+                                            f"{topology_index}"
+                                        ),
+                                        "held_domain": held_domain,
+                                        "chain_id": row.chain_id,
+                                        "problem_hash": row.problem_hash,
+                                        "candidate_step": row.candidate_step,
+                                        "first_error_step": row.first_error_step,
+                                        "label": row.label,
+                                        "score": float(score),
+                                        "threshold": float(
+                                            topology_thresholds[int(topology_index)][
+                                                held_domain
+                                            ]
+                                        ),
+                                    },
+                                    ensure_ascii=False,
+                                )
+                            )
             folds[held_domain] = fold_report
 
         for arm, scores in global_scores.items():
             if not np.isfinite(scores).all():
                 raise RuntimeError(f"arm {arm} did not score every outer-test row")
+        if "depth_graph_shuffled" in config.arms:
+            for topology_index, scores in topology_scores.items():
+                if not np.isfinite(scores).all():
+                    raise RuntimeError(
+                        f"shuffled topology {topology_index} did not score every row"
+                    )
         all_indices = np.arange(len(data.rows), dtype=np.int64)
         aggregate = {
             arm: {
@@ -550,6 +663,20 @@ class ProcessBenchMonitorExperiment:
                     repeats=config.bootstrap_repeats,
                     seed=config.seed,
                 )
+            if "depth_graph_shuffled" in config.arms:
+                for topology_index, shuffled_scores in topology_scores.items():
+                    contrasts[
+                        f"depth_graph_vs_depth_graph_shuffled_seed_{topology_index}"
+                    ] = paired_problem_bootstrap(
+                        data.rows,
+                        all_indices,
+                        candidate_scores=global_scores["depth_graph"],
+                        baseline_scores=shuffled_scores,
+                        candidate_thresholds=thresholds["depth_graph"],
+                        baseline_thresholds=topology_thresholds[topology_index],
+                        repeats=config.bootstrap_repeats,
+                        seed=config.seed,
+                    )
         summary = {
             "task": "future_free_first_error_boundary_monitoring",
             "claim_scope": "predictive_association_not_attention_or_ffn_root_cause",
@@ -561,6 +688,7 @@ class ProcessBenchMonitorExperiment:
             "domains": list(config.domains),
             "layers": data.layer_ids.tolist(),
             "hidden_size": data.hidden_size,
+            "layer_axis_kind": data.layer_axis_kind,
             "folds": folds,
             "domain_macro": aggregate,
             "paired_contrasts": contrasts,

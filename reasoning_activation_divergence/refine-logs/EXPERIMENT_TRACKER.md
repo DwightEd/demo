@@ -5,7 +5,7 @@
 | Run | 内容 | 状态 |
 |---|---|---|
 | RDGM-00 | pre-step 数据合同与无未来泄漏测试 | complete（本地） |
-| RDGM-01 | depth graph / layer set / shuffled adjacency 测试 | complete（本地） |
+| RDGM-01 | depth graph / layer set / 零原边多拓扑 shuffled adjacency 测试 | complete（本地） |
 | RDGM-02 | grouped validation、train-only normalization、五实验臂训练 | complete（本地） |
 | RDGM-03 | 首错定位、正确链阈值、配对 bootstrap | complete（本地） |
 | RDGM-04 | 每域 32 chain smoke | pending（远端） |

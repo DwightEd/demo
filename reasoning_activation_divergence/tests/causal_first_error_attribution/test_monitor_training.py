@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from functional_divergence.causal_first_error_attribution.monitor_data import (
     MonitorBoundaryRow,
@@ -130,3 +131,24 @@ def test_training_scores_each_requested_boundary_for_every_arm(tmp_path) -> None
         assert scores.shape == (len(validation),)
         assert np.all((0.0 <= scores) & (scores <= 1.0))
         assert trained.arm == arm
+
+
+def test_inner_split_fails_when_event_and_correct_validation_is_impossible(
+    tmp_path,
+) -> None:
+    data = _data(tmp_path)
+    only_error_groups = np.asarray(
+        [
+            i
+            for i, row in enumerate(data.rows)
+            if row.domain != "omnimath" and row.first_error_step >= 0
+        ]
+    )
+
+    with pytest.raises(ValueError, match="fully-correct chain"):
+        build_inner_group_split(
+            data.rows,
+            only_error_groups,
+            validation_fraction=0.34,
+            seed=17,
+        )

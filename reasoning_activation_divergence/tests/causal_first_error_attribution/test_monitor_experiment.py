@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
+import pytest
 
 from functional_divergence.causal_first_error_attribution.monitor_data import (
     MonitorBoundaryRow,
 )
 from functional_divergence.causal_first_error_attribution.monitor_experiment import (
+    MonitorExperimentConfig,
+    ProcessBenchMonitorExperiment,
     correct_chain_threshold,
     evaluate_boundary_scores,
     paired_problem_bootstrap,
+)
+from functional_divergence.causal_first_error_attribution.monitor_training import (
+    MonitorTrainingConfig,
 )
 
 
@@ -51,6 +59,21 @@ def test_false_alarm_threshold_is_selected_on_correct_chain_maxima() -> None:
     )
 
     assert threshold == 0.8
+
+
+def test_false_alarm_threshold_requires_correct_validation_chains() -> None:
+    rows = [
+        _row("error", "p1", "gsm8k", 0, 1),
+        _row("error", "p1", "gsm8k", 1, 1),
+    ]
+
+    with pytest.raises(ValueError, match="fully-correct validation chain"):
+        correct_chain_threshold(
+            rows,
+            np.arange(2),
+            np.asarray([0.1, 0.9]),
+            target_false_alarm_rate=0.1,
+        )
 
 
 def test_boundary_evaluation_reports_localization_and_problem_balanced_rows() -> None:
@@ -135,3 +158,90 @@ def test_localization_is_problem_balanced_when_one_problem_has_more_chains() -> 
 
     assert report["top1_localization"] == 0.5
     assert report["mrr"] == 0.75
+
+
+def _write_integration_domain(root: Path, domain: str) -> None:
+    geometry = root / domain / "geometry"
+    geometry.mkdir(parents=True)
+    states = np.arange(8 * 3 * 4, dtype=np.float32).reshape(8, 3, 4) / 100.0
+    np.save(geometry / "states.npy", states)
+    ranges = np.asarray([[[3, 4], [5, 6]]] * 4, dtype=np.int64)
+    scores = np.asarray([[[0.1, 0.2], [0.3, 0.4]]] * 4, dtype=np.float32)
+    np.savez_compressed(
+        geometry / "trace.npz",
+        chain_idx=np.arange(4, dtype=np.int64),
+        gold_error_step=np.asarray([1, 1, 1, -1], dtype=np.int64),
+        n_steps=np.asarray([2, 2, 2, 2], dtype=np.int64),
+        step_token_ranges=ranges,
+        step_scores=scores,
+        step_score_names=np.asarray(["token_entropy", "token_nll"]),
+        problem_group_id=np.asarray([f"{domain}-g{i}" for i in range(4)]),
+        problem_ids=np.asarray(
+            [f"problem_sha256:{domain}-{i}" for i in range(4)]
+        ),
+        dataset=np.asarray([domain] * 4),
+        step_pre_state_memmap_path=np.asarray("states.npy", dtype=object),
+        step_pre_state_memmap_count=np.asarray(8, dtype=np.int64),
+        step_pre_state_vector_chain_idx=np.repeat(np.arange(4), 2),
+        step_pre_state_vector_step_idx=np.tile(np.arange(2), 4),
+        step_layer_state_vector_layers=np.asarray([1, 2, 3]),
+        state_representation_kind=np.asarray("hidden_state", dtype=object),
+        hidden_state_token_semantics=np.asarray(
+            "h_i_after_reading_token_i", dtype=object
+        ),
+        step_prediction_position_shift=np.asarray(-1, dtype=np.int8),
+        metadata_json=np.asarray(
+            [
+                '{"step_pre_state_temporal_semantics":'
+                '"causal_before_first_step_token"}'
+            ]
+            * 4,
+            dtype=object,
+        ),
+    )
+
+
+def test_experiment_runs_from_geometry_files_to_durable_lodo_results(tmp_path) -> None:
+    domains = ("gsm8k", "math", "omnimath")
+    for domain in domains:
+        _write_integration_domain(tmp_path / "data", domain)
+    output = tmp_path / "results"
+
+    summary = ProcessBenchMonitorExperiment(
+        MonitorExperimentConfig(
+            data_root=tmp_path / "data",
+            domains=domains,
+            output_dir=output,
+            arms=("depth_graph_shuffled", "depth_graph"),
+            validation_fraction=0.25,
+            bootstrap_repeats=10,
+            shuffle_repeats=2,
+            training=MonitorTrainingConfig(
+                width=4,
+                message_passing_steps=1,
+                epochs=1,
+                patience=1,
+                batch_size=4,
+                learning_rate=1e-3,
+                device="cpu",
+                show_progress=False,
+            ),
+        )
+    ).run()
+
+    assert summary["rows"] == 24
+    assert summary["events"] == 9
+    assert set(summary["folds"]) == set(domains)
+    assert "depth_graph_vs_depth_graph_shuffled" in summary["paired_contrasts"]
+    assert (
+        "depth_graph_vs_depth_graph_shuffled_seed_0"
+        in summary["paired_contrasts"]
+    )
+    assert len(
+        summary["folds"]["gsm8k"]["arms"]["depth_graph_shuffled"][
+            "topology_runs"
+        ]
+    ) == 2
+    assert (output / "config.json").is_file()
+    assert (output / "predictions.jsonl").is_file()
+    assert (output / "summary.json").is_file()

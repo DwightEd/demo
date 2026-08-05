@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import numpy as np
 import pytest
@@ -50,7 +51,24 @@ def _write_domain(
         step_pre_state_vector_chain_idx=np.asarray(point_chain_ids, dtype=np.int64),
         step_pre_state_vector_step_idx=np.asarray(point_step_ids, dtype=np.int64),
         step_layer_state_vector_layers=np.asarray([1, 2, 3], dtype=np.int64),
-        state_pooling_kind=np.asarray("boundary_token", dtype=object),
+        state_representation_kind=np.asarray("hidden_state", dtype=object),
+        hidden_state_token_semantics=np.asarray(
+            "h_i_after_reading_token_i", dtype=object
+        ),
+        step_prediction_position_shift=np.asarray(-1, dtype=np.int8),
+        metadata_json=np.asarray(
+            [
+                json.dumps(
+                    {
+                        "step_pre_state_temporal_semantics": (
+                            "causal_before_first_step_token"
+                        )
+                    }
+                )
+                for _ in chain_ids
+            ],
+            dtype=object,
+        ),
     )
     return path
 
@@ -191,3 +209,76 @@ def test_monitor_loader_rejects_a_stable_problem_hash_spanning_domains(
 
     with pytest.raises(ValueError, match="problem hash spans LODO domains"):
         load_processbench_monitor_data(tmp_path, ("gsm8k", "math"))
+
+
+def test_monitor_loader_rejects_a_forged_noncausal_pre_step_view(tmp_path) -> None:
+    trace = _write_domain(
+        tmp_path,
+        "gsm8k",
+        pre_states=np.ones((1, 3, 4), dtype=np.float32),
+        chain_ids=np.asarray([1]),
+        first_errors=np.asarray([-1]),
+        step_ranges=np.asarray([[[3, 4]]]),
+        n_steps=np.asarray([1]),
+        point_chain_ids=np.asarray([1]),
+        point_step_ids=np.asarray([0]),
+        step_scores=np.asarray([[[0.1, 0.2]]]),
+    )
+    with np.load(trace, allow_pickle=True) as archive:
+        payload = {name: np.asarray(archive[name]) for name in archive.files}
+    payload["metadata_json"] = np.asarray(
+        [json.dumps({"step_pre_state_temporal_semantics": "post_step_end"})],
+        dtype=object,
+    )
+    np.savez_compressed(trace, **payload)
+
+    with pytest.raises(ValueError, match="causal pre-step semantics"):
+        load_processbench_monitor_data(tmp_path, ("gsm8k",))
+
+
+def test_monitor_loader_rejects_an_unordered_layer_axis(tmp_path) -> None:
+    trace = _write_domain(
+        tmp_path,
+        "math",
+        pre_states=np.ones((1, 3, 4), dtype=np.float32),
+        chain_ids=np.asarray([1]),
+        first_errors=np.asarray([-1]),
+        step_ranges=np.asarray([[[3, 4]]]),
+        n_steps=np.asarray([1]),
+        point_chain_ids=np.asarray([1]),
+        point_step_ids=np.asarray([0]),
+        step_scores=np.asarray([[[0.1, 0.2]]]),
+    )
+    with np.load(trace, allow_pickle=True) as archive:
+        payload = {name: np.asarray(archive[name]) for name in archive.files}
+    payload["step_layer_state_vector_layers"] = np.asarray([1, 3, 2])
+    np.savez_compressed(trace, **payload)
+
+    with pytest.raises(ValueError, match="strictly increasing"):
+        load_processbench_monitor_data(tmp_path, ("math",))
+
+
+def test_smoke_limit_samples_complete_error_and_correct_problem_groups(
+    tmp_path,
+) -> None:
+    _write_domain(
+        tmp_path,
+        "gsm8k",
+        pre_states=np.ones((6, 3, 4), dtype=np.float32),
+        chain_ids=np.asarray([1, 2, 3]),
+        first_errors=np.asarray([1, 1, -1]),
+        step_ranges=np.asarray([[[3, 4], [5, 6]]] * 3),
+        n_steps=np.asarray([2, 2, 2]),
+        point_chain_ids=np.repeat(np.asarray([1, 2, 3]), 2),
+        point_step_ids=np.tile(np.asarray([0, 1]), 3),
+        step_scores=np.asarray([[[0.1, 0.2], [0.3, 0.4]]] * 3),
+    )
+
+    data = load_processbench_monitor_data(
+        tmp_path, ("gsm8k",), max_chains_per_domain=2
+    )
+
+    selected = {row.chain_id for row in data.rows}
+    assert len(selected) == 2
+    assert any(row.first_error_step == -1 for row in data.rows)
+    assert any(row.first_error_step >= 0 for row in data.rows)
