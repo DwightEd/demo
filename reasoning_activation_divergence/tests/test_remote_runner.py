@@ -75,10 +75,7 @@ def test_hidden_geometry_runner_has_causal_first_error_modes() -> None:
     assert "--method component_resolved_hazard" not in script
     assert "source activate" not in script
     assert "conda activate" not in script
-    assert (
-        'if [[ "${MODE}" != causal-monitor-* && ! -f "${aligned_trace}" ]]; then'
-        in script
-    )
+    assert 'if [[ ! -f "${aligned_trace}" ]]; then' in script
     assert "--shuffle-repeats 2" in script
     assert "--shuffle-repeats 3" in script
 

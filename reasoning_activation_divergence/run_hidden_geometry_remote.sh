@@ -64,7 +64,7 @@ for domain in "${inspected_domains[@]}"; do
     echo "trace.npz alone is insufficient; extract response-token hidden-state shards first." >&2
     exit 3
   fi
-  if [[ "${MODE}" != causal-monitor-* && ! -f "${aligned_trace}" ]]; then
+  if [[ ! -f "${aligned_trace}" ]]; then
     echo "missing aligned trace with full token IDs: ${aligned_trace}" >&2
     exit 3
   fi

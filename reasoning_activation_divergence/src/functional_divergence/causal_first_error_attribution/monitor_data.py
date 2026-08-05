@@ -31,6 +31,14 @@ class _BoundaryStateStore:
 
 
 @dataclass(frozen=True)
+class _OutputChain:
+    scores: np.ndarray
+    n_steps: int
+    first_error_step: int
+    step_ranges: np.ndarray
+
+
+@dataclass(frozen=True)
 class ProcessBenchMonitorData:
     rows: tuple[MonitorBoundaryRow, ...]
     stores: tuple[_BoundaryStateStore, ...]
@@ -204,6 +212,75 @@ def _select_chain_rows(
     return np.asarray(sorted(selected), dtype=np.int64)
 
 
+def _load_output_chains(
+    path: Path,
+    domain: str,
+    output_features: tuple[str, ...],
+) -> dict[int, _OutputChain]:
+    if not path.is_file():
+        raise FileNotFoundError(f"missing aligned output trace: {path}")
+    with np.load(path, allow_pickle=True) as archive:
+        required = {
+            "chain_idx",
+            "gold_error_step",
+            "n_steps",
+            "step_token_ranges",
+            "step_scores",
+            "step_score_names",
+            "dataset",
+        }
+        missing = sorted(required.difference(archive.files))
+        if missing:
+            raise ValueError(f"{path}: output trace is missing required arrays {missing}")
+
+        chain_ids = np.asarray(archive["chain_idx"], dtype=np.int64).reshape(-1)
+        count = len(chain_ids)
+        if len(np.unique(chain_ids)) != count:
+            raise ValueError(f"{path}: chain_idx must be unique")
+        first_errors = np.asarray(archive["gold_error_step"], dtype=np.int64).reshape(-1)
+        n_steps = np.asarray(archive["n_steps"], dtype=np.int64).reshape(-1)
+        if first_errors.shape != (count,) or n_steps.shape != (count,):
+            raise ValueError(f"{path}: labels and n_steps must be record-aligned")
+        ranges_all = np.asarray(archive["step_token_ranges"], dtype=object)
+        if len(ranges_all) != count:
+            raise ValueError(f"{path}: step_token_ranges is not record-aligned")
+
+        score_names = tuple(str(value) for value in archive["step_score_names"])
+        unknown = sorted(set(output_features).difference(score_names))
+        if unknown:
+            raise ValueError(
+                f"{path}: requested output features are absent: {unknown}; "
+                f"available={list(score_names)}"
+            )
+        score_indices = np.asarray(
+            [score_names.index(name) for name in output_features], dtype=np.int64
+        )
+        all_scores = np.asarray(archive["step_scores"], dtype=np.float32)
+        if all_scores.ndim != 3 or all_scores.shape[0] != count:
+            raise ValueError(f"{path}: step_scores must have shape [chain,step,feature]")
+        datasets = _record_vector(archive, ("dataset",), count)
+
+        rows: dict[int, _OutputChain] = {}
+        for row, chain_id in enumerate(chain_ids):
+            if str(datasets[row]) != domain:
+                raise ValueError(f"{path}: dataset field disagrees with directory {domain}")
+            step_count = int(n_steps[row])
+            if not 1 <= step_count <= all_scores.shape[1]:
+                raise ValueError(f"{path}: chain {chain_id} has invalid n_steps={step_count}")
+            ranges = np.asarray(ranges_all[row], dtype=np.int64)[:step_count]
+            if ranges.shape != (step_count, 2):
+                raise ValueError(f"{path}: chain {chain_id} has invalid step_token_ranges")
+            rows[int(chain_id)] = _OutputChain(
+                scores=np.asarray(
+                    all_scores[row, :step_count][:, score_indices], dtype=np.float32
+                ),
+                n_steps=step_count,
+                first_error_step=int(first_errors[row]),
+                step_ranges=ranges,
+            )
+    return rows
+
+
 def _load_domain(
     data_root: Path,
     domain: str,
@@ -224,8 +301,6 @@ def _load_domain(
             "gold_error_step",
             "n_steps",
             "step_token_ranges",
-            "step_scores",
-            "step_score_names",
             "step_pre_state_memmap_path",
             "step_pre_state_memmap_count",
             "step_pre_state_vector_chain_idx",
@@ -251,20 +326,6 @@ def _load_domain(
         ranges_all = np.asarray(archive["step_token_ranges"])
         if ranges_all.shape[0] != count:
             raise ValueError(f"{trace_path}: step_token_ranges is not record-aligned")
-
-        score_names = tuple(str(value) for value in archive["step_score_names"])
-        unknown = sorted(set(output_features).difference(score_names))
-        if unknown:
-            raise ValueError(
-                f"{trace_path}: requested output features are absent: {unknown}; "
-                f"available={list(score_names)}"
-            )
-        score_indices = np.asarray(
-            [score_names.index(name) for name in output_features], dtype=np.int64
-        )
-        all_scores = np.asarray(archive["step_scores"], dtype=np.float32)
-        if all_scores.ndim != 3 or all_scores.shape[0] != count:
-            raise ValueError(f"{trace_path}: step_scores must have shape [chain,step,feature]")
 
         groups = _record_vector(
             archive, ("problem_group_id", "problem_group_ids", "problem_ids"), count
@@ -334,6 +395,11 @@ def _load_domain(
             )
 
         rows: list[MonitorBoundaryRow] = []
+        output_chains = _load_output_chains(
+            data_root / domain / "selected" / "trace.npz",
+            domain,
+            output_features,
+        )
         for chain_row in selected_rows:
             chain_id = int(chain_ids[chain_row])
             step_count = int(n_steps[chain_row])
@@ -343,7 +409,20 @@ def _load_domain(
                 raise ValueError(f"chain {chain_id}: invalid unpadded step_token_ranges")
             if np.any(ranges[:, 1] < ranges[:, 0]) or np.any(np.diff(ranges[:, 0]) <= 0):
                 raise ValueError(f"chain {chain_id}: invalid or unordered step_token_ranges")
-            scores = all_scores[chain_row, :step_count][:, score_indices]
+            if chain_id not in output_chains:
+                raise ValueError(
+                    f"{trace_path}: chain {chain_id} is absent from selected/trace.npz"
+                )
+            output = output_chains[chain_id]
+            if output.n_steps != step_count or output.first_error_step != first_error:
+                raise ValueError(
+                    f"chain {chain_id}: geometry and output trace labels disagree"
+                )
+            if not np.array_equal(output.step_ranges, ranges):
+                raise ValueError(
+                    f"chain {chain_id}: geometry and output step_token_ranges disagree"
+                )
+            scores = output.scores
             group = f"{domain}::{groups[chain_row]}"
             problem_hash = _problem_hash(domain, hashes[chain_row])
             for step in _risk_set(first_error, step_count):
@@ -394,10 +473,11 @@ def load_processbench_monitor_data(
     output_features: Iterable[str] = ("token_entropy", "token_nll"),
     max_chains_per_domain: int = 0,
 ) -> ProcessBenchMonitorData:
-    """Load exact pre-step states and construct the first-error risk set.
+    """Load pre-step states plus aligned output summaries and build the risk set.
 
-    Error chains contribute steps ``0..t*`` and correct chains contribute all
-    steps.  No row after the first error is exposed to the monitor.
+    States come from ``geometry/trace.npz`` and output summaries from
+    ``selected/trace.npz``. Error chains contribute steps ``0..t*`` and
+    correct chains contribute all steps; no post-error row is exposed.
     """
 
     root = Path(data_root).expanduser()

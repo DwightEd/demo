@@ -26,8 +26,20 @@ def _write_domain(
 ) -> Path:
     geometry = root / domain / "geometry"
     geometry.mkdir(parents=True)
+    selected = root / domain / "selected"
+    selected.mkdir(parents=True)
     state_path = geometry / "trace.states.pre.test.npy"
     np.save(state_path, np.asarray(pre_states, dtype=np.float32))
+    np.savez_compressed(
+        selected / "trace.npz",
+        chain_idx=np.asarray(chain_ids, dtype=np.int64),
+        gold_error_step=np.asarray(first_errors, dtype=np.int64),
+        n_steps=np.asarray(n_steps, dtype=np.int64),
+        step_token_ranges=np.asarray(step_ranges, dtype=np.int64),
+        dataset=np.asarray([domain] * len(chain_ids), dtype=object),
+        step_scores=np.asarray(step_scores, dtype=np.float32),
+        step_score_names=np.asarray(["token_entropy", "token_nll"]),
+    )
     path = geometry / "trace.npz"
     np.savez_compressed(
         path,
@@ -44,8 +56,8 @@ def _write_domain(
             dtype=object,
         ),
         dataset=np.asarray([domain] * len(chain_ids), dtype=object),
-        step_scores=np.asarray(step_scores, dtype=np.float32),
-        step_score_names=np.asarray(["token_entropy", "token_nll"]),
+        step_scores=np.empty((*np.asarray(step_scores).shape[:2], 0), dtype=np.float32),
+        step_score_names=np.asarray([], dtype=object),
         step_pre_state_memmap_path=np.asarray(state_path.name, dtype=object),
         step_pre_state_memmap_count=np.asarray(len(pre_states), dtype=np.int64),
         step_pre_state_vector_chain_idx=np.asarray(point_chain_ids, dtype=np.int64),
@@ -118,7 +130,7 @@ def test_monitor_risk_set_includes_step_zero_and_excludes_post_error(tmp_path) -
 
 def test_output_context_uses_only_completed_steps(tmp_path) -> None:
     states = np.ones((2, 3, 4), dtype=np.float32)
-    trace = _write_domain(
+    _write_domain(
         tmp_path,
         "math",
         pre_states=states,
@@ -132,11 +144,12 @@ def test_output_context_uses_only_completed_steps(tmp_path) -> None:
     )
     original = load_processbench_monitor_data(tmp_path, ("math",))
 
-    with np.load(trace, allow_pickle=True) as archive:
+    output_trace = tmp_path / "math" / "selected" / "trace.npz"
+    with np.load(output_trace, allow_pickle=True) as archive:
         payload = {name: np.asarray(archive[name]) for name in archive.files}
     payload["step_scores"] = payload["step_scores"].copy()
     payload["step_scores"][0, 1] = [-999.0, -999.0]
-    np.savez_compressed(trace, **payload)
+    np.savez_compressed(output_trace, **payload)
     changed = load_processbench_monitor_data(tmp_path, ("math",))
 
     # Candidate step 1 can see step 0, but never its own output summary.

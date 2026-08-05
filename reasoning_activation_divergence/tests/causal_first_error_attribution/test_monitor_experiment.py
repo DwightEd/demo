@@ -163,18 +163,30 @@ def test_localization_is_problem_balanced_when_one_problem_has_more_chains() -> 
 def _write_integration_domain(root: Path, domain: str) -> None:
     geometry = root / domain / "geometry"
     geometry.mkdir(parents=True)
+    selected = root / domain / "selected"
+    selected.mkdir(parents=True)
     states = np.arange(8 * 4 * 4, dtype=np.float32).reshape(8, 4, 4) / 100.0
     np.save(geometry / "states.npy", states)
     ranges = np.asarray([[[3, 4], [5, 6]]] * 4, dtype=np.int64)
     scores = np.asarray([[[0.1, 0.2], [0.3, 0.4]]] * 4, dtype=np.float32)
     np.savez_compressed(
-        geometry / "trace.npz",
+        selected / "trace.npz",
         chain_idx=np.arange(4, dtype=np.int64),
         gold_error_step=np.asarray([1, 1, 1, -1], dtype=np.int64),
         n_steps=np.asarray([2, 2, 2, 2], dtype=np.int64),
         step_token_ranges=ranges,
         step_scores=scores,
         step_score_names=np.asarray(["token_entropy", "token_nll"]),
+        dataset=np.asarray([domain] * 4),
+    )
+    np.savez_compressed(
+        geometry / "trace.npz",
+        chain_idx=np.arange(4, dtype=np.int64),
+        gold_error_step=np.asarray([1, 1, 1, -1], dtype=np.int64),
+        n_steps=np.asarray([2, 2, 2, 2], dtype=np.int64),
+        step_token_ranges=ranges,
+        step_scores=np.empty((4, 2, 0), dtype=np.float32),
+        step_score_names=np.asarray([], dtype=object),
         problem_group_id=np.asarray([f"{domain}-g{i}" for i in range(4)]),
         problem_ids=np.asarray(
             [f"problem_sha256:{domain}-{i}" for i in range(4)]
