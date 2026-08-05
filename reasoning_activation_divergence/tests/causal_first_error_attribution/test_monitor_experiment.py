@@ -103,3 +103,35 @@ def test_paired_bootstrap_tests_graph_against_each_structural_control() -> None:
     assert report["top1_gain"]["point"] == 1.0
     assert report["top1_gain"]["ci_low"] > 0.0
     assert report["nll_improvement"]["ci_low"] > 0.0
+
+
+def test_localization_is_problem_balanced_when_one_problem_has_more_chains() -> None:
+    rows = []
+    scores = []
+    # Two failed localizations from p-many and one successful localization
+    # from p-single must average to 0.5 by problem, not 1/3 by chain.
+    for chain in ("many-a", "many-b"):
+        rows.extend(
+            [
+                _row(chain, "p-many", "math", 0, 1),
+                _row(chain, "p-many", "math", 1, 1),
+            ]
+        )
+        scores.extend([0.9, 0.1])
+    rows.extend(
+        [
+            _row("single", "p-single", "math", 0, 1),
+            _row("single", "p-single", "math", 1, 1),
+        ]
+    )
+    scores.extend([0.1, 0.9])
+
+    report = evaluate_boundary_scores(
+        rows,
+        np.arange(len(rows)),
+        np.asarray(scores),
+        false_alarm_threshold=0.5,
+    )
+
+    assert report["top1_localization"] == 0.5
+    assert report["mrr"] == 0.75

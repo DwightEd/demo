@@ -166,3 +166,28 @@ def test_monitor_loader_requires_the_causal_pre_step_view(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="step_pre_state_memmap_path"):
         load_processbench_monitor_data(tmp_path, ("gsm8k",))
+
+
+def test_monitor_loader_rejects_a_stable_problem_hash_spanning_domains(
+    tmp_path,
+) -> None:
+    for domain in ("gsm8k", "math"):
+        trace = _write_domain(
+            tmp_path,
+            domain,
+            pre_states=np.ones((1, 3, 4), dtype=np.float32),
+            chain_ids=np.asarray([1]),
+            first_errors=np.asarray([-1]),
+            step_ranges=np.asarray([[[3, 4]]]),
+            n_steps=np.asarray([1]),
+            point_chain_ids=np.asarray([1]),
+            point_step_ids=np.asarray([0]),
+            step_scores=np.asarray([[[0.1, 0.2]]]),
+        )
+        with np.load(trace, allow_pickle=True) as archive:
+            payload = {name: np.asarray(archive[name]) for name in archive.files}
+        payload["problem_ids"] = np.asarray(["problem_sha256:shared"])
+        np.savez_compressed(trace, **payload)
+
+    with pytest.raises(ValueError, match="problem hash spans LODO domains"):
+        load_processbench_monitor_data(tmp_path, ("gsm8k", "math"))

@@ -85,13 +85,17 @@ def _arms(value: str) -> tuple[str, ...]:
     return result
 
 
-def _add_data_arguments(parser: argparse.ArgumentParser) -> None:
+def _add_processbench_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--data-root", required=True, type=Path)
     parser.add_argument(
         "--domains",
         type=_domains,
         default=("gsm8k", "math", "olympiadbench", "omnimath"),
     )
+
+
+def _add_data_arguments(parser: argparse.ArgumentParser) -> None:
+    _add_processbench_arguments(parser)
     parser.add_argument("--pair-directory", default="causal_first_error_v1")
 
 
@@ -142,7 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
         "train-monitor",
         help="train the future-free ProcessBench residual-depth monitor",
     )
-    _add_data_arguments(monitor)
+    _add_processbench_arguments(monitor)
     monitor.add_argument("--output-dir", required=True, type=Path)
     monitor.add_argument("--arms", type=_arms, default=MONITOR_ARMS)
     monitor.add_argument(

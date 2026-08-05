@@ -1,5 +1,25 @@
 # 远端前台运行 hidden-state geometry
 
+## 当前首错检测入口（RDGM）
+
+当前研究主线不再使用旧的 step-mean/PCA/Ridge probe。已有 whole-layer pre-step geometry 可直接运行：
+
+```bash
+cd /share/home/tm902089733300000/a903202310/lys/research/demo/reasoning_activation_divergence
+git pull --ff-only
+PYTHON_BIN=/share/home/tm902089733300000/a903202310/lys/conda_envs/research/bin/python \
+  bash run_hidden_geometry_remote.sh causal-monitor-smoke
+```
+
+smoke 通过后运行全量：
+
+```bash
+PYTHON_BIN=/share/home/tm902089733300000/a903202310/lys/conda_envs/research/bin/python \
+  bash run_hidden_geometry_remote.sh causal-monitor-full
+```
+
+RDGM 需要每个领域的 `geometry/trace.npz` 与其引用的 `trace.states.pre.*.npy`，不需要 causal pair，也不重新加载 Llama。命令全程在前台显示进度。详细方法见 [PROCESSBENCH_GRAPH_MONITOR.md](PROCESSBENCH_GRAPH_MONITOR.md)。
+
 ## 1. 环境与路径
 
 ```bash

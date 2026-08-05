@@ -10,7 +10,7 @@ import numpy as np
 from sklearn.metrics import average_precision_score, roc_auc_score
 from tqdm.auto import tqdm
 
-from .evaluation import MonitorRow, localization_metrics
+from .evaluation import MonitorRow
 from .monitor_data import (
     MonitorBoundaryRow,
     ProcessBenchMonitorData,
@@ -120,7 +120,7 @@ def evaluate_boundary_scores(
         )
         for index, score in zip(selected, probability)
     ]
-    report = localization_metrics(
+    report = _problem_balanced_localization(
         monitor_rows, false_alarm_threshold=float(false_alarm_threshold)
     )
     report.update(
@@ -145,6 +145,83 @@ def evaluate_boundary_scores(
         }
     )
     return report
+
+
+def _problem_balanced_localization(
+    rows: Sequence[MonitorRow], *, false_alarm_threshold: float
+) -> dict[str, float | int]:
+    chains: dict[str, list[MonitorRow]] = defaultdict(list)
+    for row in rows:
+        chains[row.chain_id].append(row)
+    error_by_problem: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    correct_by_problem: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    error_chains = 0
+    correct_chains = 0
+    for chain_rows in chains.values():
+        gold_values = {row.first_error_step for row in chain_rows}
+        if len(gold_values) != 1:
+            raise ValueError("first_error_step must be constant within a chain")
+        gold = gold_values.pop()
+        problem_values = {row.problem_hash for row in chain_rows}
+        if len(problem_values) != 1:
+            raise ValueError("problem_hash must be constant within a chain")
+        problem = problem_values.pop()
+        if gold == -1:
+            alarms = [row.score >= false_alarm_threshold for row in chain_rows]
+            correct_by_problem[problem].append(
+                (float(any(alarms)), float(np.mean(alarms)))
+            )
+            correct_chains += 1
+            continue
+        target = [row for row in chain_rows if row.candidate_step == gold]
+        if len(target) != 1:
+            raise ValueError("an error chain must contain one first-error candidate")
+        ordered = sorted(
+            chain_rows, key=lambda row: (-row.score, row.candidate_step)
+        )
+        rank = next(
+            position
+            for position, row in enumerate(ordered, start=1)
+            if row.candidate_step == gold
+        )
+        error_by_problem[problem].append((float(rank == 1), 1.0 / rank))
+        error_chains += 1
+    if not error_by_problem:
+        raise ValueError("localization requires at least one error chain")
+    top1 = np.mean(
+        [np.mean([value[0] for value in chains]) for chains in error_by_problem.values()]
+    )
+    mrr = np.mean(
+        [np.mean([value[1] for value in chains]) for chains in error_by_problem.values()]
+    )
+    chain_false_alarm = (
+        np.mean(
+            [
+                np.mean([value[0] for value in chains])
+                for chains in correct_by_problem.values()
+            ]
+        )
+        if correct_by_problem
+        else float("nan")
+    )
+    step_false_alarm = (
+        np.mean(
+            [
+                np.mean([value[1] for value in chains])
+                for chains in correct_by_problem.values()
+            ]
+        )
+        if correct_by_problem
+        else float("nan")
+    )
+    return {
+        "error_chains": error_chains,
+        "correct_chains": correct_chains,
+        "top1_localization": float(top1),
+        "mrr": float(mrr),
+        "correct_chain_false_alarm_rate": float(chain_false_alarm),
+        "correct_step_false_alarm_rate": float(step_false_alarm),
+    }
 
 
 def _chain_rank(

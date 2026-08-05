@@ -4,6 +4,8 @@
 
 完整方案见 [GPT56_CFEA_DESIGN.md](refine-logs/GPT56_CFEA_DESIGN.md)。旧的 `hidden_state_geometry` 与 `component_resolved_hazard` 保留用于复现实验历史，不再是机制归因的推荐入口。
 
+自然 ProcessBench 的首错检测现由 **RDGM（Residual Depth Graph Monitor）** 承担：它读取步骤生成前的完整 `[layer, hidden]` 状态，比较真实深度图、无序层和打乱邻接对照。实现和运行方式见 [PROCESSBENCH_GRAPH_MONITOR.md](PROCESSBENCH_GRAPH_MONITOR.md)。
+
 ## CFEA 的执行路径
 
 入口是：
@@ -29,6 +31,7 @@ audit
 - `intervene`：仅对 `controlled_root` pair 做 Attention×FFN 四格 patch 与 pre-state patch。
 - `summarize`：汇总已保存干预；null controls 缺失时只报告 `controls_pending`。
 - `evaluate-monitor`：按链计算首错 Top-1、MRR 和正确链/步骤 false alarm。
+- `train-monitor`：直接训练并评估 ProcessBench pre-step residual-depth graph monitor，不需要 causal pair。
 
 ## 文件职责
 
@@ -44,7 +47,11 @@ src/functional_divergence/causal_first_error_attribution/
 ├── interventions.py Attention、FFN、pre-state rerun patch
 ├── experiment.py    受控干预保存与汇总
 ├── analysis.py       分组 bootstrap 与 claim gate
-└── evaluation.py     LODO 分组与链内首错定位
+├── evaluation.py     LODO 分组与链内首错定位
+├── monitor_data.py   causal pre-step 风险集与 memmap 读取
+├── monitor_models.py residual-depth graph 与结构对照
+├── monitor_training.py 分组训练、归一化与 early stopping
+└── monitor_experiment.py 四域 LODO、阈值和配对 bootstrap
 ```
 
 核心类与公开方法：

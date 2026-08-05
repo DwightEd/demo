@@ -149,6 +149,11 @@ def _nuisance_features(ranges: np.ndarray, step: int) -> np.ndarray:
     )
 
 
+def _problem_hash(domain: str, value: object) -> str:
+    text = str(value)
+    return text if text.startswith("problem_sha256:") else f"{domain}::{text}"
+
+
 def _load_domain(
     data_root: Path,
     domain: str,
@@ -254,7 +259,7 @@ def _load_domain(
                 raise ValueError(f"chain {chain_id}: invalid or unordered step_token_ranges")
             scores = all_scores[chain_row, :step_count][:, score_indices]
             group = f"{domain}::{groups[chain_row]}"
-            problem_hash = f"{domain}::{hashes[chain_row]}"
+            problem_hash = _problem_hash(domain, hashes[chain_row])
             for step in _risk_set(first_error, step_count):
                 key = (chain_id, int(step))
                 if key not in state_lookup:
@@ -339,6 +344,19 @@ def load_processbench_monitor_data(
         rows.extend(domain_rows)
         stores.append(store)
     assert common_layers is not None and common_hidden_size is not None
+    hash_domains: dict[str, set[str]] = {}
+    for row in rows:
+        hash_domains.setdefault(row.problem_hash, set()).add(row.domain)
+    cross_domain = sorted(
+        problem_hash
+        for problem_hash, owners in hash_domains.items()
+        if len(owners) > 1
+    )
+    if cross_domain:
+        raise ValueError(
+            "problem hash spans LODO domains and would leak across train/test: "
+            f"{cross_domain[:3]}"
+        )
     return ProcessBenchMonitorData(
         rows=tuple(rows),
         stores=tuple(stores),
