@@ -43,6 +43,36 @@ def test_cli_exposes_separate_audit_extract_intervene_and_evaluate_commands(
     ).command == "evaluate-monitor"
 
 
+def test_cli_exposes_a_direct_processbench_monitor_training_command(tmp_path) -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(
+        [
+            "train-monitor",
+            "--data-root",
+            str(tmp_path / "data"),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--arms",
+            "output_history,layer_set,depth_graph_shuffled,depth_graph",
+            "--epochs",
+            "3",
+            "--device",
+            "cpu",
+        ]
+    )
+
+    assert args.command == "train-monitor"
+    assert args.arms == (
+        "output_history",
+        "layer_set",
+        "depth_graph_shuffled",
+        "depth_graph",
+    )
+    assert args.epochs == 3
+    assert args.device == "cpu"
+
+
 def test_extract_checks_pair_availability_before_loading_model(
     tmp_path, monkeypatch, capsys
 ) -> None:

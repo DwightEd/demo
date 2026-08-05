@@ -59,13 +59,17 @@ def test_hidden_geometry_runner_has_causal_first_error_modes() -> None:
         "causal-intervene-smoke",
         "causal-summarize-smoke",
         "causal-monitor-smoke",
+        "causal-monitor-full",
         "causal-full",
     ):
         assert f"  {mode})" in script
     assert "causal_first_error_attribution.main extract" in script
     assert "causal_first_error_attribution.main intervene" in script
     assert "causal_first_error_attribution.main summarize" in script
-    assert "causal_first_error_attribution.main evaluate-monitor" in script
+    assert "causal_first_error_attribution.main train-monitor" in script
+    assert 'geometry_trace="${DATA_ROOT}/${domain}/geometry/trace.npz"' in script
+    assert 'if [[ "${MODE}" == causal-monitor-* && ! -f "${geometry_trace}" ]]; then' in script
+    assert "MONITOR_SCORES" not in script
     assert "component-smoke)" not in script
     assert "component-full)" not in script
     assert "--method component_resolved_hazard" not in script

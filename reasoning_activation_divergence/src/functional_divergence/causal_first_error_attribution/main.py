@@ -12,6 +12,11 @@ from .experiment import (
     summarize_saved_interventions,
 )
 from .extraction import OnsetTraceExtraction, OnsetTraceExtractionConfig
+from .monitor_experiment import (
+    MonitorExperimentConfig,
+    ProcessBenchMonitorExperiment,
+)
+from .monitor_training import MONITOR_ARMS, MonitorTrainingConfig
 
 
 def _domains(value: str) -> tuple[str, ...]:
@@ -46,6 +51,37 @@ def _positive_int(value: str) -> int:
     result = int(value)
     if result < 1:
         raise argparse.ArgumentTypeError("value must be positive")
+    return result
+
+
+def _positive_float(value: str) -> float:
+    result = float(value)
+    if result <= 0:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return result
+
+
+def _fraction(value: str) -> float:
+    result = float(value)
+    if not 0.0 < result < 1.0:
+        raise argparse.ArgumentTypeError("value must lie in (0,1)")
+    return result
+
+
+def _names(value: str) -> tuple[str, ...]:
+    result = tuple(item.strip() for item in value.split(",") if item.strip())
+    if not result:
+        raise argparse.ArgumentTypeError("expected a comma-separated non-empty list")
+    return result
+
+
+def _arms(value: str) -> tuple[str, ...]:
+    result = _names(value)
+    unknown = sorted(set(result).difference(MONITOR_ARMS))
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"unknown monitor arms {unknown}; available={list(MONITOR_ARMS)}"
+        )
     return result
 
 
@@ -101,6 +137,31 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--scores", required=True, type=Path)
     evaluate.add_argument("--false-alarm-threshold", type=float, default=0.5)
     evaluate.add_argument("--output", type=Path, default=None)
+
+    monitor = commands.add_parser(
+        "train-monitor",
+        help="train the future-free ProcessBench residual-depth monitor",
+    )
+    _add_data_arguments(monitor)
+    monitor.add_argument("--output-dir", required=True, type=Path)
+    monitor.add_argument("--arms", type=_arms, default=MONITOR_ARMS)
+    monitor.add_argument(
+        "--output-features", type=_names, default=("token_entropy", "token_nll")
+    )
+    monitor.add_argument("--max-chains-per-domain", type=_nonnegative_int, default=0)
+    monitor.add_argument("--validation-fraction", type=_fraction, default=0.15)
+    monitor.add_argument("--target-correct-chain-false-alarm", type=float, default=0.1)
+    monitor.add_argument("--bootstrap", type=_positive_int, default=1000)
+    monitor.add_argument("--seed", type=int, default=17)
+    monitor.add_argument("--width", type=_positive_int, default=64)
+    monitor.add_argument("--message-passing-steps", type=_positive_int, default=2)
+    monitor.add_argument("--dropout", type=float, default=0.1)
+    monitor.add_argument("--epochs", type=_positive_int, default=20)
+    monitor.add_argument("--patience", type=_positive_int, default=4)
+    monitor.add_argument("--batch-size", type=_positive_int, default=32)
+    monitor.add_argument("--learning-rate", type=_positive_float, default=3e-4)
+    monitor.add_argument("--weight-decay", type=float, default=1e-4)
+    monitor.add_argument("--device", default="cuda")
     return parser
 
 
@@ -151,7 +212,34 @@ def _print_audit(report: dict[str, object]) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    if args.command == "evaluate-monitor":
+    if args.command == "train-monitor":
+        report = ProcessBenchMonitorExperiment(
+            MonitorExperimentConfig(
+                data_root=args.data_root,
+                domains=args.domains,
+                output_dir=args.output_dir,
+                arms=args.arms,
+                output_features=args.output_features,
+                max_chains_per_domain=args.max_chains_per_domain,
+                validation_fraction=args.validation_fraction,
+                target_correct_chain_false_alarm=args.target_correct_chain_false_alarm,
+                bootstrap_repeats=args.bootstrap,
+                seed=args.seed,
+                training=MonitorTrainingConfig(
+                    width=args.width,
+                    message_passing_steps=args.message_passing_steps,
+                    dropout=args.dropout,
+                    epochs=args.epochs,
+                    patience=args.patience,
+                    batch_size=args.batch_size,
+                    learning_rate=args.learning_rate,
+                    weight_decay=args.weight_decay,
+                    device=args.device,
+                    show_progress=True,
+                ),
+            )
+        ).run()
+    elif args.command == "evaluate-monitor":
         rows = [
             MonitorRow(**json.loads(line))
             for line in args.scores.read_text(encoding="utf-8").splitlines()

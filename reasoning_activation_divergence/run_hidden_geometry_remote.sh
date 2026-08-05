@@ -14,7 +14,6 @@ GPU_ID="${GPU_ID:-0}"
 CAUSAL_DOMAINS="${CAUSAL_DOMAINS:-gsm8k,math,olympiadbench,omnimath}"
 CAUSAL_LAYERS="${CAUSAL_LAYERS:-8,12,16,20,24,28}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/hidden_state_geometry}"
-MONITOR_SCORES="${MONITOR_SCORES:-${OUTPUT_ROOT}/monitor_scores.jsonl}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RUN_TAG="${RUN_TAG:-$(date '+%Y%m%d_%H%M%S')}"
 
@@ -39,9 +38,11 @@ fi
 for domain in "${inspected_domains[@]}"; do
   manifest="${DATA_ROOT}/${domain}/selected/trace.raw_residual_stream.npz"
   aligned_trace="${DATA_ROOT}/${domain}/selected/trace.npz"
+  geometry_trace="${DATA_ROOT}/${domain}/geometry/trace.npz"
   pair_file="${DATA_ROOT}/${domain}/selected/causal_first_error_v1/onset_pairs_v1.jsonl"
   echo "${domain}: residual_manifest=${manifest}"
   echo "${domain}: aligned_trace=${aligned_trace}"
+  echo "${domain}: geometry_trace=${geometry_trace}"
   echo "${domain}: causal_pair_file=${pair_file}"
   if [[ "${MODE}" != causal-* && ! -f "${manifest}" ]]; then
     echo "missing raw residual manifest: ${manifest}" >&2
@@ -50,6 +51,10 @@ for domain in "${inspected_domains[@]}"; do
   fi
   if [[ ! -f "${aligned_trace}" ]]; then
     echo "missing aligned trace with full token IDs: ${aligned_trace}" >&2
+    exit 3
+  fi
+  if [[ "${MODE}" == causal-monitor-* && ! -f "${geometry_trace}" ]]; then
+    echo "missing exact pre-step geometry trace: ${geometry_trace}" >&2
     exit 3
   fi
 done
@@ -87,6 +92,18 @@ except ModuleNotFoundError as exc:
 print(f"torch={torch.__version__}")
 print(f"transformers={transformers.__version__}")
 print(f"causal_python={sys.executable}")'
+}
+
+require_monitor_runtime() {
+  "${PYTHON_BIN}" -c 'import sys
+try:
+    import torch, sklearn, tqdm
+except ModuleNotFoundError as exc:
+    print(f"missing monitor dependency: {exc.name}", file=sys.stderr)
+    raise SystemExit(5)
+print(f"torch={torch.__version__}")
+print(f"sklearn={sklearn.__version__}")
+print(f"monitor_python={sys.executable}")'
 }
 
 run_causal_pytest_if_available() {
@@ -134,13 +151,22 @@ case "${MODE}" in
       --output "${OUTPUT_ROOT}/causal_summary_${RUN_TAG}.json"
     ;;
   causal-monitor-smoke)
-    if [[ ! -f "${MONITOR_SCORES}" ]]; then
-      echo "missing monitor score rows: ${MONITOR_SCORES}" >&2
-      exit 6
-    fi
-    "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main evaluate-monitor \
-      --scores "${MONITOR_SCORES}" --false-alarm-threshold 0.5 \
-      --output "${OUTPUT_ROOT}/causal_monitor_${RUN_TAG}.json"
+    run_causal_pytest_if_available
+    require_monitor_runtime
+    "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main train-monitor \
+      --data-root "${DATA_ROOT}" --domains "${CAUSAL_DOMAINS}" \
+      --output-dir "${OUTPUT_ROOT}/causal_monitor_smoke_${RUN_TAG}" \
+      --max-chains-per-domain 32 --width 32 --message-passing-steps 2 \
+      --epochs 3 --patience 2 --batch-size 16 --bootstrap 200 --device cuda
+    ;;
+  causal-monitor-full)
+    run_causal_pytest_if_available
+    require_monitor_runtime
+    "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main train-monitor \
+      --data-root "${DATA_ROOT}" --domains "${CAUSAL_DOMAINS}" \
+      --output-dir "${OUTPUT_ROOT}/causal_monitor_full_${RUN_TAG}" \
+      --max-chains-per-domain 0 --width 64 --message-passing-steps 2 \
+      --epochs 20 --patience 4 --batch-size 32 --bootstrap 2000 --device cuda
     ;;
   causal-full)
     "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main audit \
@@ -211,7 +237,7 @@ case "${MODE}" in
       --output-dir "${OUTPUT_ROOT}/innovation_full_${RUN_TAG}"
     ;;
   *)
-    echo "usage: $0 causal-audit|causal-extract-smoke|causal-intervene-smoke|causal-summarize-smoke|causal-monitor-smoke|causal-full|preflight|smoke|full|ridge-smoke|ridge-full|innovation-smoke|innovation-full" >&2
+    echo "usage: $0 causal-audit|causal-extract-smoke|causal-intervene-smoke|causal-summarize-smoke|causal-monitor-smoke|causal-monitor-full|causal-full|preflight|smoke|full|ridge-smoke|ridge-full|innovation-smoke|innovation-full" >&2
     exit 2
     ;;
 esac
