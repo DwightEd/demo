@@ -25,6 +25,9 @@ from .contracts import ChainSample, TraceSource
 from .data import load_step_end_states
 
 
+_SOURCE_REVISION_UNAVAILABLE = "unavailable_in_source_trace"
+
+
 @dataclass(frozen=True)
 class ComponentExtractionResult:
     written: tuple[Path, ...]
@@ -338,12 +341,15 @@ def _load_trace_replay_record(
             count,
             ("source_model", "model_name", "loaded_model", "observer_model"),
         ),
-        "model_revision": _provenance_field(
-            archive,
-            metadata,
-            row,
-            count,
-            ("source_model_revision", "model_revision", "revision"),
+        "model_revision": (
+            _provenance_field(
+                archive,
+                metadata,
+                row,
+                count,
+                ("source_model_revision", "model_revision", "revision"),
+            )
+            or _SOURCE_REVISION_UNAVAILABLE
         ),
         "tokenizer_name": _provenance_field(
             archive,
@@ -352,16 +358,19 @@ def _load_trace_replay_record(
             count,
             ("source_tokenizer", "tokenizer_name", "tokenizer"),
         ),
-        "tokenizer_revision": _provenance_field(
-            archive,
-            metadata,
-            row,
-            count,
-            (
-                "source_tokenizer_revision",
-                "tokenizer_revision",
-                "tokenizer_revision_id",
-            ),
+        "tokenizer_revision": (
+            _provenance_field(
+                archive,
+                metadata,
+                row,
+                count,
+                (
+                    "source_tokenizer_revision",
+                    "tokenizer_revision",
+                    "tokenizer_revision_id",
+                ),
+            )
+            or _SOURCE_REVISION_UNAVAILABLE
         ),
     }
 
@@ -552,6 +561,10 @@ def _metadata_for_artifact(
         "token_count": int(record.input_ids.shape[0]),
         "selected_layers": [int(layer) for layer in config.layers],
         "extraction_mode": "teacher_forced_backbone_attention_components_v1",
+        "model_identity_verification": (
+            "selected_layer_step_end_activation_replay_fidelity"
+        ),
+        "tokenizer_identity_verification": "stored_input_ids_without_retokenization",
         "attention_reconstruction_atol": float(config.attention_reconstruction_atol),
         "attention_reconstruction_rtol": float(config.attention_reconstruction_rtol),
         "max_attention_reconstruction_relative_error": float(

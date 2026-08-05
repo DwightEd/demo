@@ -51,7 +51,14 @@ def _sample(tmp_path, *, chain_id: int = 11, component_path=None) -> ChainSample
 
 
 def _trace(
-    tmp_path, *, attention_mask=None, gold=None, dataset=None, padded_ranges=False
+    tmp_path,
+    *,
+    attention_mask=None,
+    gold=None,
+    dataset=None,
+    padded_ranges=False,
+    model_revision="main",
+    tokenizer_revision="main",
 ) -> TraceSource:
     selected = tmp_path / "gsm8k" / "selected"
     selected.mkdir(parents=True)
@@ -91,11 +98,11 @@ def _trace(
             ["gsm8k", "gsm8k"] if dataset is None else dataset, dtype=object
         ),
         source_model=np.asarray(["meta-llama/Llama-3.1-8B-Instruct"] * 2, dtype=object),
-        source_model_revision=np.asarray(["main"] * 2, dtype=object),
+        source_model_revision=np.asarray([model_revision] * 2, dtype=object),
         source_tokenizer=np.asarray(
             ["meta-llama/Llama-3.1-8B-Instruct"] * 2, dtype=object
         ),
-        source_tokenizer_revision=np.asarray(["main"] * 2, dtype=object),
+        source_tokenizer_revision=np.asarray([tokenizer_revision] * 2, dtype=object),
     )
     return TraceSource(
         "gsm8k",
@@ -235,6 +242,37 @@ def test_load_trace_replay_record_trims_step_range_padding_by_n_steps(tmp_path) 
     record = load_trace_replay_record(source.exact_trace, sample)
 
     np.testing.assert_array_equal(record.step_token_ranges, sample.step_ranges)
+
+
+def test_auto_revision_records_missing_trace_revision_without_weakening_explicit_match(
+    tmp_path,
+) -> None:
+    source = _trace(tmp_path, model_revision="", tokenizer_revision="")
+    sample = _sample(tmp_path)
+    auto = ComponentExtractionConfig(
+        layers=(1,),
+        model_name="meta-llama/Llama-3.1-8B-Instruct",
+        model_revision="auto",
+        tokenizer_name="meta-llama/Llama-3.1-8B-Instruct",
+        tokenizer_revision="auto",
+        extractor_commit="abc123",
+    )
+
+    record = load_trace_replay_record(source.exact_trace, sample, auto)
+
+    assert record.provenance["model_revision"] == "unavailable_in_source_trace"
+    assert record.provenance["tokenizer_revision"] == "unavailable_in_source_trace"
+
+    explicit = ComponentExtractionConfig(
+        layers=(1,),
+        model_name="meta-llama/Llama-3.1-8B-Instruct",
+        model_revision="main",
+        tokenizer_name="meta-llama/Llama-3.1-8B-Instruct",
+        tokenizer_revision="main",
+        extractor_commit="abc123",
+    )
+    with pytest.raises(ValueError, match="provenance mismatch for model_revision"):
+        load_trace_replay_record(source.exact_trace, sample, explicit)
 
 
 def test_load_trace_replay_record_rejects_alignment_mismatches(tmp_path) -> None:

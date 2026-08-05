@@ -23,6 +23,13 @@ padding declared by `n_steps`, and
 rejects interior padding or any disagreement with `ChainSample` prompt counts,
 step ranges, gold label, dataset, or response-token count.
 
+When an explicit model or tokenizer revision is requested, the stored revision
+must match. With the default `auto` setting, a revision omitted by the source
+trace is recorded as `unavailable_in_source_trace`, never inferred. Checkpoint
+compatibility is then established by the mandatory selected-layer, step-end
+activation replay-fidelity check. Tokenizer compatibility relies on replaying
+the exact stored input IDs without re-tokenization.
+
 The older `outputs/attention_traces` arrays are not sufficient for the full
 four-domain experiment: they mostly cover a matched subset and mainly layer 14,
 and they store large raw attention arrays rather than full replay token IDs,
