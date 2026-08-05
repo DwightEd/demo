@@ -163,7 +163,7 @@ def test_localization_is_problem_balanced_when_one_problem_has_more_chains() -> 
 def _write_integration_domain(root: Path, domain: str) -> None:
     geometry = root / domain / "geometry"
     geometry.mkdir(parents=True)
-    states = np.arange(8 * 3 * 4, dtype=np.float32).reshape(8, 3, 4) / 100.0
+    states = np.arange(8 * 4 * 4, dtype=np.float32).reshape(8, 4, 4) / 100.0
     np.save(geometry / "states.npy", states)
     ranges = np.asarray([[[3, 4], [5, 6]]] * 4, dtype=np.int64)
     scores = np.asarray([[[0.1, 0.2], [0.3, 0.4]]] * 4, dtype=np.float32)
@@ -184,7 +184,7 @@ def _write_integration_domain(root: Path, domain: str) -> None:
         step_pre_state_memmap_count=np.asarray(8, dtype=np.int64),
         step_pre_state_vector_chain_idx=np.repeat(np.arange(4), 2),
         step_pre_state_vector_step_idx=np.tile(np.arange(2), 4),
-        step_layer_state_vector_layers=np.asarray([1, 2, 3]),
+        step_layer_state_vector_layers=np.asarray([1, 2, 3, 4]),
         state_representation_kind=np.asarray("hidden_state", dtype=object),
         hidden_state_token_semantics=np.asarray(
             "h_i_after_reading_token_i", dtype=object

@@ -31,8 +31,10 @@ def path_edge_overlap(permutation: np.ndarray) -> int:
 
 
 def fixed_layer_permutation(layer_count: int, seed: int) -> np.ndarray:
-    if int(layer_count) < 2:
-        raise ValueError("layer_count must be at least two")
+    if int(layer_count) < 4:
+        raise ValueError(
+            "a zero-original-edge shuffled path requires at least four layers"
+        )
     rng = np.random.default_rng(int(seed))
     best = np.arange(int(layer_count), dtype=np.int64)
     best_overlap = path_edge_overlap(best)
@@ -44,7 +46,9 @@ def fixed_layer_permutation(layer_count: int, seed: int) -> np.ndarray:
             best_overlap = overlap
         if overlap == 0:
             return candidate
-    return best
+    raise RuntimeError(
+        f"could not construct a zero-overlap path; best overlap={best_overlap}"
+    )
 
 
 class ContextMonitor(nn.Module):

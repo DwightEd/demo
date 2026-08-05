@@ -19,7 +19,7 @@ from functional_divergence.causal_first_error_attribution.monitor_training impor
 
 
 def _data(tmp_path: Path) -> ProcessBenchMonitorData:
-    values = np.arange(18 * 3 * 4, dtype=np.float32).reshape(18, 3, 4) / 20.0
+    values = np.arange(18 * 4 * 4, dtype=np.float32).reshape(18, 4, 4) / 20.0
     state_path = tmp_path / "states.npy"
     np.save(state_path, values)
     rows = []
@@ -53,7 +53,7 @@ def _data(tmp_path: Path) -> ProcessBenchMonitorData:
                 values=np.load(state_path, mmap_mode="r"),
             ),
         ),
-        layer_ids=np.asarray([1, 2, 3]),
+        layer_ids=np.asarray([1, 2, 3, 4]),
         hidden_size=4,
         output_feature_names=("entropy", "nll"),
     )

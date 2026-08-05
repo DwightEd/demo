@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from functional_divergence.causal_first_error_attribution.monitor_models import (
@@ -76,3 +77,8 @@ def test_topology_seeds_produce_distinct_zero_overlap_paths() -> None:
 
     assert len({tuple(path.tolist()) for path in paths}) == 3
     assert all(path_edge_overlap(path) == 0 for path in paths)
+
+
+def test_shuffled_adjacency_requires_enough_layers_to_remove_every_edge() -> None:
+    with pytest.raises(ValueError, match="at least four layers"):
+        fixed_layer_permutation(3, 17)

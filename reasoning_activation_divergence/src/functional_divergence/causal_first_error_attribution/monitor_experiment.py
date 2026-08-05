@@ -50,7 +50,9 @@ class MonitorExperimentConfig:
             raise ValueError("target false-alarm rate must lie in [0,1)")
         if (
             self.bootstrap_repeats < 1
-            or self.shuffle_repeats < 2
+            or (
+                "depth_graph_shuffled" in self.arms and self.shuffle_repeats < 2
+            )
             or self.max_chains_per_domain < 0
         ):
             raise ValueError("bootstrap count must be positive and chain limit nonnegative")
@@ -445,7 +447,14 @@ class ProcessBenchMonitorExperiment:
                 f"[{held_domain}] train={len(train)} validation={len(validation)} "
                 f"test={len(test)}"
             )
-            state_normalizer = fit_state_normalizer(data, train)
+            state_normalizer = (
+                fit_state_normalizer(data, train)
+                if any(
+                    arm not in ("nuisance", "output_history")
+                    for arm in config.arms
+                )
+                else None
+            )
             fold_report: dict[str, Any] = {
                 "train_rows": len(train),
                 "validation_rows": len(validation),
