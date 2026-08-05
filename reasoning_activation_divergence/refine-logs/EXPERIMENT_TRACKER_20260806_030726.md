@@ -1,7 +1,5 @@
 # PTIH Experiment Tracker
 
-**当前版本**：[EXPERIMENT_TRACKER_20260806_030726.md](EXPERIMENT_TRACKER_20260806_030726.md)
-
 | Run | 内容 | 状态 |
 |---|---|---|
 | RDGM-NEG | 固定深度图与 shuffled adjacency smoke | 完成；未发现稳定图结构增量，主线停止 |

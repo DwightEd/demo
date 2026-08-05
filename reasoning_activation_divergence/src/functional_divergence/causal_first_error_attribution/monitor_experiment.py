@@ -36,7 +36,6 @@ class MonitorExperimentConfig:
     validation_fraction: float = 0.15
     target_correct_chain_false_alarm: float = 0.1
     bootstrap_repeats: int = 1000
-    shuffle_repeats: int = 3
     seed: int = 17
     training: MonitorTrainingConfig = MonitorTrainingConfig()
 
@@ -48,13 +47,7 @@ class MonitorExperimentConfig:
             raise ValueError("LODO monitoring requires at least two domains")
         if not 0.0 <= self.target_correct_chain_false_alarm < 1.0:
             raise ValueError("target false-alarm rate must lie in [0,1)")
-        if (
-            self.bootstrap_repeats < 1
-            or (
-                "depth_graph_shuffled" in self.arms and self.shuffle_repeats < 2
-            )
-            or self.max_chains_per_domain < 0
-        ):
+        if self.bootstrap_repeats < 1 or self.max_chains_per_domain < 0:
             raise ValueError("bootstrap count must be positive and chain limit nonnegative")
 
 
@@ -96,7 +89,13 @@ def _problem_balanced_weights(
         groups[rows[index].problem_hash].append(position)
     result = np.zeros(len(selected), dtype=np.float64)
     for positions in groups.values():
-        result[positions] = 1.0 / (len(groups) * len(positions))
+        chains: dict[str, list[int]] = defaultdict(list)
+        for position in positions:
+            chains[rows[selected[position]].chain_id].append(position)
+        for chain_positions in chains.values():
+            result[chain_positions] = 1.0 / (
+                len(groups) * len(chains) * len(chain_positions)
+            )
     return result
 
 
@@ -271,14 +270,22 @@ def _problem_contrasts(
     result: dict[str, dict[str, dict[str, float]]] = defaultdict(dict)
     for problem, positions in by_problem.items():
         domain = selected_rows[positions[0]].domain
-        values: dict[str, float] = {
-            "nll_improvement": float(
-                np.mean(baseline_loss[positions] - candidate_loss[positions])
-            )
-        }
         by_chain: dict[str, list[int]] = defaultdict(list)
         for position in positions:
             by_chain[selected_rows[position].chain_id].append(position)
+        values: dict[str, float] = {
+            "nll_improvement": float(
+                np.mean(
+                    [
+                        np.mean(
+                            baseline_loss[chain_positions]
+                            - candidate_loss[chain_positions]
+                        )
+                        for chain_positions in by_chain.values()
+                    ]
+                )
+            )
+        }
         top1_deltas = []
         mrr_deltas = []
         false_alarm_deltas = []
@@ -334,8 +341,8 @@ def paired_problem_bootstrap(
     baseline_thresholds: dict[str, float],
     repeats: int,
     seed: int,
-) -> dict[str, dict[str, float]]:
-    """Paired domain→problem bootstrap for graph-vs-control increments."""
+) -> dict[str, Any]:
+    """Paired domain-to-problem bootstrap for candidate-control increments."""
 
     values = _problem_contrasts(
         rows,
@@ -357,7 +364,7 @@ def paired_problem_bootstrap(
     for _ in range(int(repeats)):
         sampled_domains = rng.choice(domains, size=len(domains), replace=True)
         replicate: dict[str, list[float]] = {metric: [] for metric in metrics}
-        for sampled_position, domain in enumerate(sampled_domains):
+        for domain in sampled_domains:
             problem_values = values[str(domain)]
             names = list(problem_values)
             sampled_names = rng.choice(names, size=len(names), replace=True)
@@ -386,6 +393,23 @@ def paired_problem_bootstrap(
             ),
             "bootstrap_repeats": int(samples.size),
         }
+    report["domain_points"] = {
+        domain: {
+            metric: float(
+                np.mean(
+                    [
+                        item[metric]
+                        for item in problems.values()
+                        if np.isfinite(item[metric])
+                    ]
+                )
+            )
+            if any(np.isfinite(item[metric]) for item in problems.values())
+            else float("nan")
+            for metric in metrics
+        }
+        for domain, problems in values.items()
+    }
     return report
 
 
@@ -397,7 +421,7 @@ def _json_config(config: MonitorExperimentConfig) -> dict[str, Any]:
 
 
 class ProcessBenchMonitorExperiment:
-    """Train and evaluate the residual-depth monitor with outer LODO splits."""
+    """Train and evaluate the two-boundary innovation monitor with LODO splits."""
 
     def __init__(self, config: MonitorExperimentConfig) -> None:
         self.config = config
@@ -423,15 +447,9 @@ class ProcessBenchMonitorExperiment:
             for arm in config.arms
         }
         thresholds: dict[str, dict[str, float]] = {arm: {} for arm in config.arms}
-        topology_scores = {
-            index: np.full(len(data.rows), np.nan, dtype=np.float64)
-            for index in range(config.shuffle_repeats)
-        }
-        topology_thresholds = {
-            index: {} for index in range(config.shuffle_repeats)
-        }
         folds: dict[str, dict[str, Any]] = {}
         prediction_lines: list[str] = []
+
         for fold_number, held_domain in enumerate(
             tqdm(config.domains, desc="LODO folds", unit="domain")
         ):
@@ -461,53 +479,33 @@ class ProcessBenchMonitorExperiment:
                 "test_rows": len(test),
                 "arms": {},
             }
+
             for arm in config.arms:
-                topology_indices = (
-                    tuple(range(config.shuffle_repeats))
-                    if arm == "depth_graph_shuffled"
-                    else (None,)
+                trained = train_monitor_arm(
+                    data,
+                    train,
+                    validation,
+                    arm=arm,
+                    config=config.training,
+                    seed=config.seed + fold_number,
+                    state_normalizer=(
+                        state_normalizer
+                        if arm not in ("nuisance", "output_history")
+                        else None
+                    ),
                 )
-                trained_runs = []
-                validation_runs = []
-                test_runs = []
-                for topology_index in topology_indices:
-                    trained = train_monitor_arm(
-                        data,
-                        train,
-                        validation,
-                        arm=arm,
-                        config=config.training,
-                        seed=config.seed + fold_number,
-                        state_normalizer=(
-                            state_normalizer
-                            if arm not in ("nuisance", "output_history")
-                            else None
-                        ),
-                        permutation_seed=(
-                            config.seed + 10_000 + int(topology_index)
-                            if topology_index is not None
-                            else None
-                        ),
-                    )
-                    trained_runs.append(trained)
-                    validation_runs.append(
-                        trained.predict(
-                            data,
-                            validation,
-                            batch_size=config.training.batch_size,
-                            device=config.training.device,
-                        )
-                    )
-                    test_runs.append(
-                        trained.predict(
-                            data,
-                            test,
-                            batch_size=config.training.batch_size,
-                            device=config.training.device,
-                        )
-                    )
-                validation_scores = np.mean(validation_runs, axis=0)
-                test_scores = np.mean(test_runs, axis=0)
+                validation_scores = trained.predict(
+                    data,
+                    validation,
+                    batch_size=config.training.batch_size,
+                    device=config.training.device,
+                )
+                test_scores = trained.predict(
+                    data,
+                    test,
+                    batch_size=config.training.batch_size,
+                    device=config.training.device,
+                )
                 threshold = correct_chain_threshold(
                     data.rows,
                     validation,
@@ -524,59 +522,15 @@ class ProcessBenchMonitorExperiment:
                 )
                 metrics.update(
                     {
-                        "validation_nll": float(
-                            np.mean([run.validation_nll for run in trained_runs])
-                        ),
-                        "epochs_trained": [
-                            run.epochs_trained for run in trained_runs
-                        ],
+                        "validation_nll": trained.validation_nll,
+                        "epochs_trained": trained.epochs_trained,
                         "parameters": int(
-                            sum(
-                                value.numel()
-                                for value in trained_runs[0].model.parameters()
-                            )
+                            sum(value.numel() for value in trained.model.parameters())
                         ),
                     }
                 )
-                if arm == "depth_graph_shuffled":
-                    metrics["topology_runs"] = []
-                    for topology_index, run_validation, run_test, run in zip(
-                        topology_indices,
-                        validation_runs,
-                        test_runs,
-                        trained_runs,
-                    ):
-                        assert topology_index is not None
-                        run_threshold = correct_chain_threshold(
-                            data.rows,
-                            validation,
-                            run_validation,
-                            target_false_alarm_rate=(
-                                config.target_correct_chain_false_alarm
-                            ),
-                        )
-                        topology_scores[int(topology_index)][test] = run_test
-                        topology_thresholds[int(topology_index)][
-                            held_domain
-                        ] = run_threshold
-                        run_metrics = evaluate_boundary_scores(
-                            data.rows,
-                            test,
-                            run_test,
-                            false_alarm_threshold=run_threshold,
-                        )
-                        run_metrics.update(
-                            {
-                                "topology_index": int(topology_index),
-                                "permutation_seed": (
-                                    config.seed + 10_000 + int(topology_index)
-                                ),
-                                "validation_nll": run.validation_nll,
-                                "epochs_trained": run.epochs_trained,
-                            }
-                        )
-                        metrics["topology_runs"].append(run_metrics)
                 fold_report["arms"][arm] = metrics
+
                 for index, score in zip(test, test_scores):
                     row = data.rows[int(index)]
                     prediction_lines.append(
@@ -595,45 +549,35 @@ class ProcessBenchMonitorExperiment:
                             ensure_ascii=False,
                         )
                     )
-                if arm == "depth_graph_shuffled":
-                    for topology_index, run_test in zip(topology_indices, test_runs):
-                        for index, score in zip(test, run_test):
-                            row = data.rows[int(index)]
-                            prediction_lines.append(
-                                json.dumps(
-                                    {
-                                        "arm": (
-                                            "depth_graph_shuffled_seed_"
-                                            f"{topology_index}"
-                                        ),
-                                        "held_domain": held_domain,
-                                        "chain_id": row.chain_id,
-                                        "problem_hash": row.problem_hash,
-                                        "candidate_step": row.candidate_step,
-                                        "first_error_step": row.first_error_step,
-                                        "label": row.label,
-                                        "score": float(score),
-                                        "threshold": float(
-                                            topology_thresholds[int(topology_index)][
-                                                held_domain
-                                            ]
-                                        ),
-                                    },
-                                    ensure_ascii=False,
-                                )
-                            )
+
+            hidden_parameters = {
+                fold_report["arms"][arm]["parameters"]
+                for arm in (
+                    "static_layer_set",
+                    "two_boundary_bag",
+                    "two_boundary_innovation",
+                )
+                if arm in fold_report["arms"]
+            }
+            if len(hidden_parameters) > 1:
+                raise RuntimeError(
+                    "two-boundary hidden controls are not capacity matched"
+                )
             folds[held_domain] = fold_report
 
         for arm, scores in global_scores.items():
             if not np.isfinite(scores).all():
                 raise RuntimeError(f"arm {arm} did not score every outer-test row")
-        if "depth_graph_shuffled" in config.arms:
-            for topology_index, scores in topology_scores.items():
-                if not np.isfinite(scores).all():
-                    raise RuntimeError(
-                        f"shuffled topology {topology_index} did not score every row"
-                    )
+
         all_indices = np.arange(len(data.rows), dtype=np.int64)
+        temporal_indices = np.asarray(
+            [
+                index
+                for index, row in enumerate(data.rows)
+                if row.candidate_step >= 1
+            ],
+            dtype=np.int64,
+        )
         aggregate = {
             arm: {
                 metric: float(
@@ -653,44 +597,70 @@ class ProcessBenchMonitorExperiment:
             }
             for arm in config.arms
         }
-        contrasts = {}
-        if "depth_graph" in config.arms:
+
+        contrasts: dict[str, Any] = {}
+        temporal_contrasts: dict[str, Any] = {}
+        if "two_boundary_innovation" in config.arms:
             for baseline in (
                 "output_history",
-                "layer_set",
-                "depth_graph_shuffled",
+                "static_layer_set",
+                "two_boundary_bag",
             ):
                 if baseline not in config.arms:
                     continue
-                contrasts[f"depth_graph_vs_{baseline}"] = paired_problem_bootstrap(
+                name = f"two_boundary_innovation_vs_{baseline}"
+                contrasts[name] = paired_problem_bootstrap(
                     data.rows,
                     all_indices,
-                    candidate_scores=global_scores["depth_graph"],
+                    candidate_scores=global_scores["two_boundary_innovation"],
                     baseline_scores=global_scores[baseline],
-                    candidate_thresholds=thresholds["depth_graph"],
+                    candidate_thresholds=thresholds["two_boundary_innovation"],
                     baseline_thresholds=thresholds[baseline],
                     repeats=config.bootstrap_repeats,
                     seed=config.seed,
                 )
-            if "depth_graph_shuffled" in config.arms:
-                for topology_index, shuffled_scores in topology_scores.items():
-                    contrasts[
-                        f"depth_graph_vs_depth_graph_shuffled_seed_{topology_index}"
-                    ] = paired_problem_bootstrap(
-                        data.rows,
-                        all_indices,
-                        candidate_scores=global_scores["depth_graph"],
-                        baseline_scores=shuffled_scores,
-                        candidate_thresholds=thresholds["depth_graph"],
-                        baseline_thresholds=topology_thresholds[topology_index],
-                        repeats=config.bootstrap_repeats,
-                        seed=config.seed,
-                    )
+                temporal_contrasts[name] = paired_problem_bootstrap(
+                    data.rows,
+                    temporal_indices,
+                    candidate_scores=global_scores["two_boundary_innovation"][
+                        temporal_indices
+                    ],
+                    baseline_scores=global_scores[baseline][temporal_indices],
+                    candidate_thresholds=thresholds["two_boundary_innovation"],
+                    baseline_thresholds=thresholds[baseline],
+                    repeats=config.bootstrap_repeats,
+                    seed=config.seed,
+                )
+
+        primary_names = (
+            "two_boundary_innovation_vs_static_layer_set",
+            "two_boundary_innovation_vs_two_boundary_bag",
+        )
+        primary_reports = [
+            temporal_contrasts[name]
+            for name in primary_names
+            if name in temporal_contrasts
+        ]
+        claim_decision = (
+            "supported"
+            if len(primary_reports) == 2
+            and all(
+                report["nll_improvement"]["ci_low"] > 0.0
+                and report["correct_chain_fpr_reduction"]["ci_low"] >= 0.0
+                for report in primary_reports
+            )
+            else "not_supported"
+        )
         summary = {
             "task": "future_free_first_error_boundary_monitoring",
+            "method": "prefix_conditioned_two_boundary_innovation_hazard",
             "claim_scope": "predictive_association_not_attention_or_ffn_root_cause",
             "state_view": "step_pre_state_at_token_start_minus_one",
-            "risk_set": "error_chains_steps_0_through_first_error;correct_chains_all_steps",
+            "risk_set": (
+                "error_chains_steps_0_through_first_error;"
+                "correct_chains_all_steps"
+            ),
+            "primary_population": "candidate_step_greater_than_or_equal_to_1",
             "rows": len(data.rows),
             "events": int(data.labels.sum()),
             "chains": len({row.chain_id for row in data.rows}),
@@ -701,6 +671,13 @@ class ProcessBenchMonitorExperiment:
             "folds": folds,
             "domain_macro": aggregate,
             "paired_contrasts": contrasts,
+            "temporal_paired_contrasts": temporal_contrasts,
+            "claim_rule": (
+                "both temporal innovation-vs-static and innovation-vs-bag "
+                "NLL CIs above zero and correct-chain false-alarm reduction "
+                "CIs nonnegative"
+            ),
+            "claim_decision": claim_decision,
         }
         (output_dir / "predictions.jsonl").write_text(
             "\n".join(prediction_lines) + "\n", encoding="utf-8"

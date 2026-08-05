@@ -96,7 +96,24 @@ def test_boundary_evaluation_reports_localization_and_problem_balanced_rows() ->
     assert report["problem_groups"] == 2
 
 
-def test_paired_bootstrap_tests_graph_against_each_structural_control() -> None:
+def test_boundary_nll_balances_chains_before_risk_set_rows() -> None:
+    rows = [
+        _row("long", "shared", "math", 0, 2),
+        _row("long", "shared", "math", 1, 2),
+        _row("long", "shared", "math", 2, 2),
+        _row("short", "shared", "math", 0, 0),
+    ]
+    scores = np.asarray([0.5, 0.5, 0.5, 0.9])
+
+    report = evaluate_boundary_scores(
+        rows, np.arange(len(rows)), scores, false_alarm_threshold=0.5
+    )
+
+    expected = (-np.log(0.5) - np.log(0.9)) / 2.0
+    assert report["row_nll"] == pytest.approx(expected)
+
+
+def test_paired_bootstrap_tests_candidate_against_a_structural_control() -> None:
     rows = []
     candidate = []
     baseline = []
@@ -126,6 +143,7 @@ def test_paired_bootstrap_tests_graph_against_each_structural_control() -> None:
     assert report["top1_gain"]["point"] == 1.0
     assert report["top1_gain"]["ci_low"] > 0.0
     assert report["nll_improvement"]["ci_low"] > 0.0
+    assert set(report["domain_points"]) == {"gsm8k", "math"}
 
 
 def test_localization_is_problem_balanced_when_one_problem_has_more_chains() -> None:
@@ -224,13 +242,16 @@ def test_experiment_runs_from_geometry_files_to_durable_lodo_results(tmp_path) -
             data_root=tmp_path / "data",
             domains=domains,
             output_dir=output,
-            arms=("depth_graph_shuffled", "depth_graph"),
+            arms=(
+                "output_history",
+                "static_layer_set",
+                "two_boundary_bag",
+                "two_boundary_innovation",
+            ),
             validation_fraction=0.25,
             bootstrap_repeats=10,
-            shuffle_repeats=2,
             training=MonitorTrainingConfig(
                 width=4,
-                message_passing_steps=1,
                 epochs=1,
                 patience=1,
                 batch_size=4,
@@ -244,16 +265,20 @@ def test_experiment_runs_from_geometry_files_to_durable_lodo_results(tmp_path) -
     assert summary["rows"] == 24
     assert summary["events"] == 9
     assert set(summary["folds"]) == set(domains)
-    assert "depth_graph_vs_depth_graph_shuffled" in summary["paired_contrasts"]
     assert (
-        "depth_graph_vs_depth_graph_shuffled_seed_0"
-        in summary["paired_contrasts"]
+        "two_boundary_innovation_vs_two_boundary_bag"
+        in summary["temporal_paired_contrasts"]
     )
-    assert len(
-        summary["folds"]["gsm8k"]["arms"]["depth_graph_shuffled"][
-            "topology_runs"
-        ]
-    ) == 2
+    assert summary["method"] == "prefix_conditioned_two_boundary_innovation_hazard"
+    hidden_parameters = {
+        summary["folds"]["gsm8k"]["arms"][arm]["parameters"]
+        for arm in (
+            "static_layer_set",
+            "two_boundary_bag",
+            "two_boundary_innovation",
+        )
+    }
+    assert len(hidden_parameters) == 1
     assert (output / "config.json").is_file()
     assert (output / "predictions.jsonl").is_file()
     assert (output / "summary.json").is_file()

@@ -54,7 +54,7 @@ def test_cli_exposes_a_direct_processbench_monitor_training_command(tmp_path) ->
             "--output-dir",
             str(tmp_path / "results"),
             "--arms",
-            "output_history,layer_set,depth_graph_shuffled,depth_graph",
+            "output_history,static_layer_set,two_boundary_bag,two_boundary_innovation",
             "--epochs",
             "3",
             "--device",
@@ -65,9 +65,9 @@ def test_cli_exposes_a_direct_processbench_monitor_training_command(tmp_path) ->
     assert args.command == "train-monitor"
     assert args.arms == (
         "output_history",
-        "layer_set",
-        "depth_graph_shuffled",
-        "depth_graph",
+        "static_layer_set",
+        "two_boundary_bag",
+        "two_boundary_innovation",
     )
     assert args.epochs == 3
     assert args.device == "cpu"

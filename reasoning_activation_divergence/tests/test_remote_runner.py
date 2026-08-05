@@ -76,8 +76,8 @@ def test_hidden_geometry_runner_has_causal_first_error_modes() -> None:
     assert "source activate" not in script
     assert "conda activate" not in script
     assert 'if [[ ! -f "${aligned_trace}" ]]; then' in script
-    assert "--shuffle-repeats 2" in script
-    assert "--shuffle-repeats 3" in script
+    assert "--shuffle-repeats" not in script
+    assert "--message-passing-steps" not in script
 
 
 def test_hidden_geometry_runner_audits_causal_pairs_without_loading_model() -> None:

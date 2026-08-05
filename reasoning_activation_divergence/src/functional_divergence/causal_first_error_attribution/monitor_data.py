@@ -120,6 +120,14 @@ class ProcessBenchMonitorData:
             )
         return values
 
+    def boundary_pair(self, row_index: int) -> np.ndarray:
+        """Return previous/current pre-step states, duplicating step 0."""
+
+        history = self.history(row_index, max_steps=2)
+        if len(history) == 1:
+            return np.concatenate([history, history], axis=0)
+        return history
+
     @property
     def labels(self) -> np.ndarray:
         return np.asarray([row.label for row in self.rows], dtype=np.float32)

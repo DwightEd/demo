@@ -144,7 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     monitor = commands.add_parser(
         "train-monitor",
-        help="train the future-free ProcessBench residual-depth monitor",
+        help="train the future-free ProcessBench two-boundary monitor",
     )
     _add_processbench_arguments(monitor)
     monitor.add_argument("--output-dir", required=True, type=Path)
@@ -156,11 +156,8 @@ def build_parser() -> argparse.ArgumentParser:
     monitor.add_argument("--validation-fraction", type=_fraction, default=0.15)
     monitor.add_argument("--target-correct-chain-false-alarm", type=float, default=0.1)
     monitor.add_argument("--bootstrap", type=_positive_int, default=1000)
-    monitor.add_argument("--shuffle-repeats", type=_positive_int, default=3)
     monitor.add_argument("--seed", type=int, default=17)
     monitor.add_argument("--width", type=_positive_int, default=64)
-    monitor.add_argument("--message-passing-steps", type=_positive_int, default=2)
-    monitor.add_argument("--dropout", type=float, default=0.1)
     monitor.add_argument("--epochs", type=_positive_int, default=20)
     monitor.add_argument("--patience", type=_positive_int, default=4)
     monitor.add_argument("--batch-size", type=_positive_int, default=32)
@@ -229,12 +226,9 @@ def main(argv: list[str] | None = None) -> None:
                 validation_fraction=args.validation_fraction,
                 target_correct_chain_false_alarm=args.target_correct_chain_false_alarm,
                 bootstrap_repeats=args.bootstrap,
-                shuffle_repeats=args.shuffle_repeats,
                 seed=args.seed,
                 training=MonitorTrainingConfig(
                     width=args.width,
-                    message_passing_steps=args.message_passing_steps,
-                    dropout=args.dropout,
                     epochs=args.epochs,
                     patience=args.patience,
                     batch_size=args.batch_size,

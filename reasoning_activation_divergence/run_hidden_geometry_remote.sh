@@ -171,9 +171,9 @@ case "${MODE}" in
     "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main train-monitor \
       --data-root "${DATA_ROOT}" --domains "${CAUSAL_DOMAINS}" \
       --output-dir "${OUTPUT_ROOT}/causal_monitor_smoke_${RUN_TAG}" \
-      --max-chains-per-domain 32 --width 32 --message-passing-steps 2 \
+      --max-chains-per-domain 32 --width 32 \
       --epochs 3 --patience 2 --batch-size 16 --bootstrap 200 \
-      --shuffle-repeats 2 --device cuda
+      --device cuda
     ;;
   causal-monitor-full)
     run_causal_pytest_if_available
@@ -181,9 +181,9 @@ case "${MODE}" in
     "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main train-monitor \
       --data-root "${DATA_ROOT}" --domains "${CAUSAL_DOMAINS}" \
       --output-dir "${OUTPUT_ROOT}/causal_monitor_full_${RUN_TAG}" \
-      --max-chains-per-domain 0 --width 64 --message-passing-steps 2 \
+      --max-chains-per-domain 0 --width 64 \
       --epochs 20 --patience 4 --batch-size 32 --bootstrap 2000 \
-      --shuffle-repeats 3 --device cuda
+      --device cuda
     ;;
   causal-full)
     "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main audit \

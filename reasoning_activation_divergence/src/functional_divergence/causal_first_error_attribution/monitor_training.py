@@ -15,26 +15,24 @@ from tqdm.auto import tqdm
 from .monitor_data import MonitorBoundaryRow, ProcessBenchMonitorData
 from .monitor_models import (
     ContextMonitor,
-    DepthGraphMonitor,
-    LayerSetMonitor,
-    fixed_layer_permutation,
+    StaticLayerSetMonitor,
+    TwoBoundaryBagMonitor,
+    TwoBoundaryInnovationMonitor,
 )
 
 
 MONITOR_ARMS = (
     "nuisance",
     "output_history",
-    "layer_set",
-    "depth_graph_shuffled",
-    "depth_graph",
+    "static_layer_set",
+    "two_boundary_bag",
+    "two_boundary_innovation",
 )
 
 
 @dataclass(frozen=True)
 class MonitorTrainingConfig:
     width: int = 64
-    message_passing_steps: int = 2
-    dropout: float = 0.1
     epochs: int = 20
     patience: int = 4
     batch_size: int = 32
@@ -46,7 +44,6 @@ class MonitorTrainingConfig:
     def __post_init__(self) -> None:
         if min(
             self.width,
-            self.message_passing_steps,
             self.epochs,
             self.patience,
             self.batch_size,
@@ -195,9 +192,15 @@ def _group_balanced_weights(
         for index in domain_indices:
             groups.setdefault(rows[index].sibling_group, []).append(index)
         for members in groups.values():
-            weight = 1.0 / (len(domains) * len(groups) * len(members))
+            chains: dict[str, list[int]] = {}
             for index in members:
-                result[position[index]] = weight
+                chains.setdefault(rows[index].chain_id, []).append(index)
+            for chain_rows in chains.values():
+                weight = 1.0 / (
+                    len(domains) * len(groups) * len(chains) * len(chain_rows)
+                )
+                for index in chain_rows:
+                    result[position[index]] = weight
     return result * (len(result) / result.sum())
 
 
@@ -210,7 +213,6 @@ class _BoundaryDataset(Dataset):
         context: np.ndarray,
         feature_normalizer: FeatureNormalizer,
         state_normalizer: StateNormalizer | None,
-        permutation: np.ndarray | None,
         weights: np.ndarray,
     ) -> None:
         self.data = data
@@ -218,7 +220,6 @@ class _BoundaryDataset(Dataset):
         self.context = np.asarray(context, dtype=np.float32)
         self.feature_normalizer = feature_normalizer
         self.state_normalizer = state_normalizer
-        self.permutation = permutation
         self.weights = np.asarray(weights, dtype=np.float32)
 
     def __len__(self) -> int:
@@ -230,13 +231,11 @@ class _BoundaryDataset(Dataset):
             self.context[row_index] - self.feature_normalizer.mean
         ) / self.feature_normalizer.scale
         if self.state_normalizer is None:
-            state = np.zeros((1, 1), dtype=np.float32)
+            state = np.zeros((2, 1, 1), dtype=np.float32)
         else:
             state = (
-                self.data.state(row_index) - self.state_normalizer.mean
+                self.data.boundary_pair(row_index) - self.state_normalizer.mean[None]
             ) / self.state_normalizer.scale
-            if self.permutation is not None:
-                state = state[self.permutation]
         return (
             torch.from_numpy(np.asarray(state, dtype=np.float32)),
             torch.from_numpy(np.asarray(context, dtype=np.float32)),
@@ -253,20 +252,23 @@ def _build_model(
 ) -> nn.Module:
     if arm in ("nuisance", "output_history"):
         return ContextMonitor(context_size=context_size, width=config.width)
-    if arm == "layer_set":
-        return LayerSetMonitor(
+    if arm == "static_layer_set":
+        return StaticLayerSetMonitor(
             hidden_size=data.hidden_size,
             context_size=context_size,
             width=config.width,
         )
-    if arm in ("depth_graph", "depth_graph_shuffled"):
-        return DepthGraphMonitor(
+    if arm == "two_boundary_bag":
+        return TwoBoundaryBagMonitor(
             hidden_size=data.hidden_size,
-            layer_count=len(data.layer_ids),
             context_size=context_size,
             width=config.width,
-            message_passing_steps=config.message_passing_steps,
-            dropout=config.dropout,
+        )
+    if arm == "two_boundary_innovation":
+        return TwoBoundaryInnovationMonitor(
+            hidden_size=data.hidden_size,
+            context_size=context_size,
+            width=config.width,
         )
     raise ValueError(f"unknown monitor arm {arm!r}; available={list(MONITOR_ARMS)}")
 
@@ -278,7 +280,6 @@ class TrainedMonitor:
     state_normalizer: StateNormalizer | None
     feature_normalizer: FeatureNormalizer
     context: np.ndarray
-    permutation: np.ndarray | None
     validation_nll: float
     epochs_trained: int
 
@@ -297,7 +298,6 @@ class TrainedMonitor:
             context=self.context,
             feature_normalizer=self.feature_normalizer,
             state_normalizer=self.state_normalizer,
-            permutation=self.permutation,
             weights=np.ones(len(selected), dtype=np.float32),
         )
         loader = DataLoader(dataset, batch_size=int(batch_size), shuffle=False)
@@ -326,7 +326,6 @@ def train_monitor_arm(
     config: MonitorTrainingConfig,
     seed: int,
     state_normalizer: StateNormalizer | None = None,
-    permutation_seed: int | None = None,
 ) -> TrainedMonitor:
     if arm not in MONITOR_ARMS:
         raise ValueError(f"unknown monitor arm {arm!r}; available={list(MONITOR_ARMS)}")
@@ -342,14 +341,6 @@ def train_monitor_arm(
 
     context = _context_matrix(data, arm)
     feature_normalizer = fit_feature_normalizer(context, train_indices)
-    permutation = (
-        fixed_layer_permutation(
-            len(data.layer_ids),
-            int(seed if permutation_seed is None else permutation_seed),
-        )
-        if arm == "depth_graph_shuffled"
-        else None
-    )
     torch.manual_seed(int(seed))
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(int(seed))
@@ -368,7 +359,6 @@ def train_monitor_arm(
         context=context,
         feature_normalizer=feature_normalizer,
         state_normalizer=state_normalizer,
-        permutation=permutation,
         weights=_group_balanced_weights(data.rows, train_indices),
     )
     validation_data = _BoundaryDataset(
@@ -377,7 +367,6 @@ def train_monitor_arm(
         context=context,
         feature_normalizer=feature_normalizer,
         state_normalizer=state_normalizer,
-        permutation=permutation,
         weights=_group_balanced_weights(data.rows, validation_indices),
     )
     generator = torch.Generator().manual_seed(int(seed))
@@ -444,7 +433,6 @@ def train_monitor_arm(
         state_normalizer=state_normalizer,
         feature_normalizer=feature_normalizer,
         context=context,
-        permutation=permutation,
         validation_nll=float(best_loss),
         epochs_trained=epochs_trained,
     )

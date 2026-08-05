@@ -1,84 +1,59 @@
 from __future__ import annotations
 
-import numpy as np
-import pytest
 import torch
 
 from functional_divergence.causal_first_error_attribution.monitor_models import (
-    DepthGraphMonitor,
-    LayerSetMonitor,
-    depth_neighbor_mean,
-    fixed_layer_permutation,
-    path_edge_overlap,
+    StaticLayerSetMonitor,
+    TwoBoundaryBagMonitor,
+    TwoBoundaryInnovationMonitor,
 )
 
 
-def test_depth_neighbor_message_uses_the_layer_chain() -> None:
-    values = torch.tensor([[[0.0], [2.0], [8.0], [18.0]]])
+def test_two_boundary_monitors_are_layer_permutation_invariant() -> None:
+    torch.manual_seed(2)
+    models = (
+        StaticLayerSetMonitor(hidden_size=5, context_size=3, width=8),
+        TwoBoundaryBagMonitor(hidden_size=5, context_size=3, width=8),
+        TwoBoundaryInnovationMonitor(hidden_size=5, context_size=3, width=8),
+    )
+    boundaries = torch.randn(4, 2, 6, 5)
+    context = torch.randn(4, 3)
 
-    observed = depth_neighbor_mean(values)
+    for model in models:
+        model.eval()
+        original = model(boundaries, context)
+        permuted = model(boundaries[:, :, [3, 0, 5, 1, 4, 2]], context)
+        torch.testing.assert_close(original, permuted)
+
+
+def test_bag_discards_boundary_direction_but_innovation_preserves_it() -> None:
+    torch.manual_seed(11)
+    bag = TwoBoundaryBagMonitor(hidden_size=4, context_size=2, width=7)
+    innovation = TwoBoundaryInnovationMonitor(
+        hidden_size=4, context_size=2, width=7
+    )
+    bag.eval()
+    innovation.eval()
+    boundaries = torch.randn(3, 2, 5, 4)
+    context = torch.randn(3, 2)
 
     torch.testing.assert_close(
-        observed,
-        torch.tensor([[[2.0], [4.0], [10.0], [8.0]]]),
+        bag(boundaries, context), bag(boundaries.flip(1), context)
+    )
+    assert not torch.allclose(
+        innovation(boundaries, context),
+        innovation(boundaries.flip(1), context),
     )
 
 
-def test_layer_set_control_is_invariant_to_layer_order() -> None:
-    torch.manual_seed(3)
-    model = LayerSetMonitor(hidden_size=5, context_size=4, width=8)
-    model.eval()
-    states = torch.randn(6, 4, 5)
-    context = torch.randn(6, 4)
-    permutation = torch.tensor([2, 0, 3, 1])
-
-    original = model(states, context)
-    shuffled = model(states[:, permutation], context)
-
-    torch.testing.assert_close(original, shuffled)
-
-
-def test_depth_graph_monitor_consumes_full_layer_hidden_tensor() -> None:
-    torch.manual_seed(5)
-    model = DepthGraphMonitor(
-        hidden_size=7,
-        layer_count=5,
-        context_size=3,
-        width=12,
-        message_passing_steps=2,
+def test_two_boundary_controls_have_identical_capacity() -> None:
+    models = (
+        StaticLayerSetMonitor(hidden_size=9, context_size=4, width=6),
+        TwoBoundaryBagMonitor(hidden_size=9, context_size=4, width=6),
+        TwoBoundaryInnovationMonitor(hidden_size=9, context_size=4, width=6),
     )
-    states = torch.randn(9, 5, 7)
-    context = torch.randn(9, 3)
 
-    logits = model(states, context)
-
-    assert logits.shape == (9,)
-    assert model.input_projection.in_features == 7
-    assert model.layer_position.num_embeddings == 5
-    assert len(model.depth_blocks) == 2
-
-
-def test_fixed_layer_permutation_is_reproducible_and_nontrivial() -> None:
-    first = fixed_layer_permutation(layer_count=8, seed=17)
-    second = fixed_layer_permutation(layer_count=8, seed=17)
-
-    np.testing.assert_array_equal(first, second)
-    assert sorted(first.tolist()) == list(range(8))
-    assert not np.array_equal(first, np.arange(8))
-    assert path_edge_overlap(first) == 0
-
-
-def test_reversing_depth_is_not_accepted_as_a_shuffled_adjacency() -> None:
-    assert path_edge_overlap(np.arange(8)[::-1]) == 7
-
-
-def test_topology_seeds_produce_distinct_zero_overlap_paths() -> None:
-    paths = [fixed_layer_permutation(16, seed) for seed in (17, 18, 19)]
-
-    assert len({tuple(path.tolist()) for path in paths}) == 3
-    assert all(path_edge_overlap(path) == 0 for path in paths)
-
-
-def test_shuffled_adjacency_requires_enough_layers_to_remove_every_edge() -> None:
-    with pytest.raises(ValueError, match="at least four layers"):
-        fixed_layer_permutation(3, 17)
+    parameter_counts = {
+        sum(value.numel() for value in model.parameters()) for model in models
+    }
+    assert len(parameter_counts) == 1

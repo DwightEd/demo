@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,7 @@ from functional_divergence.causal_first_error_attribution.monitor_data import (
 )
 from functional_divergence.causal_first_error_attribution.monitor_training import (
     MonitorTrainingConfig,
+    _group_balanced_weights,
     build_inner_group_split,
     fit_state_normalizer,
     train_monitor_arm,
@@ -97,13 +99,26 @@ def test_state_normalizer_is_fit_only_on_requested_rows(tmp_path) -> None:
     )
 
 
+def test_training_weights_balance_chains_before_risk_set_rows(tmp_path) -> None:
+    base = _data(tmp_path).rows[0]
+    rows = (
+        replace(base, chain_id="long", sibling_group="shared", candidate_step=0),
+        replace(base, chain_id="long", sibling_group="shared", candidate_step=1),
+        replace(base, chain_id="short", sibling_group="shared", candidate_step=0),
+    )
+
+    weights = _group_balanced_weights(rows, np.arange(3))
+
+    assert weights[0] == pytest.approx(weights[1])
+    assert weights[:2].sum() == pytest.approx(weights[2])
+
+
 def test_training_scores_each_requested_boundary_for_every_arm(tmp_path) -> None:
     data = _data(tmp_path)
     train = np.arange(0, 12, dtype=np.int64)
     validation = np.arange(12, 18, dtype=np.int64)
     config = MonitorTrainingConfig(
         width=8,
-        message_passing_steps=1,
         epochs=1,
         patience=1,
         batch_size=4,
@@ -115,9 +130,9 @@ def test_training_scores_each_requested_boundary_for_every_arm(tmp_path) -> None
     for arm in (
         "nuisance",
         "output_history",
-        "layer_set",
-        "depth_graph_shuffled",
-        "depth_graph",
+        "static_layer_set",
+        "two_boundary_bag",
+        "two_boundary_innovation",
     ):
         trained = train_monitor_arm(
             data,

@@ -155,6 +155,9 @@ def test_monitor_history_contains_only_same_chain_states_through_candidate(
     np.testing.assert_array_equal(data.history(1), states[[0, 1]])
     np.testing.assert_array_equal(data.history(1, max_steps=1), states[[1]])
     np.testing.assert_array_equal(data.history(2), states[[3]])
+    np.testing.assert_array_equal(data.boundary_pair(0), states[[0, 0]])
+    np.testing.assert_array_equal(data.boundary_pair(1), states[[0, 1]])
+    np.testing.assert_array_equal(data.boundary_pair(2), states[[3, 3]])
 
 
 def test_output_context_uses_only_completed_steps(tmp_path) -> None:
