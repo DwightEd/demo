@@ -284,7 +284,7 @@ case "${MODE}" in
   predictive-token-smoke)
     require_monitor_runtime
     run_predictive_state_pytest_if_available
-    predictive_token_config='{"pca_dim":4,"positions_per_chain":16,"sequence_unit":"token","width":16,"epochs":3,"patience":2,"batch_size":16,"learning_rate":0.0003,"weight_decay":0.0001,"validation_fraction":0.2,"device":"cuda","show_progress":true}'
+    predictive_token_config='{"pca_dim":4,"positions_per_chain":8,"sequence_unit":"token","sequence_encoder":"attention_pool","attention_heads":4,"attention_queries":4,"width":16,"epochs":3,"patience":2,"batch_size":32,"learning_rate":0.0003,"weight_decay":0.0001,"validation_fraction":0.2,"device":"cuda","show_progress":true}'
     "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
       "${base_common[@]}" --seed 17 --tasks strict_prefix \
       --method predictive_state_monitor --method-config-json "${predictive_token_config}" \
@@ -294,7 +294,7 @@ case "${MODE}" in
   predictive-token-full)
     require_monitor_runtime
     run_predictive_state_pytest_if_available
-    predictive_token_config='{"pca_dim":8,"positions_per_chain":64,"sequence_unit":"token","width":32,"epochs":20,"patience":4,"batch_size":32,"learning_rate":0.0003,"weight_decay":0.0001,"validation_fraction":0.2,"device":"cuda","show_progress":true}'
+    predictive_token_config='{"pca_dim":8,"positions_per_chain":16,"sequence_unit":"token","sequence_encoder":"attention_pool","attention_heads":4,"attention_queries":4,"width":32,"epochs":20,"patience":4,"batch_size":64,"learning_rate":0.0003,"weight_decay":0.0001,"validation_fraction":0.2,"device":"cuda","show_progress":true}'
     read -r -a state_seeds <<< "${STATE_SEEDS}"
     for state_seed in "${state_seeds[@]}"; do
       "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \

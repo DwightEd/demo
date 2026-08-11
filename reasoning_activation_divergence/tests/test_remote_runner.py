@@ -136,6 +136,13 @@ def test_hidden_geometry_runner_exposes_unpooled_token_state_modes() -> None:
         assert "--tasks strict_prefix" in branch
         assert "--method predictive_state_monitor" in branch
         assert '"sequence_unit":"token"' in branch
+        assert '"sequence_encoder":"attention_pool"' in branch
         assert '"device":"cuda"' in branch
+        if mode.endswith("smoke"):
+            assert '"positions_per_chain":8' in branch
+            assert '"batch_size":32' in branch
+        else:
+            assert '"positions_per_chain":16' in branch
+            assert '"batch_size":64' in branch
     assert 'predictive_token_smoke_${RUN_TAG}' in script
     assert 'predictive_token_full_seed${state_seed}_${RUN_TAG}' in script

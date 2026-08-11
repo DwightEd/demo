@@ -25,6 +25,7 @@ from ..tasks import (
     nuisance_features,
     visible_output_steps,
 )
+from .token_attention import TokenAttentionPool, history_attention_mass
 
 STATE_ARMS = (
     "initial_state",
@@ -39,6 +40,9 @@ class PredictiveStateConfig:
     pca_dim: int = 8
     positions_per_chain: int = 16
     sequence_unit: Literal["step_end", "token"] = "step_end"
+    sequence_encoder: Literal["gru_final", "attention_pool"] = "gru_final"
+    attention_heads: int = 4
+    attention_queries: int = 4
     width: int = 32
     epochs: int = 20
     patience: int = 4
@@ -57,6 +61,8 @@ class PredictiveStateConfig:
             "epochs",
             "patience",
             "batch_size",
+            "attention_heads",
+            "attention_queries",
         )
         if any(
             isinstance(getattr(self, name), (bool, np.bool_))
@@ -68,6 +74,13 @@ class PredictiveStateConfig:
             raise ValueError("positions_per_chain must be at least pca_dim")
         if self.sequence_unit not in {"step_end", "token"}:
             raise ValueError("sequence_unit must be 'step_end' or 'token'")
+        if self.sequence_encoder not in {"gru_final", "attention_pool"}:
+            raise ValueError("sequence_encoder must be 'gru_final' or 'attention_pool'")
+        if (
+            self.sequence_encoder == "attention_pool"
+            and self.width % self.attention_heads != 0
+        ):
+            raise ValueError("attention width must be divisible by attention_heads")
         if self.patience > self.epochs:
             raise ValueError("patience cannot exceed epochs")
         if self.learning_rate <= 0 or self.weight_decay < 0:
@@ -106,6 +119,7 @@ def _arm_sequence(
     arm: str,
     *,
     seed: int,
+    add_step_markers: bool = False,
 ) -> np.ndarray:
     """Select causal step blocks without pooling any tokens inside a block."""
 
@@ -136,7 +150,15 @@ def _arm_sequence(
             selected = tuple(steps[int(index)] for index in order) + steps[-1:]
     else:
         raise ValueError(f"unknown state arm {arm!r}; available={list(STATE_ARMS)}")
-    return np.ascontiguousarray(np.concatenate(selected, axis=0), dtype=np.float32)
+    if not add_step_markers:
+        return np.ascontiguousarray(np.concatenate(selected, axis=0), dtype=np.float32)
+    marked = []
+    for step in selected:
+        markers = np.zeros((len(step), 2), dtype=np.float32)
+        markers[0, 0] = 1.0
+        markers[-1, 1] = 1.0
+        marked.append(np.concatenate([step, markers], axis=1))
+    return np.ascontiguousarray(np.concatenate(marked, axis=0), dtype=np.float32)
 
 
 def _latest_examples(
@@ -226,6 +248,25 @@ def _prepare_rows(
     if not np.isfinite(context).all():
         raise ValueError("online context contains non-finite values")
     return _PreparedRows(rows, sequences, context)
+
+
+def _state_sequences(
+    rows: _PreparedRows,
+    arm: str,
+    *,
+    config: PredictiveStateConfig,
+    seed: int,
+) -> tuple[np.ndarray, ...]:
+    return tuple(
+        _arm_sequence(
+            sequence,
+            example,
+            arm,
+            seed=seed,
+            add_step_markers=config.sequence_encoder == "attention_pool",
+        )
+        for sequence, example in zip(rows.sequences, rows.examples)
+    )
 
 
 def _inner_group_split(
@@ -354,6 +395,14 @@ def _model(
     if arm == "output_only":
         return _ContextMonitor(context_dim, config.width)
     if arm in STATE_ARMS:
+        if config.sequence_encoder == "attention_pool":
+            return TokenAttentionPool(
+                input_dim=input_dim,
+                context_dim=context_dim,
+                width=config.width,
+                heads=config.attention_heads,
+                queries=config.attention_queries,
+            )
         return _GRUPrefixMonitor(input_dim, context_dim, config.width)
     raise ValueError(f"unknown arm {arm!r}")
 
@@ -475,17 +524,18 @@ def _fit_arm(
     domains = np.asarray(
         [example.sample.dataset for example in train_rows.examples], dtype=object
     )
-    train_sequences = tuple(
-        _arm_sequence(sequence, example, arm, seed=seed)
-        if arm in STATE_ARMS
-        else _arm_sequence(sequence, example, "current_state", seed=seed)
-        for sequence, example in zip(train_rows.sequences, train_rows.examples)
+    state_arm = arm if arm in STATE_ARMS else "current_state"
+    train_sequences = _state_sequences(
+        train_rows,
+        state_arm,
+        config=config,
+        seed=seed,
     )
-    test_sequences = tuple(
-        _arm_sequence(sequence, example, arm, seed=seed)
-        if arm in STATE_ARMS
-        else _arm_sequence(sequence, example, "current_state", seed=seed)
-        for sequence, example in zip(test_rows.sequences, test_rows.examples)
+    test_sequences = _state_sequences(
+        test_rows,
+        state_arm,
+        config=config,
+        seed=seed,
     )
     inner_weights = domain_group_balanced_weights(
         domains[inner_train], np.asarray(groups)[inner_train]
@@ -629,14 +679,32 @@ def _fit_arm(
             "ordered_history",
             "ordered history versus a same-capacity visible-past permutation",
         ),
+        ContrastSpec(
+            "same_model_history_access_nll",
+            "ordered_model_current_ablation",
+            "ordered_history",
+            "ordered model with history retained versus the same model with history removed",
+        ),
+        ContrastSpec(
+            "same_model_history_order_nll",
+            "ordered_model_shuffled_ablation",
+            "ordered_history",
+            "ordered model on intact history versus the same model on permuted past steps",
+        ),
     ),
     arm_definitions={
         "output_only": "online prefix counts and completed-step entropy/NLL summaries",
-        "initial_state": "same GRU/head capacity using only the first visible state block",
-        "current_state": "reset GRU using only the current completed-step state block",
-        "ordered_history": "causal carry GRU over every visible completed-step state block",
+        "initial_state": "same configured encoder/head using only the first visible state block",
+        "current_state": "same configured encoder/head using only the current state block",
+        "ordered_history": "configured encoder over every visible completed-step state block",
         "shuffled_history": (
-            "same GRU/head and current boundary, with only the visible past permuted"
+            "same configured encoder/head and current block, with only the past permuted"
+        ),
+        "ordered_model_current_ablation": (
+            "trained ordered model evaluated after deleting all pre-current hidden tokens"
+        ),
+        "ordered_model_shuffled_ablation": (
+            "trained ordered model evaluated after permuting complete past-step token blocks"
         ),
     },
     default_config=PredictiveStateConfig,
@@ -719,6 +787,66 @@ class PredictiveStateMonitor:
         }
         if len(set(state_counts.values())) != 1:
             raise RuntimeError("state arms do not have identical parameter counts")
+        ordered_model = arms["ordered_history"].model
+        target = _device(self.config)
+        ordered_model.to(target)
+        intervention_context = arms["ordered_history"].scaler.transform(test_rows.context)
+        current_view = _state_sequences(
+            test_rows,
+            "current_state",
+            config=self.config,
+            seed=fold.seed,
+        )
+        shuffled_view = _state_sequences(
+            test_rows,
+            "shuffled_history",
+            config=self.config,
+            seed=fold.seed,
+        )
+        intervention_probabilities = {
+            "ordered_model_current_ablation": _predict(
+                ordered_model,
+                current_view,
+                intervention_context,
+                batch_size=self.config.batch_size,
+                device=target,
+            ),
+            "ordered_model_shuffled_ablation": _predict(
+                ordered_model,
+                shuffled_view,
+                intervention_context,
+                batch_size=self.config.batch_size,
+                device=target,
+            ),
+        }
+        attention_mass = None
+        attention_excess = None
+        if isinstance(ordered_model, TokenAttentionPool):
+            ordered_view = _state_sequences(
+                test_rows,
+                "ordered_history",
+                config=self.config,
+                seed=fold.seed,
+            )
+            current_lengths = np.asarray(
+                [len(sequence[-1]) for sequence in test_rows.sequences],
+                dtype=np.int64,
+            )
+            attention_mass = history_attention_mass(
+                ordered_model,
+                ordered_view,
+                current_lengths,
+                intervention_context,
+                batch_size=self.config.batch_size,
+                device=target,
+            )
+            ordered_lengths = np.asarray(
+                [sum(len(step) for step in sequence) for sequence in test_rows.sequences],
+                dtype=np.float64,
+            )
+            uniform_history_fraction = 1.0 - current_lengths / ordered_lengths
+            attention_excess = attention_mass - uniform_history_fraction
+        ordered_model.to(torch.device("cpu"))
         if projector.model is None:
             raise RuntimeError("projector unexpectedly missing after fit")
         factors: dict[str, np.ndarray] = {
@@ -730,11 +858,37 @@ class PredictiveStateMonitor:
             factors[f"{arm}.context_scale"] = np.asarray(result.scaler.scale_)
             for name, value in result.model.state_dict().items():
                 factors[f"{arm}.{name}"] = value.detach().cpu().numpy()
+        if attention_mass is not None:
+            factors["ordered_history.test_history_attention_mass"] = attention_mass
+            factors[
+                "ordered_history.test_history_attention_excess_over_token_fraction"
+            ] = attention_excess
+        probabilities = {
+            name: result.probability for name, result in arms.items()
+        }
+        probabilities.update(intervention_probabilities)
+        ordered_probability = probabilities["ordered_history"]
+        current_ablation = probabilities["ordered_model_current_ablation"]
+        shuffled_ablation = probabilities["ordered_model_shuffled_ablation"]
+        eligible_history = np.asarray(
+            [example.visible_steps > 1 for example in test_rows.examples], dtype=bool
+        )
+        history_mass_mean = (
+            float(np.mean(attention_mass[eligible_history]))
+            if attention_mass is not None and np.any(eligible_history)
+            else None
+        )
+        history_attention_excess_mean = (
+            float(np.mean(attention_excess[eligible_history]))
+            if attention_excess is not None and np.any(eligible_history)
+            else None
+        )
         return MethodFoldResult(
-            probabilities={name: result.probability for name, result in arms.items()},
+            probabilities=probabilities,
             diagnostics={
                 "projection_dim": self.config.pca_dim,
                 "sequence_unit": self.config.sequence_unit,
+                "sequence_encoder": self.config.sequence_encoder,
                 "step_pooling": (
                     "none" if self.config.sequence_unit == "token" else "step_end"
                 ),
@@ -764,8 +918,22 @@ class PredictiveStateMonitor:
                 "uses_post_error_states": False,
                 "shuffle_preserves_current_state": True,
                 "state_comparison_design": (
-                    "identical_gru_and_head_for_initial_current_ordered_shuffled_"
+                    "identical_encoder_and_head_for_initial_current_ordered_shuffled_"
                     f"{self.config.sequence_unit}_sequences"
+                ),
+                "same_model_history_interventions": True,
+                "same_model_history_ablation_max_abs_probability_change": float(
+                    np.max(np.abs(ordered_probability - current_ablation))
+                ),
+                "same_model_history_shuffle_max_abs_probability_change": float(
+                    np.max(np.abs(ordered_probability - shuffled_ablation))
+                ),
+                "ordered_history_attention_mass_mean": history_mass_mean,
+                "ordered_history_attention_excess_over_token_fraction_mean": (
+                    history_attention_excess_mean
+                ),
+                "attention_is_descriptive_not_causal_attribution": (
+                    attention_mass is not None
                 ),
             },
             factors=factors,

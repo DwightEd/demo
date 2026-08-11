@@ -72,6 +72,41 @@ def test_run_summary_marks_interval_crossing_zero_uncertain():
     assert "CI includes 0" in text
 
 
+def test_run_summary_marks_subdisplay_resolution_increment_numerically_equivalent():
+    text = format_run_summary(_result(2e-8, 1e-9, 4e-8), "/tmp/output")
+
+    assert "[95% CI +0.0000, +0.0000] | numerically_indistinguishable" in text
+    assert "below the displayed NLL resolution" in text
+
+
+def test_run_summary_surfaces_probe_level_history_mechanism_diagnostics():
+    result = _result(0.01, -0.01, 0.03)
+    result["tasks"]["whole_chain"]["fold_diagnostics"] = [
+        {
+            "sequence_encoder": "attention_pool",
+            "ordered_history_attention_mass_mean": 0.62,
+            "ordered_history_attention_excess_over_token_fraction_mean": 0.08,
+            "same_model_history_ablation_max_abs_probability_change": 0.13,
+            "same_model_history_shuffle_max_abs_probability_change": 0.04,
+        },
+        {
+            "sequence_encoder": "attention_pool",
+            "ordered_history_attention_mass_mean": 0.58,
+            "ordered_history_attention_excess_over_token_fraction_mean": 0.02,
+            "same_model_history_ablation_max_abs_probability_change": 0.09,
+            "same_model_history_shuffle_max_abs_probability_change": 0.03,
+        },
+    ]
+
+    text = format_run_summary(result, "/tmp/output")
+
+    assert "probe-mechanism diagnostics (descriptive, not LLM-causal):" in text
+    assert "encoder=attention_pool | history_attention_mass=0.6000" in text
+    assert "excess_over_uniform_token_share=+0.0500" in text
+    assert "remove_history max|delta_p|=0.1300" in text
+    assert "shuffle_history max|delta_p|=0.0400" in text
+
+
 def test_preflight_summary_reports_domain_provenance_without_json_blob():
     text = format_preflight_summary(
         {
