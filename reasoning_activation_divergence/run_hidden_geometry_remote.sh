@@ -31,6 +31,7 @@ CAUSAL_LAYERS="${CAUSAL_LAYERS:-8,12,16,20,24,28}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/hidden_state_geometry}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RUN_TAG="${RUN_TAG:-$(date '+%Y%m%d_%H%M%S')}"
+STATE_SEEDS="${STATE_SEEDS:-17 29 41}"
 
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONUNBUFFERED=1
@@ -57,8 +58,12 @@ for domain in "${inspected_domains[@]}"; do
   pair_file="${DATA_ROOT}/${domain}/selected/causal_first_error_v1/onset_pairs_v1.jsonl"
   echo "${domain}: residual_manifest=${manifest}"
   echo "${domain}: aligned_trace=${aligned_trace}"
-  echo "${domain}: geometry_trace=${geometry_trace}"
-  echo "${domain}: causal_pair_file=${pair_file}"
+  if [[ "${MODE}" == causal-monitor-* ]]; then
+    echo "${domain}: geometry_trace=${geometry_trace}"
+  fi
+  if [[ "${MODE}" == causal-* ]]; then
+    echo "${domain}: causal_pair_file=${pair_file}"
+  fi
   if [[ "${MODE}" != causal-* && ! -f "${manifest}" ]]; then
     echo "missing raw residual manifest: ${manifest}" >&2
     echo "trace.npz alone is insufficient; extract response-token hidden-state shards first." >&2
@@ -131,13 +136,29 @@ run_causal_pytest_if_available() {
   fi
 }
 
-common=(
+run_predictive_state_pytest_if_available() {
+  if "${PYTHON_BIN}" -c 'import importlib.util; raise SystemExit(0 if importlib.util.find_spec("pytest") else 1)'; then
+    "${PYTHON_BIN}" -m pytest \
+      tests/hidden_state_geometry/test_predictive_state_monitor.py \
+      tests/hidden_state_geometry/test_data.py \
+      tests/hidden_state_geometry/test_tasks.py \
+      tests/test_remote_runner.py
+  else
+    echo "pytest is not installed in ${PYTHON_BIN}; skipping focused predictive-state tests"
+  fi
+}
+
+base_common=(
   --data-root "${DATA_ROOT}"
   --domains gsm8k,math,olympiadbench,omnimath
   --response-generator llama3.1-8b
   --observer-model llama3.1-8b
   --acquisition-mode observer_teacher_forcing_replay
   --output-features token_entropy,token_nll
+)
+
+common=(
+  "${base_common[@]}"
   --seed 17
 )
 
@@ -237,6 +258,29 @@ case "${MODE}" in
       --max-records-per-domain 0 --bootstrap 2000 \
       --output-dir "${OUTPUT_ROOT}/ridge_full_${RUN_TAG}"
     ;;
+  predictive-state-smoke)
+    require_monitor_runtime
+    run_predictive_state_pytest_if_available
+    predictive_state_config='{"pca_dim":4,"positions_per_chain":8,"width":16,"epochs":3,"patience":2,"batch_size":32,"learning_rate":0.0003,"weight_decay":0.0001,"validation_fraction":0.2,"device":"cuda","show_progress":true}'
+    "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+      "${base_common[@]}" --seed 17 --tasks strict_prefix \
+      --method predictive_state_monitor --method-config-json "${predictive_state_config}" \
+      --max-records-per-domain 32 --bootstrap 200 \
+      --output-dir "${OUTPUT_ROOT}/predictive_state_smoke_${RUN_TAG}"
+    ;;
+  predictive-state-full)
+    require_monitor_runtime
+    run_predictive_state_pytest_if_available
+    predictive_state_config='{"pca_dim":8,"positions_per_chain":16,"width":32,"epochs":20,"patience":4,"batch_size":64,"learning_rate":0.0003,"weight_decay":0.0001,"validation_fraction":0.2,"device":"cuda","show_progress":true}'
+    read -r -a state_seeds <<< "${STATE_SEEDS}"
+    for state_seed in "${state_seeds[@]}"; do
+      "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+        "${base_common[@]}" --seed "${state_seed}" --tasks strict_prefix \
+        --method predictive_state_monitor --method-config-json "${predictive_state_config}" \
+        --max-records-per-domain 0 --bootstrap 2000 \
+        --output-dir "${OUTPUT_ROOT}/predictive_state_full_seed${state_seed}_${RUN_TAG}"
+    done
+    ;;
   innovation-smoke)
     innovation_config='{"source_layer":14,"destination_layer":16,"rank":4,"normal_ridge_alpha":10.0,"covariance_shrinkage":0.1,"l2":0.1,"max_iter":2000}'
     "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
@@ -254,7 +298,7 @@ case "${MODE}" in
       --output-dir "${OUTPUT_ROOT}/innovation_full_${RUN_TAG}"
     ;;
   *)
-    echo "usage: $0 causal-audit|causal-extract-smoke|causal-intervene-smoke|causal-summarize-smoke|causal-monitor-smoke|causal-monitor-full|causal-full|preflight|smoke|full|ridge-smoke|ridge-full|innovation-smoke|innovation-full" >&2
+    echo "usage: $0 causal-audit|causal-extract-smoke|causal-intervene-smoke|causal-summarize-smoke|causal-monitor-smoke|causal-monitor-full|causal-full|preflight|smoke|full|ridge-smoke|ridge-full|predictive-state-smoke|predictive-state-full|innovation-smoke|innovation-full" >&2
     exit 2
     ;;
 esac

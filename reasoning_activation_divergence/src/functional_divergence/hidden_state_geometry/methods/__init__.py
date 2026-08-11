@@ -9,6 +9,9 @@ def load_builtin_methods() -> None:
     import_module("functional_divergence.hidden_state_geometry.methods.full_tensor_ridge")
     import_module("functional_divergence.hidden_state_geometry.methods.innovation_hazard")
     import_module(
+        "functional_divergence.hidden_state_geometry.methods.predictive_state_monitor"
+    )
+    import_module(
         "functional_divergence.hidden_state_geometry.methods.component_resolved_hazard"
     )
 

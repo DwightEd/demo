@@ -106,3 +106,19 @@ def test_hidden_geometry_runner_keeps_interactive_terminal_visible_on_failure() 
     assert "trap stop_on_failure ERR" in script
     assert "[[ -t 0 && -t 1 ]]" in script
     assert 'exit "${status}"' in script
+
+
+def test_hidden_geometry_runner_exposes_predictive_state_modes() -> None:
+    runner = Path(__file__).resolve().parents[1] / "run_hidden_geometry_remote.sh"
+    script = runner.read_text(encoding="utf-8")
+
+    for mode in ("predictive-state-smoke", "predictive-state-full"):
+        marker = f"  {mode})"
+        assert marker in script
+        start = script.index(marker)
+        branch = script[start : script.index("    ;;", start)]
+        assert "--tasks strict_prefix" in branch
+        assert "--method predictive_state_monitor" in branch
+        assert '"device":"cuda"' in branch
+    assert 'predictive_state_smoke_${RUN_TAG}' in script
+    assert 'predictive_state_full_seed${state_seed}_${RUN_TAG}' in script
