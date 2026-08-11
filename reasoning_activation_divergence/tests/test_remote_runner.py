@@ -122,3 +122,20 @@ def test_hidden_geometry_runner_exposes_predictive_state_modes() -> None:
         assert '"device":"cuda"' in branch
     assert 'predictive_state_smoke_${RUN_TAG}' in script
     assert 'predictive_state_full_seed${state_seed}_${RUN_TAG}' in script
+
+
+def test_hidden_geometry_runner_exposes_unpooled_token_state_modes() -> None:
+    runner = Path(__file__).resolve().parents[1] / "run_hidden_geometry_remote.sh"
+    script = runner.read_text(encoding="utf-8")
+
+    for mode in ("predictive-token-smoke", "predictive-token-full"):
+        marker = f"  {mode})"
+        assert marker in script
+        start = script.index(marker)
+        branch = script[start : script.index("    ;;", start)]
+        assert "--tasks strict_prefix" in branch
+        assert "--method predictive_state_monitor" in branch
+        assert '"sequence_unit":"token"' in branch
+        assert '"device":"cuda"' in branch
+    assert 'predictive_token_smoke_${RUN_TAG}' in script
+    assert 'predictive_token_full_seed${state_seed}_${RUN_TAG}' in script

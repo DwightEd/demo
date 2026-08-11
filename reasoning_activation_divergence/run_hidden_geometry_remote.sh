@@ -281,6 +281,29 @@ case "${MODE}" in
         --output-dir "${OUTPUT_ROOT}/predictive_state_full_seed${state_seed}_${RUN_TAG}"
     done
     ;;
+  predictive-token-smoke)
+    require_monitor_runtime
+    run_predictive_state_pytest_if_available
+    predictive_token_config='{"pca_dim":4,"positions_per_chain":16,"sequence_unit":"token","width":16,"epochs":3,"patience":2,"batch_size":16,"learning_rate":0.0003,"weight_decay":0.0001,"validation_fraction":0.2,"device":"cuda","show_progress":true}'
+    "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+      "${base_common[@]}" --seed 17 --tasks strict_prefix \
+      --method predictive_state_monitor --method-config-json "${predictive_token_config}" \
+      --max-records-per-domain 32 --bootstrap 200 \
+      --output-dir "${OUTPUT_ROOT}/predictive_token_smoke_${RUN_TAG}"
+    ;;
+  predictive-token-full)
+    require_monitor_runtime
+    run_predictive_state_pytest_if_available
+    predictive_token_config='{"pca_dim":8,"positions_per_chain":64,"sequence_unit":"token","width":32,"epochs":20,"patience":4,"batch_size":32,"learning_rate":0.0003,"weight_decay":0.0001,"validation_fraction":0.2,"device":"cuda","show_progress":true}'
+    read -r -a state_seeds <<< "${STATE_SEEDS}"
+    for state_seed in "${state_seeds[@]}"; do
+      "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+        "${base_common[@]}" --seed "${state_seed}" --tasks strict_prefix \
+        --method predictive_state_monitor --method-config-json "${predictive_token_config}" \
+        --max-records-per-domain 0 --bootstrap 2000 \
+        --output-dir "${OUTPUT_ROOT}/predictive_token_full_seed${state_seed}_${RUN_TAG}"
+    done
+    ;;
   innovation-smoke)
     innovation_config='{"source_layer":14,"destination_layer":16,"rank":4,"normal_ridge_alpha":10.0,"covariance_shrinkage":0.1,"l2":0.1,"max_iter":2000}'
     "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
@@ -298,7 +321,7 @@ case "${MODE}" in
       --output-dir "${OUTPUT_ROOT}/innovation_full_${RUN_TAG}"
     ;;
   *)
-    echo "usage: $0 causal-audit|causal-extract-smoke|causal-intervene-smoke|causal-summarize-smoke|causal-monitor-smoke|causal-monitor-full|causal-full|preflight|smoke|full|ridge-smoke|ridge-full|predictive-state-smoke|predictive-state-full|innovation-smoke|innovation-full" >&2
+    echo "usage: $0 causal-audit|causal-extract-smoke|causal-intervene-smoke|causal-summarize-smoke|causal-monitor-smoke|causal-monitor-full|causal-full|preflight|smoke|full|ridge-smoke|ridge-full|predictive-state-smoke|predictive-state-full|predictive-token-smoke|predictive-token-full|innovation-smoke|innovation-full" >&2
     exit 2
     ;;
 esac

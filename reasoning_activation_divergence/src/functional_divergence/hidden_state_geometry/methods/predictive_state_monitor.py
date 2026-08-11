@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -20,6 +20,7 @@ from ..registry import ContrastSpec, register_method
 from ..representation import ChainBalancedPCA
 from ..tasks import (
     TaskExample,
+    load_visible_step_token_states,
     load_visible_states,
     nuisance_features,
     visible_output_steps,
@@ -37,6 +38,7 @@ STATE_ARMS = (
 class PredictiveStateConfig:
     pca_dim: int = 8
     positions_per_chain: int = 16
+    sequence_unit: Literal["step_end", "token"] = "step_end"
     width: int = 32
     epochs: int = 20
     patience: int = 4
@@ -64,6 +66,8 @@ class PredictiveStateConfig:
             raise ValueError("dimensions and training counts must be positive integers")
         if self.positions_per_chain < self.pca_dim:
             raise ValueError("positions_per_chain must be at least pca_dim")
+        if self.sequence_unit not in {"step_end", "token"}:
+            raise ValueError("sequence_unit must be 'step_end' or 'token'")
         if self.patience > self.epochs:
             raise ValueError("patience cannot exceed epochs")
         if self.learning_rate <= 0 or self.weight_decay < 0:
@@ -97,31 +101,42 @@ def _stable_permutation(example: TaskExample, length: int, seed: int) -> np.ndar
 
 
 def _arm_sequence(
-    sequence: np.ndarray,
+    sequence: np.ndarray | Sequence[np.ndarray],
     example: TaskExample,
     arm: str,
     *,
     seed: int,
 ) -> np.ndarray:
-    """Select a causal prefix view while preserving the current state exactly."""
+    """Select causal step blocks without pooling any tokens inside a block."""
 
-    values = np.asarray(sequence, dtype=np.float32)
-    if values.ndim != 2 or len(values) != example.visible_steps:
-        raise ValueError("projected sequence must align with the visible prefix")
+    if isinstance(sequence, np.ndarray):
+        values = np.asarray(sequence, dtype=np.float32)
+        if values.ndim != 2 or len(values) != example.visible_steps:
+            raise ValueError("projected sequence must align with the visible prefix")
+        steps = tuple(values[index : index + 1] for index in range(len(values)))
+    else:
+        steps = tuple(np.asarray(step, dtype=np.float32) for step in sequence)
+        if len(steps) != example.visible_steps:
+            raise ValueError("projected step blocks must align with the visible prefix")
+        if any(step.ndim != 2 or len(step) < 1 for step in steps):
+            raise ValueError("each projected step block must be a non-empty matrix")
+        if len({step.shape[1] for step in steps}) != 1:
+            raise ValueError("projected step blocks must share one feature dimension")
     if arm == "initial_state":
-        return np.ascontiguousarray(values[:1])
-    if arm == "current_state":
-        return np.ascontiguousarray(values[-1:])
-    if arm == "ordered_history":
-        return np.ascontiguousarray(values)
-    if arm == "shuffled_history":
-        if len(values) <= 2:
-            return np.ascontiguousarray(values)
-        order = _stable_permutation(example, len(values) - 1, seed)
-        return np.ascontiguousarray(
-            np.concatenate([values[:-1][order], values[-1:]], axis=0)
-        )
-    raise ValueError(f"unknown state arm {arm!r}; available={list(STATE_ARMS)}")
+        selected = steps[:1]
+    elif arm == "current_state":
+        selected = steps[-1:]
+    elif arm == "ordered_history":
+        selected = steps
+    elif arm == "shuffled_history":
+        if len(steps) <= 2:
+            selected = steps
+        else:
+            order = _stable_permutation(example, len(steps) - 1, seed)
+            selected = tuple(steps[int(index)] for index in order) + steps[-1:]
+    else:
+        raise ValueError(f"unknown state arm {arm!r}; available={list(STATE_ARMS)}")
+    return np.ascontiguousarray(np.concatenate(selected, axis=0), dtype=np.float32)
 
 
 def _latest_examples(
@@ -141,18 +156,39 @@ def _project_chains(
     *,
     reporter: Any,
     description: str,
-) -> dict[tuple[str, int], np.ndarray]:
+    sequence_unit: str,
+) -> dict[tuple[str, int], tuple[np.ndarray, ...]]:
     latest = _latest_examples(examples)
-    cache: dict[tuple[str, int], np.ndarray] = {}
+    cache: dict[tuple[str, int], tuple[np.ndarray, ...]] = {}
     tracked = reporter.track(
         latest.items(), total=len(latest), description=description
     )
     for key, example in tracked:
-        projected = projector.transform(load_visible_states(example))
-        cache[key] = np.ascontiguousarray(
-            projected.reshape(projected.shape[0], -1), dtype=np.float32
-        )
+        if sequence_unit == "token":
+            raw_steps = load_visible_step_token_states(example)
+            lengths = np.asarray([len(step) for step in raw_steps], dtype=np.int64)
+            projected = projector.transform(np.concatenate(raw_steps, axis=0))
+            flattened = projected.reshape(projected.shape[0], -1)
+            offsets = np.concatenate([[0], np.cumsum(lengths)])
+            cache[key] = tuple(
+                np.ascontiguousarray(
+                    flattened[offsets[index] : offsets[index + 1]],
+                    dtype=np.float32,
+                )
+                for index in range(len(raw_steps))
+            )
+        else:
+            projected = projector.transform(load_visible_states(example))
+            flattened = projected.reshape(projected.shape[0], -1)
+            cache[key] = tuple(
+                np.ascontiguousarray(flattened[index : index + 1], dtype=np.float32)
+                for index in range(len(flattened))
+            )
     return cache
+
+
+def _visible_token_tensor(example: TaskExample) -> np.ndarray:
+    return np.concatenate(load_visible_step_token_states(example), axis=0)
 
 
 def _context_features(example: TaskExample) -> np.ndarray:
@@ -171,17 +207,17 @@ def _context_features(example: TaskExample) -> np.ndarray:
 @dataclass(frozen=True)
 class _PreparedRows:
     examples: tuple[TaskExample, ...]
-    sequences: tuple[np.ndarray, ...]
+    sequences: tuple[tuple[np.ndarray, ...], ...]
     context: np.ndarray
 
 
 def _prepare_rows(
     examples: Sequence[TaskExample],
-    cache: Mapping[tuple[str, int], np.ndarray],
+    cache: Mapping[tuple[str, int], tuple[np.ndarray, ...]],
 ) -> _PreparedRows:
     rows = tuple(examples)
     sequences = tuple(
-        np.ascontiguousarray(cache[_chain_key(example)][: example.visible_steps])
+        cache[_chain_key(example)][: example.visible_steps]
         for example in rows
     )
     if any(len(sequence) != example.visible_steps for sequence, example in zip(sequences, rows)):
@@ -442,13 +478,13 @@ def _fit_arm(
     train_sequences = tuple(
         _arm_sequence(sequence, example, arm, seed=seed)
         if arm in STATE_ARMS
-        else sequence[-1:]
+        else _arm_sequence(sequence, example, "current_state", seed=seed)
         for sequence, example in zip(train_rows.sequences, train_rows.examples)
     )
     test_sequences = tuple(
         _arm_sequence(sequence, example, arm, seed=seed)
         if arm in STATE_ARMS
-        else sequence[-1:]
+        else _arm_sequence(sequence, example, "current_state", seed=seed)
         for sequence, example in zip(test_rows.sequences, test_rows.examples)
     )
     inner_weights = domain_group_balanced_weights(
@@ -596,9 +632,9 @@ def _fit_arm(
     ),
     arm_definitions={
         "output_only": "online prefix counts and completed-step entropy/NLL summaries",
-        "initial_state": "same GRU/head capacity using only the first visible boundary",
-        "current_state": "reset GRU using only the current completed-step boundary",
-        "ordered_history": "causal carry GRU over every visible completed-step boundary",
+        "initial_state": "same GRU/head capacity using only the first visible state block",
+        "current_state": "reset GRU using only the current completed-step state block",
+        "ordered_history": "causal carry GRU over every visible completed-step state block",
         "shuffled_history": (
             "same GRU/head and current boundary, with only the visible past permuted"
         ),
@@ -606,7 +642,7 @@ def _fit_arm(
     default_config=PredictiveStateConfig,
 )
 class PredictiveStateMonitor:
-    """Capacity-matched test of raw hidden-history information for future first error."""
+    """Capacity-matched test of hidden-state history for future first error."""
 
     def __init__(self, config: PredictiveStateConfig | Mapping[str, Any]) -> None:
         if isinstance(config, Mapping):
@@ -621,24 +657,39 @@ class PredictiveStateMonitor:
         if fold.task_name != "strict_prefix":
             raise ValueError("predictive_state_monitor requires the strict_prefix task")
         reporter = fold.progress or NullProgress()
-        reporter.stage("projection", f"{fold.task_name}: outer-train raw hidden PCA")
+        reporter.stage(
+            "projection",
+            f"{fold.task_name}: outer-train {self.config.sequence_unit} hidden PCA",
+        )
         projector = ChainBalancedPCA(
             dim=self.config.pca_dim,
             positions_per_chain=self.config.positions_per_chain,
             seed=fold.seed,
-        ).fit(fold.train_examples, progress=reporter)
-        reporter.stage("encode", f"{fold.task_name}: causal prefix sequences")
+        ).fit(
+            fold.train_examples,
+            progress=reporter,
+            state_loader=(
+                _visible_token_tensor
+                if self.config.sequence_unit == "token"
+                else load_visible_states
+            ),
+        )
+        reporter.stage(
+            "encode", f"{fold.task_name}: causal {self.config.sequence_unit} sequences"
+        )
         train_cache = _project_chains(
             fold.train_examples,
             projector,
             reporter=reporter,
             description="train projected chains",
+            sequence_unit=self.config.sequence_unit,
         )
         test_cache = _project_chains(
             fold.test_examples,
             projector,
             reporter=reporter,
             description="test projected chains",
+            sequence_unit=self.config.sequence_unit,
         )
         train_rows = _prepare_rows(fold.train_examples, train_cache)
         test_rows = _prepare_rows(fold.test_examples, test_cache)
@@ -683,6 +734,13 @@ class PredictiveStateMonitor:
             probabilities={name: result.probability for name, result in arms.items()},
             diagnostics={
                 "projection_dim": self.config.pca_dim,
+                "sequence_unit": self.config.sequence_unit,
+                "step_pooling": (
+                    "none" if self.config.sequence_unit == "token" else "step_end"
+                ),
+                "all_visible_step_tokens_preserved": (
+                    self.config.sequence_unit == "token"
+                ),
                 "projection_training_rows": projector.training_rows,
                 "pca_fit_scope": "outer_train_unique_chains",
                 "train_unique_chains": len(_latest_examples(fold.train_examples)),
@@ -706,7 +764,8 @@ class PredictiveStateMonitor:
                 "uses_post_error_states": False,
                 "shuffle_preserves_current_state": True,
                 "state_comparison_design": (
-                    "identical_gru_and_head_for_initial_current_ordered_shuffled"
+                    "identical_gru_and_head_for_initial_current_ordered_shuffled_"
+                    f"{self.config.sequence_unit}_sequences"
                 ),
             },
             factors=factors,

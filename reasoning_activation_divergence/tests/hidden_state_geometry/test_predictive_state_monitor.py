@@ -97,6 +97,54 @@ def test_single_state_prefix_is_identical_for_current_ordered_and_shuffled(tmp_p
     )
 
 
+def test_token_state_arms_keep_all_tokens_and_only_shuffle_complete_past_steps(
+    tmp_path,
+):
+    sample = _sample(tmp_path, 3, error=True)
+    example = TaskExample(
+        sample, visible_steps=4, boundary_step=4, task_name="strict_prefix"
+    )
+    steps = (
+        np.asarray([[10.0], [11.0]], dtype=np.float32),
+        np.asarray([[20.0], [21.0], [22.0]], dtype=np.float32),
+        np.asarray([[30.0]], dtype=np.float32),
+        np.asarray([[40.0], [41.0]], dtype=np.float32),
+    )
+
+    initial = _arm_sequence(steps, example, "initial_state", seed=7)
+    current = _arm_sequence(steps, example, "current_state", seed=7)
+    ordered = _arm_sequence(steps, example, "ordered_history", seed=7)
+    shuffled = _arm_sequence(steps, example, "shuffled_history", seed=7)
+
+    assert initial[:, 0].tolist() == [10.0, 11.0]
+    assert current[:, 0].tolist() == [40.0, 41.0]
+    assert ordered[:, 0].tolist() == [
+        10.0,
+        11.0,
+        20.0,
+        21.0,
+        22.0,
+        30.0,
+        40.0,
+        41.0,
+    ]
+    assert shuffled[-2:, 0].tolist() == [40.0, 41.0]
+    assert sorted(shuffled[:-2, 0].tolist()) == [
+        10.0,
+        11.0,
+        20.0,
+        21.0,
+        22.0,
+        30.0,
+    ]
+    assert shuffled[:-2, 0].tolist() != ordered[:-2, 0].tolist()
+    for step in steps[:-1]:
+        positions = [
+            int(np.flatnonzero(shuffled[:, 0] == token)[0]) for token in step[:, 0]
+        ]
+        assert positions == list(range(positions[0], positions[0] + len(step)))
+
+
 def test_predictive_state_plugin_returns_capacity_matched_raw_history_arms(tmp_path):
     load_builtin_methods()
     method = create_method(
@@ -104,6 +152,7 @@ def test_predictive_state_plugin_returns_capacity_matched_raw_history_arms(tmp_p
         PredictiveStateConfig(
             pca_dim=2,
             positions_per_chain=4,
+            sequence_unit="token",
             width=4,
             epochs=2,
             patience=1,
@@ -130,3 +179,6 @@ def test_predictive_state_plugin_returns_capacity_matched_raw_history_arms(tmp_p
     assert result.diagnostics["pca_fit_scope"] == "outer_train_unique_chains"
     assert result.diagnostics["target_alignment"] == "completed_prefix_predicts_next_step_first_error"
     assert result.diagnostics["uses_final_response_length"] is False
+    assert result.diagnostics["sequence_unit"] == "token"
+    assert result.diagnostics["step_pooling"] == "none"
+    assert result.diagnostics["all_visible_step_tokens_preserved"] is True
