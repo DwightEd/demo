@@ -146,3 +146,19 @@ def test_hidden_geometry_runner_exposes_unpooled_token_state_modes() -> None:
             assert '"batch_size":64' in branch
     assert 'predictive_token_smoke_${RUN_TAG}' in script
     assert 'predictive_token_full_seed${state_seed}_${RUN_TAG}' in script
+
+
+def test_hidden_geometry_runner_exposes_token_markov_audit_modes() -> None:
+    runner = Path(__file__).resolve().parents[1] / "run_hidden_geometry_remote.sh"
+    script = runner.read_text(encoding="utf-8")
+
+    for mode in ("token-markov-smoke", "token-markov-full"):
+        marker = f"  {mode})"
+        assert marker in script
+        start = script.index(marker)
+        branch = script[start : script.index("    ;;", start)]
+        assert "--tasks strict_prefix" in branch
+        assert "--method token_predictive_state" in branch
+        assert '"history_order":4' in branch
+    assert 'token_markov_smoke_${RUN_TAG}' in script
+    assert 'token_markov_full_${RUN_TAG}' in script

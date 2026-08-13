@@ -12,6 +12,9 @@ def load_builtin_methods() -> None:
         "functional_divergence.hidden_state_geometry.methods.predictive_state_monitor"
     )
     import_module(
+        "functional_divergence.hidden_state_geometry.methods.token_predictive_state"
+    )
+    import_module(
         "functional_divergence.hidden_state_geometry.methods.component_resolved_hazard"
     )
 

@@ -7,9 +7,9 @@ to decide whether a completed run is worth inspecting further.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
-
+from typing import Any
 
 DISPLAYED_NLL_HALF_UNIT = 5e-5
 
@@ -62,6 +62,10 @@ def _diagnostic_values(diagnostics: Any, name: str) -> list[float]:
         for row in diagnostics
         if row.get(name) is not None
     ]
+
+
+def _diagnostic_mean(rows: list[Mapping[str, Any]], name: str) -> float:
+    return sum(_number(row[name]) for row in rows) / len(rows)
 
 
 def format_run_summary(result: Mapping[str, Any], output_dir: str | Path) -> str:
@@ -143,6 +147,29 @@ def format_run_summary(result: Mapping[str, Any], output_dir: str | Path) -> str
                     f"    remove_history max|delta_p|={max(remove_change):.4f} | "
                     f"shuffle_history max|delta_p|={max(shuffle_change):.4f}"
                 )
+        transition_rows = [
+            row["test_transition_diagnostics"]
+            for row in diagnostics
+            if row.get("analysis_unit") == "token_transition"
+            and "test_transition_diagnostics" in row
+        ]
+        if transition_rows:
+            lines.append(
+                "  token predictive-state diagnostics (held-domain transitions):"
+            )
+            lines.append(
+                f"    AR1 NMSE={_diagnostic_mean(transition_rows, 'ar1_nmse'):.4f} | "
+                "ordered AR(p) NMSE="
+                f"{_diagnostic_mean(transition_rows, 'ordered_nmse'):.4f} | "
+                "shuffled-history NMSE="
+                f"{_diagnostic_mean(transition_rows, 'shuffled_nmse'):.4f}"
+            )
+            lines.append(
+                "    history gain="
+                f"{_signed(_diagnostic_mean(transition_rows, 'history_gain_nmse'))} | "
+                "order-specific gain="
+                f"{_signed(_diagnostic_mean(transition_rows, 'history_order_gain_nmse'))}"
+            )
     return "\n".join(lines)
 
 

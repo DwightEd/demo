@@ -107,6 +107,42 @@ def test_run_summary_surfaces_probe_level_history_mechanism_diagnostics():
     assert "shuffle_history max|delta_p|=0.0400" in text
 
 
+def test_run_summary_surfaces_token_markov_transition_diagnostics():
+    result = _result(0.01, -0.01, 0.03)
+    result["method"]["name"] = "token_predictive_state"
+    result["tasks"]["whole_chain"]["fold_diagnostics"] = [
+        {
+            "analysis_unit": "token_transition",
+            "test_transition_diagnostics": {
+                "transitions": 100,
+                "ar1_nmse": 0.82,
+                "ordered_nmse": 0.76,
+                "shuffled_nmse": 0.80,
+                "history_gain_nmse": 0.06,
+                "history_order_gain_nmse": 0.04,
+            },
+        },
+        {
+            "analysis_unit": "token_transition",
+            "test_transition_diagnostics": {
+                "transitions": 200,
+                "ar1_nmse": 0.78,
+                "ordered_nmse": 0.74,
+                "shuffled_nmse": 0.77,
+                "history_gain_nmse": 0.04,
+                "history_order_gain_nmse": 0.03,
+            },
+        },
+    ]
+
+    text = format_run_summary(result, "/tmp/output")
+
+    assert "token predictive-state diagnostics (held-domain transitions):" in text
+    assert "AR1 NMSE=0.8000 | ordered AR(p) NMSE=0.7500" in text
+    assert "shuffled-history NMSE=0.7850" in text
+    assert "history gain=+0.0500 | order-specific gain=+0.0350" in text
+
+
 def test_preflight_summary_reports_domain_provenance_without_json_blob():
     text = format_preflight_summary(
         {

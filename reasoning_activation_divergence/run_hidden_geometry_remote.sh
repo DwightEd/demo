@@ -148,6 +148,18 @@ run_predictive_state_pytest_if_available() {
   fi
 }
 
+run_token_markov_pytest_if_available() {
+  if "${PYTHON_BIN}" -c 'import importlib.util; raise SystemExit(0 if importlib.util.find_spec("pytest") else 1)'; then
+    "${PYTHON_BIN}" -m pytest \
+      tests/hidden_state_geometry/test_token_predictive_state.py \
+      tests/hidden_state_geometry/test_data.py \
+      tests/hidden_state_geometry/test_tasks.py \
+      tests/test_remote_runner.py
+  else
+    echo "pytest is not installed in ${PYTHON_BIN}; skipping focused token-Markov tests"
+  fi
+}
+
 base_common=(
   --data-root "${DATA_ROOT}"
   --domains gsm8k,math,olympiadbench,omnimath
@@ -304,6 +316,24 @@ case "${MODE}" in
         --output-dir "${OUTPUT_ROOT}/predictive_token_full_seed${state_seed}_${RUN_TAG}"
     done
     ;;
+  token-markov-smoke)
+    run_token_markov_pytest_if_available
+    token_markov_config='{"pca_dim":4,"positions_per_chain":8,"history_order":4,"transitions_per_chain":32,"recent_window":8,"dynamics_ridge_alpha":10.0,"hazard_l2":0.1,"hazard_max_iter":2000}'
+    "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+      "${base_common[@]}" --seed 17 --tasks strict_prefix \
+      --method token_predictive_state --method-config-json "${token_markov_config}" \
+      --max-records-per-domain 32 --bootstrap 200 \
+      --output-dir "${OUTPUT_ROOT}/token_markov_smoke_${RUN_TAG}"
+    ;;
+  token-markov-full)
+    run_token_markov_pytest_if_available
+    token_markov_config='{"pca_dim":4,"positions_per_chain":16,"history_order":4,"transitions_per_chain":64,"recent_window":8,"dynamics_ridge_alpha":10.0,"hazard_l2":0.1,"hazard_max_iter":2000}'
+    "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+      "${base_common[@]}" --seed 17 --tasks strict_prefix \
+      --method token_predictive_state --method-config-json "${token_markov_config}" \
+      --max-records-per-domain 0 --bootstrap 2000 \
+      --output-dir "${OUTPUT_ROOT}/token_markov_full_${RUN_TAG}"
+    ;;
   innovation-smoke)
     innovation_config='{"source_layer":14,"destination_layer":16,"rank":4,"normal_ridge_alpha":10.0,"covariance_shrinkage":0.1,"l2":0.1,"max_iter":2000}'
     "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
@@ -321,7 +351,7 @@ case "${MODE}" in
       --output-dir "${OUTPUT_ROOT}/innovation_full_${RUN_TAG}"
     ;;
   *)
-    echo "usage: $0 causal-audit|causal-extract-smoke|causal-intervene-smoke|causal-summarize-smoke|causal-monitor-smoke|causal-monitor-full|causal-full|preflight|smoke|full|ridge-smoke|ridge-full|predictive-state-smoke|predictive-state-full|predictive-token-smoke|predictive-token-full|innovation-smoke|innovation-full" >&2
+    echo "usage: $0 causal-audit|causal-extract-smoke|causal-intervene-smoke|causal-summarize-smoke|causal-monitor-smoke|causal-monitor-full|causal-full|preflight|smoke|full|ridge-smoke|ridge-full|predictive-state-smoke|predictive-state-full|predictive-token-smoke|predictive-token-full|token-markov-smoke|token-markov-full|innovation-smoke|innovation-full" >&2
     exit 2
     ;;
 esac
