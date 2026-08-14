@@ -269,8 +269,7 @@ def main(argv: list[str] | None = None) -> None:
             rows, false_alarm_threshold=args.false_alarm_threshold
         )
     elif args.command == "message-fisher":
-        model = _load_model(args)
-        report = MessageFisherExperiment(
+        experiment = MessageFisherExperiment(
             MessageFisherExperimentConfig(
                 data_root=args.data_root,
                 domains=args.domains,
@@ -283,7 +282,9 @@ def main(argv: list[str] | None = None) -> None:
                 seed=args.seed,
                 reconstruction_tolerance=args.reconstruction_tolerance,
             )
-        ).run(model)
+        )
+        jobs = experiment.prepare()
+        report = experiment.run(_load_model(args), jobs)
     elif args.command == "summarize":
         report = summarize_saved_interventions(
             args.data_root, args.domains, pair_directory=args.pair_directory
