@@ -16,7 +16,7 @@ from ..hidden_state_geometry.component_replay import (
     _reshape_value_projection,
     _resolve_model_topology,
 )
-from .replay import _PrefixValueCapture, _decision_contexts
+from .replay import _decision_contexts, _PrefixValueCapture
 
 FFN_DIRECTION_ID = -32768
 
@@ -29,11 +29,13 @@ class SourceMessageFisherResult:
     source_ids: np.ndarray
     direction_source_ids: np.ndarray
     source_messages: np.ndarray
+    attention_mass: np.ndarray
     attention_output: np.ndarray
     mlp_output: np.ndarray
     residual_pre: np.ndarray
     residual_post: np.ndarray
     fisher_gram: np.ndarray
+    euclidean_gram: np.ndarray
     observed_symmetric_kl: np.ndarray
     predicted_quadratic_kl: np.ndarray
     quadratic_relative_error: np.ndarray
@@ -48,9 +50,10 @@ class SourceMessageFisherResult:
         direction_count = source_count + 1
         if self.direction_source_ids.shape != (direction_count,):
             raise ValueError("direction ids must contain every source and one FFN")
-        if not np.array_equal(
-            self.direction_source_ids[:-1], self.source_ids
-        ) or int(self.direction_source_ids[-1]) != FFN_DIRECTION_ID:
+        if (
+            not np.array_equal(self.direction_source_ids[:-1], self.source_ids)
+            or int(self.direction_source_ids[-1]) != FFN_DIRECTION_ID
+        ):
             raise ValueError("direction ids must end with the typed FFN direction")
         if self.source_messages.ndim != 3:
             raise ValueError("source_messages must have shape [layer,source,hidden]")
@@ -58,6 +61,16 @@ class SourceMessageFisherResult:
         expected_vector = (layer_count, hidden)
         if self.source_messages.shape != (layer_count, source_count, hidden):
             raise ValueError("source_messages do not align with layers and sources")
+        if (
+            self.attention_mass.ndim != 3
+            or self.attention_mass.shape[0] != layer_count
+            or self.attention_mass.shape[2] != source_count
+        ):
+            raise ValueError("attention_mass must have shape [layer,head,source]")
+        if np.any(self.attention_mass < 0.0) or not np.allclose(
+            self.attention_mass.sum(axis=2), 1.0, rtol=1e-5, atol=1e-6
+        ):
+            raise ValueError("attention_mass must be normalized over source nodes")
         for name in (
             "attention_output",
             "mlp_output",
@@ -72,6 +85,8 @@ class SourceMessageFisherResult:
             direction_count,
         ):
             raise ValueError("fisher_gram must have shape [layer,direction,direction]")
+        if self.euclidean_gram.shape != self.fisher_gram.shape:
+            raise ValueError("euclidean_gram must align with fisher_gram")
         for name in (
             "observed_symmetric_kl",
             "predicted_quadratic_kl",
@@ -90,11 +105,13 @@ class SourceMessageFisherResult:
                 raise ValueError(f"{name} must have shape [layer]")
         numeric = (
             self.source_messages,
+            self.attention_mass,
             self.attention_output,
             self.mlp_output,
             self.residual_pre,
             self.residual_post,
             self.fisher_gram,
+            self.euclidean_gram,
             self.observed_symmetric_kl,
             self.predicted_quadratic_kl,
             self.quadratic_relative_error,
@@ -109,6 +126,8 @@ class SourceMessageFisherResult:
             raise ValueError("epsilon must be finite and positive")
         for gram in self.fisher_gram:
             fisher_diagnostics(gram, direction_source_ids=self.direction_source_ids)
+        for gram in self.euclidean_gram:
+            fisher_diagnostics(gram, direction_source_ids=self.direction_source_ids)
 
     def summary_rows(self) -> list[dict[str, float | int]]:
         self.validate()
@@ -120,10 +139,15 @@ class SourceMessageFisherResult:
                     direction_source_ids=self.direction_source_ids,
                 )
             )
+            euclidean = fisher_diagnostics(
+                self.euclidean_gram[index],
+                direction_source_ids=self.direction_source_ids,
+            )
+            direction_count = len(self.direction_source_ids)
             diagnostics.update(
                 {
                     "layer": int(layer),
-                    "source_count": int(len(self.source_ids)),
+                    "source_count": len(self.source_ids),
                     "baseline_entropy": float(self.baseline_entropy),
                     "median_quadratic_relative_error": float(
                         np.median(self.quadratic_relative_error[index])
@@ -133,6 +157,20 @@ class SourceMessageFisherResult:
                     ),
                     "max_block_reconstruction_error": float(
                         self.block_reconstruction_error[index]
+                    ),
+                    "mean_fisher_energy": float(
+                        diagnostics["fisher_trace"] / direction_count
+                    ),
+                    "euclidean_largest_eigenvalue": float(
+                        euclidean["largest_eigenvalue"]
+                    ),
+                    "euclidean_trace": float(euclidean["fisher_trace"]),
+                    "mean_euclidean_energy": float(
+                        euclidean["fisher_trace"] / direction_count
+                    ),
+                    "fisher_to_euclidean_trace_ratio": float(
+                        diagnostics["fisher_trace"]
+                        / max(float(euclidean["fisher_trace"]), 1e-12)
                     ),
                 }
             )
@@ -153,9 +191,30 @@ def source_binned_residual_messages(
     Token contexts are grouped before the output projection, avoiding the
     prohibitively large dense ``[head, source_token, hidden]`` tensor.
     """
+    source_ids, messages, _source_mass, reconstructed = (
+        source_binned_attention_components(
+            attention,
+            expanded_values,
+            output_weight,
+            source_step_ids=source_step_ids,
+            query_position=query_position,
+        )
+    )
+    return source_ids, messages, reconstructed
+
+
+def source_binned_attention_components(
+    attention,
+    expanded_values,
+    output_weight,
+    *,
+    source_step_ids: np.ndarray,
+    query_position: int,
+):
+    """Return residual writes and normalized head-wise mass per source node."""
     import torch
 
-    contexts, _mass, head_projection = _decision_contexts(
+    contexts, mass, head_projection = _decision_contexts(
         attention,
         expanded_values,
         output_weight,
@@ -169,16 +228,17 @@ def source_binned_residual_messages(
 
     unique_ids = np.unique(source_ids.astype(np.int64, copy=False))
     messages = []
+    source_mass = []
     for source_id in unique_ids:
         mask = torch.as_tensor(
             source_ids == source_id, device=contexts.device, dtype=torch.bool
         )
         grouped_context = contexts[:, mask].sum(dim=1)
-        messages.append(
-            torch.einsum("hd,ohd->o", grouped_context, head_projection)
-        )
+        source_mass.append(mass[:, mask].sum(dim=1))
+        messages.append(torch.einsum("hd,ohd->o", grouped_context, head_projection))
     stacked = torch.stack(messages, dim=0)
-    return unique_ids, stacked, stacked.sum(dim=0)
+    stacked_mass = torch.stack(source_mass, dim=1)
+    return unique_ids, stacked, stacked_mass, stacked.sum(dim=0)
 
 
 def _backbone_hidden(output):
@@ -190,9 +250,7 @@ def _replace_output_with_delta(output, delta):
     hidden = _as_hidden(output).clone()
     if delta.shape != (hidden.shape[0], hidden.shape[2]):
         raise ValueError("patch delta must have shape [batch,hidden]")
-    hidden[:, -1] = hidden[:, -1] + delta.to(
-        device=hidden.device, dtype=hidden.dtype
-    )
+    hidden[:, -1] = hidden[:, -1] + delta.to(device=hidden.device, dtype=hidden.dtype)
     if isinstance(output, tuple):
         return (hidden, *output[1:])
     if isinstance(output, list):
@@ -218,6 +276,7 @@ class _MessageCapture:
         self.pre: dict[int, object] = {}
         self.raw_values: dict[int, object] = {}
         self.messages: dict[int, object] = {}
+        self.mass: dict[int, object] = {}
         self.attention: dict[int, object] = {}
         self.mlp: dict[int, object] = {}
         self.post: dict[int, object] = {}
@@ -288,36 +347,50 @@ class _MessageCapture:
         output_projection = getattr(module, "o_proj", None)
         if output_projection is None or not hasattr(output_projection, "weight"):
             raise TypeError("attention module does not expose o_proj.weight")
-        source_ids, messages, reconstructed = source_binned_residual_messages(
-            attention,
-            expanded,
-            output_projection.weight,
-            source_step_ids=self.source_step_ids,
-            query_position=int(attention.shape[2]) - 1,
+        source_ids, messages, source_mass, reconstructed = (
+            source_binned_attention_components(
+                attention,
+                expanded,
+                output_projection.weight,
+                source_step_ids=self.source_step_ids,
+                query_position=int(attention.shape[2]) - 1,
+            )
         )
         if self.source_ids is None:
             self.source_ids = source_ids
         elif not np.array_equal(self.source_ids, source_ids):
             raise RuntimeError("source grouping changed across selected layers")
         self.messages[position] = messages.detach()
+        self.mass[position] = source_mass.detach()
         self.attention[position] = _as_hidden(output)[0, -1].detach()
         if reconstructed.shape != self.attention[position].shape:
             raise RuntimeError("reconstructed attention has the wrong hidden shape")
 
     def arrays(self) -> tuple[np.ndarray, ...]:
-        stores = (self.pre, self.messages, self.attention, self.mlp, self.post)
+        stores = (
+            self.pre,
+            self.messages,
+            self.mass,
+            self.attention,
+            self.mlp,
+            self.post,
+        )
         expected = set(range(len(self.layers)))
         if self.source_ids is None or any(set(store) != expected for store in stores):
             raise RuntimeError("message replay did not capture every selected layer")
 
         def stack(store: dict[int, object]) -> np.ndarray:
             return np.stack(
-                [store[index].float().cpu().numpy() for index in range(len(self.layers))]
+                [
+                    store[index].float().cpu().numpy()
+                    for index in range(len(self.layers))
+                ]
             )
 
         return (
             self.source_ids.copy(),
             stack(self.messages),
+            stack(self.mass),
             stack(self.attention),
             stack(self.mlp),
             stack(self.pre),
@@ -363,7 +436,7 @@ def fisher_diagnostics(
         raise ValueError("gram must be finite and symmetric")
 
     eigenvalues, eigenvectors = np.linalg.eigh(matrix)
-    tolerance = max(float(np.max(np.abs(eigenvalues))), 1.0) * 1e-9
+    tolerance = max(float(np.max(np.abs(eigenvalues))), 1.0) * 1e-7
     if float(eigenvalues.min(initial=0.0)) < -tolerance:
         raise ValueError("gram must be positive semidefinite")
     eigenvalues = np.clip(eigenvalues, 0.0, None)
@@ -379,9 +452,7 @@ def fisher_diagnostics(
         effective_rank = 0.0
         anisotropy = 0.0
         top_loading = np.zeros(matrix.shape[0], dtype=np.float64)
-    condition_number = (
-        float(largest / positive[0]) if positive.size > 0 else 0.0
-    )
+    condition_number = float(largest / positive[0]) if positive.size > 0 else 0.0
     return {
         "largest_eigenvalue": largest,
         "fisher_trace": total,
@@ -390,9 +461,7 @@ def fisher_diagnostics(
         "condition_number": condition_number,
         "numerical_rank": int(positive.size),
         "top_prompt_loading": float(top_loading[source_ids == -1].sum()),
-        "top_ffn_loading": float(
-            top_loading[source_ids == FFN_DIRECTION_ID].sum()
-        ),
+        "top_ffn_loading": float(top_loading[source_ids == FFN_DIRECTION_ID].sum()),
     }
 
 
@@ -443,7 +512,9 @@ class SourceMessageFisherRunner:
         tokens = np.asarray(input_ids, dtype=np.int64).reshape(-1)
         source_steps = np.asarray(source_step_ids, dtype=np.int64).reshape(-1)
         if tokens.size < 1 or source_steps.shape != tokens.shape:
-            raise ValueError("input_ids and source_step_ids must be non-empty and aligned")
+            raise ValueError(
+                "input_ids and source_step_ids must be non-empty and aligned"
+            )
         topology = _resolve_model_topology(model)
         if max(self.layers) > len(topology.blocks):
             raise ValueError("selected layer exceeds the model block count")
@@ -458,6 +529,7 @@ class SourceMessageFisherRunner:
         (
             source_ids,
             source_messages,
+            attention_mass,
             attention_output,
             mlp_output,
             residual_pre,
@@ -480,6 +552,7 @@ class SourceMessageFisherRunner:
             (source_ids.astype(np.int64), np.asarray([FFN_DIRECTION_ID]))
         )
         gram_rows = []
+        euclidean_rows = []
         observed_rows = []
         predicted_rows = []
         relative_rows = []
@@ -487,6 +560,7 @@ class SourceMessageFisherRunner:
             directions = np.concatenate(
                 (source_messages[layer_index], mlp_output[layer_index][None, :]), axis=0
             )
+            euclidean_rows.append(directions @ directions.T)
             plus, minus = self._directional_logits(
                 model=model,
                 topology=topology,
@@ -518,11 +592,13 @@ class SourceMessageFisherRunner:
             source_ids=source_ids.astype(np.int32),
             direction_source_ids=direction_ids.astype(np.int32),
             source_messages=source_messages.astype(np.float32),
+            attention_mass=attention_mass.astype(np.float32),
             attention_output=attention_output.astype(np.float32),
             mlp_output=mlp_output.astype(np.float32),
             residual_pre=residual_pre.astype(np.float32),
             residual_post=residual_post.astype(np.float32),
             fisher_gram=np.asarray(gram_rows, dtype=np.float64),
+            euclidean_gram=np.asarray(euclidean_rows, dtype=np.float64),
             observed_symmetric_kl=np.asarray(observed_rows, dtype=np.float64),
             predicted_quadratic_kl=np.asarray(predicted_rows, dtype=np.float64),
             quadratic_relative_error=np.asarray(relative_rows, dtype=np.float64),
@@ -628,11 +704,11 @@ class SourceMessageFisherRunner:
             attention_delta = torch.where(signed_source[:, None], signed, 0.0)
             mlp_delta = torch.where(signed_source[:, None], 0.0, signed)
 
-            def patch_attention(_module, _inputs, output):
-                return _replace_output_with_delta(output, attention_delta)
+            def patch_attention(_module, _inputs, output, *, delta=attention_delta):
+                return _replace_output_with_delta(output, delta)
 
-            def patch_mlp(_module, _inputs, output):
-                return _replace_output_with_delta(output, mlp_delta)
+            def patch_mlp(_module, _inputs, output, *, delta=mlp_delta):
+                return _replace_output_with_delta(output, delta)
 
             handles = (
                 attention_module.register_forward_hook(patch_attention),
@@ -686,5 +762,6 @@ __all__ = [
     "SourceMessageFisherRunner",
     "categorical_fisher_gram",
     "fisher_diagnostics",
+    "source_binned_attention_components",
     "source_binned_residual_messages",
 ]

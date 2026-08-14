@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -7,7 +8,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from tqdm.auto import tqdm
 
+from .message_fisher import SourceMessageFisherResult, SourceMessageFisherRunner
+from .trace_data import load_decision_prefix
 
 DEFAULT_FISHER_METRICS = (
     "largest_eigenvalue",
@@ -16,6 +20,9 @@ DEFAULT_FISHER_METRICS = (
     "anisotropy",
     "top_prompt_loading",
     "top_ffn_loading",
+    "mean_fisher_energy",
+    "mean_euclidean_energy",
+    "fisher_to_euclidean_trace_ratio",
 )
 
 
@@ -133,7 +140,7 @@ def _paired_differences(
 
 def _difference_summary(values: np.ndarray) -> dict[str, float | int]:
     return {
-        "n_pairs": int(len(values)),
+        "n_pairs": len(values),
         "mean_event_minus_control": float(np.mean(values)),
         "median_event_minus_control": float(np.median(values)),
         "positive_fraction": float(np.mean(values > 0.0)),
@@ -182,15 +189,227 @@ def paired_fisher_summary(
             entry["ci_high"] = float(np.quantile(estimates, 0.975))
             result["pooled"].setdefault(str(layer), {})[metric] = entry
             for domain, values in zip(domains, domain_values):
-                result["domains"].setdefault(domain, {}).setdefault(
-                    str(layer), {}
-                )[metric] = _difference_summary(values)
+                result["domains"].setdefault(domain, {}).setdefault(str(layer), {})[
+                    metric
+                ] = _difference_summary(values)
     return result
+
+
+@dataclass(frozen=True)
+class MessageFisherExperimentConfig:
+    data_root: Path
+    domains: tuple[str, ...]
+    layers: tuple[int, ...]
+    output_dir: Path
+    epsilon: float = 0.05
+    perturbation_batch_size: int = 4
+    max_cases_per_domain: int = 0
+    bootstrap_repeats: int = 1000
+    seed: int = 17
+    reconstruction_tolerance: float = 3e-2
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "data_root", Path(self.data_root))
+        object.__setattr__(self, "output_dir", Path(self.output_dir))
+        if not self.domains or any(not str(domain).strip() for domain in self.domains):
+            raise ValueError("domains must be non-empty")
+        if (
+            not self.layers
+            or min(self.layers) < 1
+            or len(set(self.layers)) != len(self.layers)
+        ):
+            raise ValueError("layers must be unique positive one-based indices")
+        if self.max_cases_per_domain < 0:
+            raise ValueError("max_cases_per_domain must be nonnegative")
+        if self.bootstrap_repeats < 1:
+            raise ValueError("bootstrap_repeats must be positive")
+        if not np.isfinite(self.reconstruction_tolerance) or not (
+            0.0 < self.reconstruction_tolerance < 1.0
+        ):
+            raise ValueError("reconstruction_tolerance must lie in (0,1)")
+
+
+def _save_fisher_artifact(
+    path: Path,
+    *,
+    result: SourceMessageFisherResult,
+    input_ids: np.ndarray,
+    source_step_ids: np.ndarray,
+    metadata: Mapping[str, Any],
+) -> None:
+    result.validate()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "input_ids": np.asarray(input_ids, dtype=np.int32),
+        "source_step_ids": np.asarray(source_step_ids, dtype=np.int16),
+        "layers": result.layers,
+        "source_ids": result.source_ids,
+        "direction_source_ids": result.direction_source_ids,
+        "source_messages": result.source_messages.astype(np.float16),
+        "attention_mass": result.attention_mass.astype(np.float32),
+        "attention_output": result.attention_output.astype(np.float16),
+        "mlp_output": result.mlp_output.astype(np.float16),
+        "residual_pre": result.residual_pre.astype(np.float16),
+        "residual_post": result.residual_post.astype(np.float16),
+        "fisher_gram": result.fisher_gram.astype(np.float32),
+        "euclidean_gram": result.euclidean_gram.astype(np.float32),
+        "observed_symmetric_kl": result.observed_symmetric_kl.astype(np.float32),
+        "predicted_quadratic_kl": result.predicted_quadratic_kl.astype(np.float32),
+        "quadratic_relative_error": result.quadratic_relative_error.astype(np.float32),
+        "attention_reconstruction_error": result.attention_reconstruction_error.astype(
+            np.float32
+        ),
+        "block_reconstruction_error": result.block_reconstruction_error.astype(
+            np.float32
+        ),
+        "baseline_entropy": np.asarray(result.baseline_entropy, dtype=np.float32),
+        "epsilon": np.asarray(result.epsilon, dtype=np.float32),
+        "metadata_json": np.asarray(json.dumps(dict(metadata), sort_keys=True)),
+    }
+    partial = path.with_suffix(".partial.npz")
+    with partial.open("wb") as handle:
+        np.savez_compressed(handle, **payload)
+    partial.replace(path)
+
+
+class MessageFisherExperiment:
+    """Run paired pre-error source-message Fisher measurements on ProcessBench."""
+
+    def __init__(self, config: MessageFisherExperimentConfig) -> None:
+        self.config = config
+
+    def run(self, model: object) -> dict[str, Any]:
+        runner = SourceMessageFisherRunner(
+            layers=self.config.layers,
+            epsilon=self.config.epsilon,
+            perturbation_batch_size=self.config.perturbation_batch_size,
+        )
+        jobs = []
+        for domain_index, domain in enumerate(self.config.domains):
+            trace = self.config.data_root / domain / "selected" / "trace.npz"
+            if not trace.is_file():
+                raise FileNotFoundError(trace)
+            pairs = first_error_boundary_pairs(
+                trace,
+                max_cases=self.config.max_cases_per_domain,
+                seed=self.config.seed + domain_index,
+            )
+            for pair in pairs:
+                jobs.append((domain, trace, pair))
+        if not jobs:
+            raise ValueError("no first-error cases with a preceding correct step")
+
+        rows: list[dict[str, Any]] = []
+        artifact_paths = []
+        for domain, trace, pair in tqdm(
+            jobs, desc="source-message Fisher pairs", unit="pair"
+        ):
+            case_id = f"{domain}_chain_{pair.chain_id}_row_{pair.record_index}"
+            boundaries = (
+                (
+                    "previous_correct",
+                    pair.control_step,
+                    pair.control_decision_position,
+                ),
+                ("first_error", pair.first_error_step, pair.event_decision_position),
+            )
+            for role, target_step, decision_position in boundaries:
+                prefix = load_decision_prefix(
+                    trace,
+                    record_index=pair.record_index,
+                    decision_position=decision_position,
+                )
+                if prefix.first_error_step != pair.first_error_step:
+                    raise ValueError(f"{case_id}: first-error metadata changed")
+                result = runner.run(
+                    model=model,
+                    input_ids=prefix.input_ids,
+                    source_step_ids=prefix.source_step_ids,
+                )
+                self._check_reconstruction(result, case_id=case_id, role=role)
+                artifact = (
+                    self.config.output_dir
+                    / "artifacts"
+                    / domain
+                    / f"{case_id}.{role}.source_message_fisher_v1.npz"
+                )
+                metadata = {
+                    "schema": "source_message_fisher_v1",
+                    "case_id": case_id,
+                    "domain": domain,
+                    "record_index": pair.record_index,
+                    "chain_id": pair.chain_id,
+                    "boundary_role": role,
+                    "target_step": target_step,
+                    "decision_position": decision_position,
+                    "first_error_step": pair.first_error_step,
+                    "future_tokens_used": False,
+                    "coordinate_definition": (
+                        "attention source-message coefficients plus local FFN coefficient"
+                    ),
+                }
+                _save_fisher_artifact(
+                    artifact,
+                    result=result,
+                    input_ids=prefix.input_ids,
+                    source_step_ids=prefix.source_step_ids,
+                    metadata=metadata,
+                )
+                artifact_paths.append(str(artifact))
+                for diagnostic in result.summary_rows():
+                    rows.append({**metadata, **diagnostic, "artifact": str(artifact)})
+
+        self.config.output_dir.mkdir(parents=True, exist_ok=True)
+        events_path = self.config.output_dir / "events.jsonl"
+        events_path.write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        paired = paired_fisher_summary(
+            rows,
+            metrics=DEFAULT_FISHER_METRICS,
+            bootstrap_repeats=self.config.bootstrap_repeats,
+            seed=self.config.seed,
+        )
+        report = {
+            "schema": "source_message_fisher_experiment_v1",
+            "paired_cases": len(jobs),
+            "boundary_runs": 2 * len(jobs),
+            "layers": list(self.config.layers),
+            "epsilon": self.config.epsilon,
+            "perturbation_batch_size": self.config.perturbation_batch_size,
+            "max_cases_per_domain": self.config.max_cases_per_domain,
+            "bootstrap_repeats": self.config.bootstrap_repeats,
+            "artifacts": artifact_paths,
+            "paired_summary": paired,
+            "interpretation": (
+                "descriptive functional geometry with intervention-locality audit; "
+                "not evidence of a thermodynamic phase transition"
+            ),
+        }
+        (self.config.output_dir / "summary.json").write_text(
+            json.dumps(report, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return report
+
+    def _check_reconstruction(
+        self, result: SourceMessageFisherResult, *, case_id: str, role: str
+    ) -> None:
+        attention_error = float(np.max(result.attention_reconstruction_error))
+        block_error = float(np.max(result.block_reconstruction_error))
+        if max(attention_error, block_error) > self.config.reconstruction_tolerance:
+            raise ValueError(
+                f"{case_id}/{role}: component reconstruction exceeded tolerance: "
+                f"attention={attention_error:.6g}, block={block_error:.6g}"
+            )
 
 
 __all__ = [
     "DEFAULT_FISHER_METRICS",
     "FirstErrorBoundaryPair",
+    "MessageFisherExperiment",
+    "MessageFisherExperimentConfig",
     "first_error_boundary_pairs",
     "paired_fisher_summary",
 ]

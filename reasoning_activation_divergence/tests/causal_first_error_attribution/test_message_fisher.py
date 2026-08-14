@@ -8,6 +8,7 @@ from functional_divergence.causal_first_error_attribution.message_fisher import 
     SourceMessageFisherRunner,
     categorical_fisher_gram,
     fisher_diagnostics,
+    source_binned_attention_components,
     source_binned_residual_messages,
 )
 
@@ -43,12 +44,25 @@ def test_source_binned_messages_reconstruct_attention_output() -> None:
     assert messages.shape == (3, 4)
     assert torch.allclose(messages.sum(dim=0), reconstructed, atol=1e-6)
 
+    component_ids, component_messages, source_mass, component_output = (
+        source_binned_attention_components(
+            attention,
+            values,
+            output_weight,
+            source_step_ids=np.asarray([-1, -1, 0, 1]),
+            query_position=0,
+        )
+    )
+    assert component_ids.tolist() == source_ids.tolist()
+    assert torch.allclose(component_messages, messages)
+    assert source_mass.shape == (2, 3)
+    assert torch.allclose(source_mass.sum(dim=1), torch.ones(2))
+    assert torch.allclose(component_output, reconstructed)
+
 
 def test_categorical_fisher_gram_matches_explicit_covariance() -> None:
     logits = np.asarray([0.3, -0.2, 0.7], dtype=np.float64)
-    jacobian = np.asarray(
-        [[1.0, 2.0, -1.0], [0.5, -0.5, 1.5]], dtype=np.float64
-    )
+    jacobian = np.asarray([[1.0, 2.0, -1.0], [0.5, -0.5, 1.5]], dtype=np.float64)
     probabilities = np.exp(logits - logits.max())
     probabilities /= probabilities.sum()
     covariance = np.diag(probabilities) - np.outer(probabilities, probabilities)
@@ -60,9 +74,7 @@ def test_categorical_fisher_gram_matches_explicit_covariance() -> None:
 
 def test_categorical_fisher_ignores_constant_logit_shift_directions() -> None:
     probabilities = np.asarray([0.2, 0.3, 0.5], dtype=np.float64)
-    jacobian = np.asarray(
-        [[1.0, 1.0, 1.0], [2.0, -1.0, 0.0]], dtype=np.float64
-    )
+    jacobian = np.asarray([[1.0, 1.0, 1.0], [2.0, -1.0, 0.0]], dtype=np.float64)
 
     gram = categorical_fisher_gram(probabilities, jacobian)
 
@@ -88,16 +100,14 @@ def test_fisher_diagnostics_report_anisotropy_and_typed_loadings() -> None:
 
 def test_fisher_math_rejects_invalid_probability_or_direction_shapes() -> None:
     with pytest.raises(ValueError, match="sum to one"):
-        categorical_fisher_gram(
-            np.asarray([0.2, 0.2]), np.asarray([[1.0, -1.0]])
-        )
+        categorical_fisher_gram(np.asarray([0.2, 0.2]), np.asarray([[1.0, -1.0]]))
     with pytest.raises(ValueError, match="vocabulary"):
-        categorical_fisher_gram(
-            np.asarray([0.5, 0.5]), np.asarray([[1.0, 0.0, -1.0]])
-        )
+        categorical_fisher_gram(np.asarray([0.5, 0.5]), np.asarray([[1.0, 0.0, -1.0]]))
 
 
-def test_source_message_runner_reconstructs_block_and_measures_output_geometry() -> None:
+def test_source_message_runner_reconstructs_block_and_measures_output_geometry() -> (
+    None
+):
     torch = pytest.importorskip("torch")
     from types import SimpleNamespace
 
@@ -115,9 +125,7 @@ def test_source_message_runner_reconstructs_block_and_measures_output_geometry()
         def forward(self, hidden_states, **_kwargs):
             batch, length, _hidden = hidden_states.shape
             values = self.v_proj(hidden_states).reshape(batch, length, 1, 2)
-            causal = torch.tril(
-                torch.ones(length, length, device=hidden_states.device)
-            )
+            causal = torch.tril(torch.ones(length, length, device=hidden_states.device))
             weights = causal / causal.sum(dim=-1, keepdim=True)
             weights = weights[None, None].expand(batch, 1, length, length)
             context = torch.einsum("bhqk,bkhd->bqhd", weights, values)
@@ -191,6 +199,8 @@ def test_source_message_runner_reconstructs_block_and_measures_output_geometry()
 
     assert result.source_ids.tolist() == [-1, 0]
     assert result.source_messages.shape == (1, 2, 2)
+    assert result.attention_mass.shape == (1, 1, 2)
+    np.testing.assert_allclose(result.attention_mass.sum(axis=2), 1.0, atol=1e-6)
     np.testing.assert_allclose(
         result.source_messages.sum(axis=1), result.attention_output, atol=1e-6
     )
@@ -201,6 +211,10 @@ def test_source_message_runner_reconstructs_block_and_measures_output_geometry()
     )
     assert result.direction_source_ids.tolist() == [-1, 0, FFN_DIRECTION_ID]
     assert result.fisher_gram.shape == (1, 3, 3)
+    assert result.euclidean_gram.shape == (1, 3, 3)
+    np.testing.assert_allclose(
+        result.euclidean_gram[0], result.euclidean_gram[0].T, atol=1e-8
+    )
     assert np.linalg.eigvalsh(result.fisher_gram[0]).min() >= -1e-8
     assert result.attention_reconstruction_error.max() < 1e-6
     assert result.block_reconstruction_error.max() < 1e-6
@@ -232,6 +246,8 @@ def test_source_message_runner_uses_real_llama_cache_and_gqa_contract() -> None:
     )
 
     assert result.source_messages.shape == (2, 2, 8)
+    assert result.attention_mass.shape == (2, 2, 2)
     assert result.fisher_gram.shape == (2, 3, 3)
+    assert result.euclidean_gram.shape == (2, 3, 3)
     assert result.attention_reconstruction_error.max() < 1e-4
     assert result.block_reconstruction_error.max() < 1e-4

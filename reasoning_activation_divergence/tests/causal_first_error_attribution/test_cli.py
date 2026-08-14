@@ -73,6 +73,36 @@ def test_cli_exposes_a_direct_processbench_monitor_training_command(tmp_path) ->
     assert args.device == "cpu"
 
 
+def test_cli_exposes_source_message_fisher_experiment(tmp_path) -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(
+        [
+            "message-fisher",
+            "--data-root",
+            str(tmp_path / "data"),
+            "--model-dir",
+            str(tmp_path / "model"),
+            "--layers",
+            "8,16",
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--epsilon",
+            "0.05",
+            "--perturbation-batch-size",
+            "3",
+            "--bootstrap",
+            "200",
+        ]
+    )
+
+    assert args.command == "message-fisher"
+    assert args.layers == (8, 16)
+    assert args.epsilon == 0.05
+    assert args.perturbation_batch_size == 3
+    assert args.bootstrap == 200
+
+
 def test_extract_checks_pair_availability_before_loading_model(
     tmp_path, monkeypatch, capsys
 ) -> None:

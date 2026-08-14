@@ -162,3 +162,19 @@ def test_hidden_geometry_runner_exposes_token_markov_audit_modes() -> None:
         assert '"history_order":4' in branch
     assert 'token_markov_smoke_${RUN_TAG}' in script
     assert 'token_markov_full_${RUN_TAG}' in script
+
+
+def test_hidden_geometry_runner_exposes_source_message_fisher_modes() -> None:
+    runner = Path(__file__).resolve().parents[1] / "run_hidden_geometry_remote.sh"
+    script = runner.read_text(encoding="utf-8")
+
+    for mode in ("causal-fisher-smoke", "causal-fisher-full"):
+        marker = f"  {mode})"
+        assert marker in script
+        start = script.index(marker)
+        branch = script[start : script.index("    ;;", start)]
+        assert "causal_first_error_attribution.main message-fisher" in branch
+        assert '--epsilon "${FISHER_EPSILON}"' in branch
+        assert '--perturbation-batch-size "${FISHER_BATCH_SIZE}"' in branch
+    assert 'causal_fisher_smoke_${RUN_TAG}' in script
+    assert 'causal_fisher_full_${RUN_TAG}' in script

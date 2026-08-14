@@ -32,6 +32,9 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/hidden_state_geometry}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RUN_TAG="${RUN_TAG:-$(date '+%Y%m%d_%H%M%S')}"
 STATE_SEEDS="${STATE_SEEDS:-17 29 41}"
+FISHER_EPSILON="${FISHER_EPSILON:-0.05}"
+FISHER_BATCH_SIZE="${FISHER_BATCH_SIZE:-4}"
+FISHER_CASES_PER_DOMAIN="${FISHER_CASES_PER_DOMAIN:-0}"
 
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONUNBUFFERED=1
@@ -218,6 +221,26 @@ case "${MODE}" in
       --epochs 20 --patience 4 --batch-size 32 --bootstrap 2000 \
       --device cuda
     ;;
+  causal-fisher-smoke)
+    run_causal_pytest_if_available
+    require_causal_runtime
+    "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main message-fisher \
+      "${causal_common[@]}" \
+      --output-dir "${OUTPUT_ROOT}/causal_fisher_smoke_${RUN_TAG}" \
+      --max-cases-per-domain 1 --bootstrap 200 \
+      --epsilon "${FISHER_EPSILON}" \
+      --perturbation-batch-size "${FISHER_BATCH_SIZE}"
+    ;;
+  causal-fisher-full)
+    run_causal_pytest_if_available
+    require_causal_runtime
+    "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main message-fisher \
+      "${causal_common[@]}" \
+      --output-dir "${OUTPUT_ROOT}/causal_fisher_full_${RUN_TAG}" \
+      --max-cases-per-domain "${FISHER_CASES_PER_DOMAIN}" --bootstrap 2000 \
+      --epsilon "${FISHER_EPSILON}" \
+      --perturbation-batch-size "${FISHER_BATCH_SIZE}"
+    ;;
   causal-full)
     "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main audit \
       --data-root "${DATA_ROOT}" \
@@ -351,7 +374,7 @@ case "${MODE}" in
       --output-dir "${OUTPUT_ROOT}/innovation_full_${RUN_TAG}"
     ;;
   *)
-    echo "usage: $0 causal-audit|causal-extract-smoke|causal-intervene-smoke|causal-summarize-smoke|causal-monitor-smoke|causal-monitor-full|causal-full|preflight|smoke|full|ridge-smoke|ridge-full|predictive-state-smoke|predictive-state-full|predictive-token-smoke|predictive-token-full|token-markov-smoke|token-markov-full|innovation-smoke|innovation-full" >&2
+    echo "usage: $0 causal-audit|causal-extract-smoke|causal-intervene-smoke|causal-summarize-smoke|causal-monitor-smoke|causal-monitor-full|causal-fisher-smoke|causal-fisher-full|causal-full|preflight|smoke|full|ridge-smoke|ridge-full|predictive-state-smoke|predictive-state-full|predictive-token-smoke|predictive-token-full|token-markov-smoke|token-markov-full|innovation-smoke|innovation-full" >&2
     exit 2
     ;;
 esac
