@@ -54,7 +54,7 @@ def first_error_boundary_pairs(
             raise ValueError(f"{path}: trace is missing {missing}")
         inputs = np.asarray(archive["full_input_ids"])
         masks = np.asarray(archive["full_attention_mask"])
-        ranges = np.asarray(archive["step_token_ranges"])
+        ranges = np.asarray(archive["step_token_ranges"], dtype=object)
         step_counts = np.asarray(archive["n_steps"], dtype=np.int64).reshape(-1)
         errors = np.asarray(archive["gold_error_step"], dtype=np.int64).reshape(-1)
         chain_ids = (
@@ -64,11 +64,12 @@ def first_error_boundary_pairs(
         )
     count = len(errors)
     if (
-        inputs.ndim != 2
-        or masks.shape != inputs.shape
-        or ranges.ndim != 3
+        inputs.ndim < 1
+        or masks.ndim < 1
+        or ranges.ndim < 1
+        or inputs.shape[0] != count
+        or masks.shape[0] != count
         or ranges.shape[0] != count
-        or ranges.shape[2] != 2
         or step_counts.shape != (count,)
         or chain_ids.shape != (count,)
     ):
@@ -82,14 +83,26 @@ def first_error_boundary_pairs(
         step_count = int(step_counts[row])
         if first_error < 1:
             continue
-        if first_error >= step_count or step_count > ranges.shape[1]:
+        input_row = np.asarray(inputs[row], dtype=np.int64).reshape(-1)
+        mask_row = np.asarray(masks[row], dtype=np.int64).reshape(-1)
+        range_row = np.asarray(ranges[row], dtype=np.int64)
+        if input_row.shape != mask_row.shape:
+            raise ValueError(f"record {row}: token and mask shapes disagree")
+        if range_row.ndim != 2 or range_row.shape[1] != 2:
+            raise ValueError(f"record {row}: step ranges must have shape [step,2]")
+        if first_error >= step_count or step_count > len(range_row):
             raise ValueError(f"record {row}: first error lies outside step ranges")
-        valid_count = int(np.sum(masks[row] == 1))
-        if valid_count < 1 or not np.all(masks[row, :valid_count] == 1):
+        valid_count = int(mask_row.sum())
+        if (
+            valid_count < 1
+            or not np.isin(mask_row, (0, 1)).all()
+            or not np.all(mask_row[:valid_count] == 1)
+            or not np.all(mask_row[valid_count:] == 0)
+        ):
             raise ValueError(f"record {row}: invalid attention mask")
         control_step = first_error - 1
-        control_position = int(ranges[row, control_step, 0]) - 1
-        event_position = int(ranges[row, first_error, 0]) - 1
+        control_position = int(range_row[control_step, 0]) - 1
+        event_position = int(range_row[first_error, 0]) - 1
         if not (0 <= control_position < event_position < valid_count):
             raise ValueError(f"record {row}: invalid consecutive decision boundaries")
         pairs.append(

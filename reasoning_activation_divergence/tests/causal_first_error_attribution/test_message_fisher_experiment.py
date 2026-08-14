@@ -17,6 +17,12 @@ from functional_divergence.causal_first_error_attribution.message_fisher_experim
 )
 
 
+def _object_vector(values) -> np.ndarray:
+    result = np.empty(len(values), dtype=object)
+    result[:] = values
+    return result
+
+
 def test_first_error_pairs_use_only_consecutive_future_free_boundaries(
     tmp_path,
 ) -> None:
@@ -61,6 +67,36 @@ def test_first_error_pairs_use_only_consecutive_future_free_boundaries(
     assert pair.control_step == 0
     assert pair.control_decision_position == 1
     assert pair.event_decision_position == 3
+
+
+def test_first_error_pairs_accept_production_ragged_trace_rows(tmp_path) -> None:
+    trace = tmp_path / "trace.npz"
+    np.savez_compressed(
+        trace,
+        full_input_ids=_object_vector(
+            [
+                np.asarray([10, 11, 20, 21, 30, 31]),
+                np.asarray([10, 12, 40, 41]),
+            ]
+        ),
+        full_attention_mask=_object_vector(
+            [np.ones(6, dtype=np.int8), np.ones(4, dtype=np.int8)]
+        ),
+        prompt_token_counts=np.asarray([2, 2]),
+        step_token_ranges=_object_vector(
+            [np.asarray([[2, 3], [4, 5]]), np.asarray([[2, 3]])]
+        ),
+        n_steps=np.asarray([2, 1]),
+        gold_error_step=np.asarray([1, 0]),
+        chain_idx=np.asarray([101, 102]),
+    )
+
+    pairs = first_error_boundary_pairs(trace, max_cases=0, seed=17)
+
+    assert len(pairs) == 1
+    assert pairs[0].record_index == 0
+    assert pairs[0].control_decision_position == 1
+    assert pairs[0].event_decision_position == 3
 
 
 def test_paired_summary_bootstraps_event_minus_control_by_case() -> None:

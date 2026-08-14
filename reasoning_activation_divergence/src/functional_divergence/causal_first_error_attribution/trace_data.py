@@ -46,16 +46,20 @@ def load_decision_prefix(
         inputs = np.asarray(archive["full_input_ids"])
         masks = np.asarray(archive["full_attention_mask"])
         row = int(record_index)
-        if inputs.ndim != 2 or masks.shape != inputs.shape:
-            raise ValueError("full input ids and attention mask must have shape [N,T]")
-        if not (0 <= row < inputs.shape[0]):
+        if inputs.ndim < 1 or masks.ndim < 1 or inputs.shape[0] != masks.shape[0]:
+            raise ValueError("full input ids and attention mask are not record aligned")
+        if not (0 <= row < len(inputs)):
             raise IndexError("record_index lies outside trace rows")
         token_row = np.asarray(inputs[row], dtype=np.int64).reshape(-1)
         mask_row = np.asarray(masks[row], dtype=np.int64).reshape(-1)
+        if token_row.shape != mask_row.shape:
+            raise ValueError("full input ids and attention mask row shapes disagree")
         zeros = np.flatnonzero(mask_row == 0)
         valid_count = int(zeros[0]) if zeros.size else len(mask_row)
-        if not np.all(mask_row[:valid_count] == 1) or not np.all(
-            mask_row[valid_count:] == 0
+        if (
+            not np.isin(mask_row, (0, 1)).all()
+            or not np.all(mask_row[:valid_count] == 1)
+            or not np.all(mask_row[valid_count:] == 0)
         ):
             raise ValueError("attention mask contains interior padding")
         q = int(decision_position)
