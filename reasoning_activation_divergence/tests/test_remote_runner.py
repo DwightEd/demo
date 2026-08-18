@@ -48,7 +48,7 @@ def test_hidden_geometry_runner_has_causal_first_error_modes() -> None:
     assert 'CAUSAL_LAYERS="${CAUSAL_LAYERS:-8,12,16,20,24,28}"' in script
     assert 'CAUSAL_DOMAINS="${CAUSAL_DOMAINS:-gsm8k,math,olympiadbench,omnimath}"' in script
     assert (
-        'DATA_ROOT="${DATA_ROOT:-/share/home/tm902089733300000/a903202310/lys/research/demo/data/exact/processbench_observer_llama31_full}"'
+        'DATA_ROOT="${DATA_ROOT:-/share/home/tm902089733300000/a903202310/lys/data/ProcessBench/reasoning_error_detection/llama31_8b}"'
         in script
     )
     assert '--domains "${CAUSAL_DOMAINS}"' in script
@@ -106,3 +106,75 @@ def test_hidden_geometry_runner_keeps_interactive_terminal_visible_on_failure() 
     assert "trap stop_on_failure ERR" in script
     assert "[[ -t 0 && -t 1 ]]" in script
     assert 'exit "${status}"' in script
+
+
+def test_hidden_geometry_runner_exposes_predictive_state_modes() -> None:
+    runner = Path(__file__).resolve().parents[1] / "run_hidden_geometry_remote.sh"
+    script = runner.read_text(encoding="utf-8")
+
+    for mode in ("predictive-state-smoke", "predictive-state-full"):
+        marker = f"  {mode})"
+        assert marker in script
+        start = script.index(marker)
+        branch = script[start : script.index("    ;;", start)]
+        assert "--tasks strict_prefix" in branch
+        assert "--method predictive_state_monitor" in branch
+        assert '"device":"cuda"' in branch
+    assert 'predictive_state_smoke_${RUN_TAG}' in script
+    assert 'predictive_state_full_seed${state_seed}_${RUN_TAG}' in script
+
+
+def test_hidden_geometry_runner_exposes_unpooled_token_state_modes() -> None:
+    runner = Path(__file__).resolve().parents[1] / "run_hidden_geometry_remote.sh"
+    script = runner.read_text(encoding="utf-8")
+
+    for mode in ("predictive-token-smoke", "predictive-token-full"):
+        marker = f"  {mode})"
+        assert marker in script
+        start = script.index(marker)
+        branch = script[start : script.index("    ;;", start)]
+        assert "--tasks strict_prefix" in branch
+        assert "--method predictive_state_monitor" in branch
+        assert '"sequence_unit":"token"' in branch
+        assert '"sequence_encoder":"attention_pool"' in branch
+        assert '"device":"cuda"' in branch
+        if mode.endswith("smoke"):
+            assert '"positions_per_chain":8' in branch
+            assert '"batch_size":32' in branch
+        else:
+            assert '"positions_per_chain":16' in branch
+            assert '"batch_size":64' in branch
+    assert 'predictive_token_smoke_${RUN_TAG}' in script
+    assert 'predictive_token_full_seed${state_seed}_${RUN_TAG}' in script
+
+
+def test_hidden_geometry_runner_exposes_token_markov_audit_modes() -> None:
+    runner = Path(__file__).resolve().parents[1] / "run_hidden_geometry_remote.sh"
+    script = runner.read_text(encoding="utf-8")
+
+    for mode in ("token-markov-smoke", "token-markov-full"):
+        marker = f"  {mode})"
+        assert marker in script
+        start = script.index(marker)
+        branch = script[start : script.index("    ;;", start)]
+        assert "--tasks strict_prefix" in branch
+        assert "--method token_predictive_state" in branch
+        assert '"history_order":4' in branch
+    assert 'token_markov_smoke_${RUN_TAG}' in script
+    assert 'token_markov_full_${RUN_TAG}' in script
+
+
+def test_hidden_geometry_runner_exposes_source_message_fisher_modes() -> None:
+    runner = Path(__file__).resolve().parents[1] / "run_hidden_geometry_remote.sh"
+    script = runner.read_text(encoding="utf-8")
+
+    for mode in ("causal-fisher-smoke", "causal-fisher-full"):
+        marker = f"  {mode})"
+        assert marker in script
+        start = script.index(marker)
+        branch = script[start : script.index("    ;;", start)]
+        assert "causal_first_error_attribution.main message-fisher" in branch
+        assert '--epsilon "${FISHER_EPSILON}"' in branch
+        assert '--perturbation-batch-size "${FISHER_BATCH_SIZE}"' in branch
+    assert 'causal_fisher_smoke_${RUN_TAG}' in script
+    assert 'causal_fisher_full_${RUN_TAG}' in script

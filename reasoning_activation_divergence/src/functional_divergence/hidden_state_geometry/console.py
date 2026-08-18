@@ -7,8 +7,11 @@ to decide whether a completed run is worth inspecting further.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
+
+DISPLAYED_NLL_HALF_UNIT = 5e-5
 
 
 def _number(value: Any) -> float:
@@ -24,12 +27,22 @@ def _joined(values: Any) -> str:
 
 
 def _increment_status(increment: Mapping[str, Any]) -> tuple[str, str]:
-    if _number(increment["ci_low"]) > 0:
+    ci_low = _number(increment["ci_low"])
+    ci_high = _number(increment["ci_high"])
+    if (
+        abs(ci_low) < DISPLAYED_NLL_HALF_UNIT
+        and abs(ci_high) < DISPLAYED_NLL_HALF_UNIT
+    ):
+        return (
+            "numerically_indistinguishable",
+            "conditional bootstrap interval is below the displayed NLL resolution",
+        )
+    if ci_low > DISPLAYED_NLL_HALF_UNIT:
         return (
             "better_on_evaluated_domains",
             "conditional bootstrap CI entirely > 0; candidate model better",
         )
-    if _number(increment["ci_high"]) < 0:
+    if ci_high < -DISPLAYED_NLL_HALF_UNIT:
         return (
             "worse_on_evaluated_domains",
             "conditional bootstrap CI entirely < 0; candidate model worse",
@@ -41,6 +54,18 @@ def _inference_label(scope: Any) -> str:
     if scope == "conditional_test_problem_group_cluster_bootstrap":
         return "conditional test problem-group bootstrap"
     return str(scope).replace("_", " ")
+
+
+def _diagnostic_values(diagnostics: Any, name: str) -> list[float]:
+    return [
+        _number(row[name])
+        for row in diagnostics
+        if row.get(name) is not None
+    ]
+
+
+def _diagnostic_mean(rows: list[Mapping[str, Any]], name: str) -> float:
+    return sum(_number(row[name]) for row in rows) / len(rows)
 
 
 def format_run_summary(result: Mapping[str, Any], output_dir: str | Path) -> str:
@@ -88,6 +113,62 @@ def format_run_summary(result: Mapping[str, Any], output_dir: str | Path) -> str
                 f"  {name}: {_signed(increment['point'])} "
                 f"[95% CI {_signed(increment['ci_low'])}, "
                 f"{_signed(increment['ci_high'])}] | {status} ({explanation}){scope}"
+            )
+        diagnostics = task.get("fold_diagnostics", [])
+        encoders = sorted(
+            {str(row["sequence_encoder"]) for row in diagnostics if "sequence_encoder" in row}
+        )
+        history_mass = _diagnostic_values(
+            diagnostics, "ordered_history_attention_mass_mean"
+        )
+        history_excess = _diagnostic_values(
+            diagnostics,
+            "ordered_history_attention_excess_over_token_fraction_mean",
+        )
+        remove_change = _diagnostic_values(
+            diagnostics,
+            "same_model_history_ablation_max_abs_probability_change",
+        )
+        shuffle_change = _diagnostic_values(
+            diagnostics,
+            "same_model_history_shuffle_max_abs_probability_change",
+        )
+        if encoders and (history_mass or remove_change or shuffle_change):
+            lines.append("  probe-mechanism diagnostics (descriptive, not LLM-causal):")
+            if history_mass and history_excess:
+                lines.append(
+                    f"    encoder={_joined(encoders)} | "
+                    f"history_attention_mass={sum(history_mass) / len(history_mass):.4f} | "
+                    "excess_over_uniform_token_share="
+                    f"{_signed(sum(history_excess) / len(history_excess))}"
+                )
+            if remove_change and shuffle_change:
+                lines.append(
+                    f"    remove_history max|delta_p|={max(remove_change):.4f} | "
+                    f"shuffle_history max|delta_p|={max(shuffle_change):.4f}"
+                )
+        transition_rows = [
+            row["test_transition_diagnostics"]
+            for row in diagnostics
+            if row.get("analysis_unit") == "token_transition"
+            and "test_transition_diagnostics" in row
+        ]
+        if transition_rows:
+            lines.append(
+                "  token predictive-state diagnostics (held-domain transitions):"
+            )
+            lines.append(
+                f"    AR1 NMSE={_diagnostic_mean(transition_rows, 'ar1_nmse'):.4f} | "
+                "ordered AR(p) NMSE="
+                f"{_diagnostic_mean(transition_rows, 'ordered_nmse'):.4f} | "
+                "shuffled-history NMSE="
+                f"{_diagnostic_mean(transition_rows, 'shuffled_nmse'):.4f}"
+            )
+            lines.append(
+                "    history gain="
+                f"{_signed(_diagnostic_mean(transition_rows, 'history_gain_nmse'))} | "
+                "order-specific gain="
+                f"{_signed(_diagnostic_mean(transition_rows, 'history_order_gain_nmse'))}"
             )
     return "\n".join(lines)
 

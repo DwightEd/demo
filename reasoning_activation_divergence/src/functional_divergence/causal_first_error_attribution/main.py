@@ -12,6 +12,10 @@ from .experiment import (
     summarize_saved_interventions,
 )
 from .extraction import OnsetTraceExtraction, OnsetTraceExtractionConfig
+from .message_fisher_experiment import (
+    MessageFisherExperiment,
+    MessageFisherExperimentConfig,
+)
 from .monitor_experiment import (
     MonitorExperimentConfig,
     ProcessBenchMonitorExperiment,
@@ -164,6 +168,22 @@ def build_parser() -> argparse.ArgumentParser:
     monitor.add_argument("--learning-rate", type=_positive_float, default=3e-4)
     monitor.add_argument("--weight-decay", type=float, default=1e-4)
     monitor.add_argument("--device", default="cuda")
+
+    fisher = commands.add_parser(
+        "message-fisher",
+        help="measure attention-source and FFN Fisher geometry before first error",
+    )
+    _add_model_arguments(fisher)
+    fisher.add_argument("--output-dir", required=True, type=Path)
+    fisher.add_argument("--epsilon", type=_positive_float, default=0.05)
+    fisher.add_argument(
+        "--perturbation-batch-size", type=_positive_int, default=4
+    )
+    fisher.add_argument("--bootstrap", type=_positive_int, default=1000)
+    fisher.add_argument("--seed", type=int, default=17)
+    fisher.add_argument(
+        "--reconstruction-tolerance", type=_fraction, default=3e-2
+    )
     return parser
 
 
@@ -248,6 +268,23 @@ def main(argv: list[str] | None = None) -> None:
         report = localization_metrics(
             rows, false_alarm_threshold=args.false_alarm_threshold
         )
+    elif args.command == "message-fisher":
+        experiment = MessageFisherExperiment(
+            MessageFisherExperimentConfig(
+                data_root=args.data_root,
+                domains=args.domains,
+                layers=args.layers,
+                output_dir=args.output_dir,
+                epsilon=args.epsilon,
+                perturbation_batch_size=args.perturbation_batch_size,
+                max_cases_per_domain=args.max_cases_per_domain,
+                bootstrap_repeats=args.bootstrap,
+                seed=args.seed,
+                reconstruction_tolerance=args.reconstruction_tolerance,
+            )
+        )
+        jobs = experiment.prepare()
+        report = experiment.run(_load_model(args), jobs)
     elif args.command == "summarize":
         report = summarize_saved_interventions(
             args.data_root, args.domains, pair_directory=args.pair_directory

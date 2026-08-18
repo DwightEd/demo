@@ -9,6 +9,7 @@ from functional_divergence.hidden_state_geometry.contracts import TraceSource
 from functional_divergence.hidden_state_geometry.data import (
     load_hidden_geometry_dataset,
     load_step_end_states,
+    load_step_token_states,
 )
 
 
@@ -161,6 +162,22 @@ def test_step_end_loader_uses_response_relative_real_shard_positions(tmp_path):
     assert states.shape == (3, 3, 8)
     # Inclusive absolute step ends 11,13,15 map to response-shard rows 1,3,5.
     assert states[:, 0, 0].tolist() == [1010.0, 1030.0, 1050.0]
+
+
+def test_step_token_loader_preserves_every_token_inside_each_visible_step(tmp_path):
+    manifest, exact = _write_trace_fixture(tmp_path)
+    dataset = load_hidden_geometry_dataset(
+        [TraceSource("gsm8k", manifest, "observer_teacher_forcing_replay", exact)],
+        response_generator="llama3.1-8b",
+        observer_model="llama3.1-8b",
+        output_features=("token_entropy", "token_nll"),
+    )
+
+    steps = load_step_token_states(dataset.samples[0], visible_steps=2)
+
+    assert [step.shape for step in steps] == [(2, 3, 8), (2, 3, 8)]
+    assert steps[0][:, 0, 0].tolist() == [1000.0, 1010.0]
+    assert steps[1][:, 0, 0].tolist() == [1020.0, 1030.0]
 
 
 def test_loader_fails_when_requested_output_summary_is_not_real(tmp_path):

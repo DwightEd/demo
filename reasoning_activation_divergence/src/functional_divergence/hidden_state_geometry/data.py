@@ -353,8 +353,7 @@ def load_hidden_geometry_dataset(
     )
 
 
-def load_step_end_states(sample: ChainSample, visible_steps: int | None = None) -> np.ndarray:
-    """Read one real shard and select the hidden state after each completed step."""
+def _load_state_shard(sample: ChainSample) -> np.ndarray:
     if not sample.state_path.is_file():
         raise FileNotFoundError(sample.state_path)
     shard = np.load(sample.state_path, mmap_mode="r", allow_pickle=False)
@@ -362,9 +361,20 @@ def load_step_end_states(sample: ChainSample, visible_steps: int | None = None) 
         raise ValueError(f"{sample.state_path}: expected [token,layer,hidden], got {shard.shape}")
     if sample.state_count >= 0 and shard.shape[0] != sample.state_count:
         raise ValueError(f"{sample.state_path}: token count disagrees with manifest")
+    return shard
+
+
+def _visible_step_count(sample: ChainSample, visible_steps: int | None) -> int:
     count = sample.n_steps if visible_steps is None else int(visible_steps)
     if count < 1 or count > sample.n_steps:
         raise ValueError(f"visible_steps must lie in [1, {sample.n_steps}]")
+    return count
+
+
+def load_step_end_states(sample: ChainSample, visible_steps: int | None = None) -> np.ndarray:
+    """Read one real shard and select the hidden state after each completed step."""
+    shard = _load_state_shard(sample)
+    count = _visible_step_count(sample, visible_steps)
     indices = sample.step_ranges[:count, 1] - int(sample.response_start)
     if np.any(indices < 0) or np.any(indices >= shard.shape[0]):
         raise ValueError(f"chain {sample.chain_id}: step ends exceed response-state shard")
@@ -372,3 +382,24 @@ def load_step_end_states(sample: ChainSample, visible_steps: int | None = None) 
     if not np.isfinite(states).all():
         raise ValueError(f"chain {sample.chain_id}: hidden states contain non-finite values")
     return states
+
+
+def load_step_token_states(
+    sample: ChainSample, visible_steps: int | None = None
+) -> tuple[np.ndarray, ...]:
+    """Read every token state inside each visible completed-step interval."""
+    shard = _load_state_shard(sample)
+    count = _visible_step_count(sample, visible_steps)
+    ranges = np.asarray(sample.step_ranges[:count], dtype=np.int64)
+    relative = ranges - int(sample.response_start)
+    if np.any(relative[:, 0] < 0) or np.any(relative[:, 1] >= shard.shape[0]):
+        raise ValueError(f"chain {sample.chain_id}: step ranges exceed response-state shard")
+    if np.any(relative[:, 1] < relative[:, 0]):
+        raise ValueError(f"chain {sample.chain_id}: step ranges must be non-empty")
+    steps = tuple(
+        np.ascontiguousarray(shard[start : end + 1], dtype=np.float32)
+        for start, end in relative
+    )
+    if not all(np.isfinite(step).all() for step in steps):
+        raise ValueError(f"chain {sample.chain_id}: hidden states contain non-finite values")
+    return steps

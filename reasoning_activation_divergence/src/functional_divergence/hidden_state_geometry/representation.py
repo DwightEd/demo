@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
 
@@ -61,6 +62,7 @@ class ChainBalancedPCA:
         examples: tuple[TaskExample, ...],
         *,
         progress: ProgressReporter | None = None,
+        state_loader: Callable[[TaskExample], np.ndarray] = load_visible_states,
     ) -> "ChainBalancedPCA":
         latest: dict[tuple[str, int], TaskExample] = {}
         for example in examples:
@@ -79,7 +81,9 @@ class ChainBalancedPCA:
         matrix: np.ndarray | None = None
         hidden_dim: int | None = None
         for chain_index, (key, example) in enumerate(tracked):
-            states = load_visible_states(example)
+            states = state_loader(example)
+            if states.ndim < 2 or len(states) < 1:
+                raise ValueError("PCA state loader must return non-empty hidden states")
             values = states.reshape(-1, states.shape[-1])
             if hidden_dim is None:
                 hidden_dim = int(values.shape[1])

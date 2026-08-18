@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .contracts import ChainSample
-from .data import load_step_end_states
+from .data import load_step_end_states, load_step_token_states
 
 
 @dataclass(frozen=True)
@@ -120,6 +120,10 @@ def build_post_step_task(samples: tuple[ChainSample, ...]) -> TaskDataset:
 
 def load_visible_states(example: TaskExample) -> np.ndarray:
     return load_step_end_states(example.sample, example.visible_steps)
+
+
+def load_visible_step_token_states(example: TaskExample) -> tuple[np.ndarray, ...]:
+    return load_step_token_states(example.sample, example.visible_steps)
 
 
 def visible_output_steps(example: TaskExample) -> np.ndarray:

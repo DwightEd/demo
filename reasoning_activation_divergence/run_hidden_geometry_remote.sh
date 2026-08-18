@@ -19,7 +19,7 @@ trap stop_on_failure ERR EXIT
 MODE="${1:-preflight}"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 DEMO_ROOT="${DEMO_ROOT:-$(dirname "${PROJECT_ROOT}")}"
-DATA_ROOT="${DATA_ROOT:-/share/home/tm902089733300000/a903202310/lys/research/demo/data/exact/processbench_observer_llama31_full}"
+DATA_ROOT="${DATA_ROOT:-/share/home/tm902089733300000/a903202310/lys/data/ProcessBench/reasoning_error_detection/llama31_8b}"
 MODEL_DIR="${MODEL_DIR:-/share/home/tm902089733300000/a903202310/lys/models/Meta-Llama-3.1-8B-Instruct}"
 MODEL_NAME="${MODEL_NAME:-meta-llama/Llama-3.1-8B-Instruct}"
 MODEL_REVISION="${MODEL_REVISION:-auto}"
@@ -31,6 +31,10 @@ CAUSAL_LAYERS="${CAUSAL_LAYERS:-8,12,16,20,24,28}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/hidden_state_geometry}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 RUN_TAG="${RUN_TAG:-$(date '+%Y%m%d_%H%M%S')}"
+STATE_SEEDS="${STATE_SEEDS:-17 29 41}"
+FISHER_EPSILON="${FISHER_EPSILON:-0.05}"
+FISHER_BATCH_SIZE="${FISHER_BATCH_SIZE:-4}"
+FISHER_CASES_PER_DOMAIN="${FISHER_CASES_PER_DOMAIN:-0}"
 
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONUNBUFFERED=1
@@ -57,8 +61,12 @@ for domain in "${inspected_domains[@]}"; do
   pair_file="${DATA_ROOT}/${domain}/selected/causal_first_error_v1/onset_pairs_v1.jsonl"
   echo "${domain}: residual_manifest=${manifest}"
   echo "${domain}: aligned_trace=${aligned_trace}"
-  echo "${domain}: geometry_trace=${geometry_trace}"
-  echo "${domain}: causal_pair_file=${pair_file}"
+  if [[ "${MODE}" == causal-monitor-* ]]; then
+    echo "${domain}: geometry_trace=${geometry_trace}"
+  fi
+  if [[ "${MODE}" == causal-* ]]; then
+    echo "${domain}: causal_pair_file=${pair_file}"
+  fi
   if [[ "${MODE}" != causal-* && ! -f "${manifest}" ]]; then
     echo "missing raw residual manifest: ${manifest}" >&2
     echo "trace.npz alone is insufficient; extract response-token hidden-state shards first." >&2
@@ -131,13 +139,41 @@ run_causal_pytest_if_available() {
   fi
 }
 
-common=(
+run_predictive_state_pytest_if_available() {
+  if "${PYTHON_BIN}" -c 'import importlib.util; raise SystemExit(0 if importlib.util.find_spec("pytest") else 1)'; then
+    "${PYTHON_BIN}" -m pytest \
+      tests/hidden_state_geometry/test_predictive_state_monitor.py \
+      tests/hidden_state_geometry/test_data.py \
+      tests/hidden_state_geometry/test_tasks.py \
+      tests/test_remote_runner.py
+  else
+    echo "pytest is not installed in ${PYTHON_BIN}; skipping focused predictive-state tests"
+  fi
+}
+
+run_token_markov_pytest_if_available() {
+  if "${PYTHON_BIN}" -c 'import importlib.util; raise SystemExit(0 if importlib.util.find_spec("pytest") else 1)'; then
+    "${PYTHON_BIN}" -m pytest \
+      tests/hidden_state_geometry/test_token_predictive_state.py \
+      tests/hidden_state_geometry/test_data.py \
+      tests/hidden_state_geometry/test_tasks.py \
+      tests/test_remote_runner.py
+  else
+    echo "pytest is not installed in ${PYTHON_BIN}; skipping focused token-Markov tests"
+  fi
+}
+
+base_common=(
   --data-root "${DATA_ROOT}"
   --domains gsm8k,math,olympiadbench,omnimath
   --response-generator llama3.1-8b
   --observer-model llama3.1-8b
   --acquisition-mode observer_teacher_forcing_replay
   --output-features token_entropy,token_nll
+)
+
+common=(
+  "${base_common[@]}"
   --seed 17
 )
 
@@ -184,6 +220,26 @@ case "${MODE}" in
       --max-chains-per-domain 0 --width 64 \
       --epochs 20 --patience 4 --batch-size 32 --bootstrap 2000 \
       --device cuda
+    ;;
+  causal-fisher-smoke)
+    run_causal_pytest_if_available
+    require_causal_runtime
+    "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main message-fisher \
+      "${causal_common[@]}" \
+      --output-dir "${OUTPUT_ROOT}/causal_fisher_smoke_${RUN_TAG}" \
+      --max-cases-per-domain 1 --bootstrap 200 \
+      --epsilon "${FISHER_EPSILON}" \
+      --perturbation-batch-size "${FISHER_BATCH_SIZE}"
+    ;;
+  causal-fisher-full)
+    run_causal_pytest_if_available
+    require_causal_runtime
+    "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main message-fisher \
+      "${causal_common[@]}" \
+      --output-dir "${OUTPUT_ROOT}/causal_fisher_full_${RUN_TAG}" \
+      --max-cases-per-domain "${FISHER_CASES_PER_DOMAIN}" --bootstrap 2000 \
+      --epsilon "${FISHER_EPSILON}" \
+      --perturbation-batch-size "${FISHER_BATCH_SIZE}"
     ;;
   causal-full)
     "${PYTHON_BIN}" -m functional_divergence.causal_first_error_attribution.main audit \
@@ -237,6 +293,70 @@ case "${MODE}" in
       --max-records-per-domain 0 --bootstrap 2000 \
       --output-dir "${OUTPUT_ROOT}/ridge_full_${RUN_TAG}"
     ;;
+  predictive-state-smoke)
+    require_monitor_runtime
+    run_predictive_state_pytest_if_available
+    predictive_state_config='{"pca_dim":4,"positions_per_chain":8,"width":16,"epochs":3,"patience":2,"batch_size":32,"learning_rate":0.0003,"weight_decay":0.0001,"validation_fraction":0.2,"device":"cuda","show_progress":true}'
+    "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+      "${base_common[@]}" --seed 17 --tasks strict_prefix \
+      --method predictive_state_monitor --method-config-json "${predictive_state_config}" \
+      --max-records-per-domain 32 --bootstrap 200 \
+      --output-dir "${OUTPUT_ROOT}/predictive_state_smoke_${RUN_TAG}"
+    ;;
+  predictive-state-full)
+    require_monitor_runtime
+    run_predictive_state_pytest_if_available
+    predictive_state_config='{"pca_dim":8,"positions_per_chain":16,"width":32,"epochs":20,"patience":4,"batch_size":64,"learning_rate":0.0003,"weight_decay":0.0001,"validation_fraction":0.2,"device":"cuda","show_progress":true}'
+    read -r -a state_seeds <<< "${STATE_SEEDS}"
+    for state_seed in "${state_seeds[@]}"; do
+      "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+        "${base_common[@]}" --seed "${state_seed}" --tasks strict_prefix \
+        --method predictive_state_monitor --method-config-json "${predictive_state_config}" \
+        --max-records-per-domain 0 --bootstrap 2000 \
+        --output-dir "${OUTPUT_ROOT}/predictive_state_full_seed${state_seed}_${RUN_TAG}"
+    done
+    ;;
+  predictive-token-smoke)
+    require_monitor_runtime
+    run_predictive_state_pytest_if_available
+    predictive_token_config='{"pca_dim":4,"positions_per_chain":8,"sequence_unit":"token","sequence_encoder":"attention_pool","attention_heads":4,"attention_queries":4,"width":16,"epochs":3,"patience":2,"batch_size":32,"learning_rate":0.0003,"weight_decay":0.0001,"validation_fraction":0.2,"device":"cuda","show_progress":true}'
+    "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+      "${base_common[@]}" --seed 17 --tasks strict_prefix \
+      --method predictive_state_monitor --method-config-json "${predictive_token_config}" \
+      --max-records-per-domain 32 --bootstrap 200 \
+      --output-dir "${OUTPUT_ROOT}/predictive_token_smoke_${RUN_TAG}"
+    ;;
+  predictive-token-full)
+    require_monitor_runtime
+    run_predictive_state_pytest_if_available
+    predictive_token_config='{"pca_dim":8,"positions_per_chain":16,"sequence_unit":"token","sequence_encoder":"attention_pool","attention_heads":4,"attention_queries":4,"width":32,"epochs":20,"patience":4,"batch_size":64,"learning_rate":0.0003,"weight_decay":0.0001,"validation_fraction":0.2,"device":"cuda","show_progress":true}'
+    read -r -a state_seeds <<< "${STATE_SEEDS}"
+    for state_seed in "${state_seeds[@]}"; do
+      "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+        "${base_common[@]}" --seed "${state_seed}" --tasks strict_prefix \
+        --method predictive_state_monitor --method-config-json "${predictive_token_config}" \
+        --max-records-per-domain 0 --bootstrap 2000 \
+        --output-dir "${OUTPUT_ROOT}/predictive_token_full_seed${state_seed}_${RUN_TAG}"
+    done
+    ;;
+  token-markov-smoke)
+    run_token_markov_pytest_if_available
+    token_markov_config='{"pca_dim":4,"positions_per_chain":8,"history_order":4,"transitions_per_chain":32,"recent_window":8,"dynamics_ridge_alpha":10.0,"hazard_l2":0.1,"hazard_max_iter":2000}'
+    "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+      "${base_common[@]}" --seed 17 --tasks strict_prefix \
+      --method token_predictive_state --method-config-json "${token_markov_config}" \
+      --max-records-per-domain 32 --bootstrap 200 \
+      --output-dir "${OUTPUT_ROOT}/token_markov_smoke_${RUN_TAG}"
+    ;;
+  token-markov-full)
+    run_token_markov_pytest_if_available
+    token_markov_config='{"pca_dim":4,"positions_per_chain":16,"history_order":4,"transitions_per_chain":64,"recent_window":8,"dynamics_ridge_alpha":10.0,"hazard_l2":0.1,"hazard_max_iter":2000}'
+    "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
+      "${base_common[@]}" --seed 17 --tasks strict_prefix \
+      --method token_predictive_state --method-config-json "${token_markov_config}" \
+      --max-records-per-domain 0 --bootstrap 2000 \
+      --output-dir "${OUTPUT_ROOT}/token_markov_full_${RUN_TAG}"
+    ;;
   innovation-smoke)
     innovation_config='{"source_layer":14,"destination_layer":16,"rank":4,"normal_ridge_alpha":10.0,"covariance_shrinkage":0.1,"l2":0.1,"max_iter":2000}'
     "${PYTHON_BIN}" -m functional_divergence.hidden_state_geometry.cli run \
@@ -254,7 +374,7 @@ case "${MODE}" in
       --output-dir "${OUTPUT_ROOT}/innovation_full_${RUN_TAG}"
     ;;
   *)
-    echo "usage: $0 causal-audit|causal-extract-smoke|causal-intervene-smoke|causal-summarize-smoke|causal-monitor-smoke|causal-monitor-full|causal-full|preflight|smoke|full|ridge-smoke|ridge-full|innovation-smoke|innovation-full" >&2
+    echo "usage: $0 causal-audit|causal-extract-smoke|causal-intervene-smoke|causal-summarize-smoke|causal-monitor-smoke|causal-monitor-full|causal-fisher-smoke|causal-fisher-full|causal-full|preflight|smoke|full|ridge-smoke|ridge-full|predictive-state-smoke|predictive-state-full|predictive-token-smoke|predictive-token-full|token-markov-smoke|token-markov-full|innovation-smoke|innovation-full" >&2
     exit 2
     ;;
 esac
