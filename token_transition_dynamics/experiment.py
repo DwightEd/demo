@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -137,14 +139,23 @@ class TokenTransitionExperiment:
         "combined": (0, 1, 2, 3),
     }
 
-    def __init__(self, config: ExperimentConfig) -> None:
+    def __init__(
+        self,
+        config: ExperimentConfig,
+        progress: Callable[[str], None] | None = None,
+    ) -> None:
         self.config = config
+        self.progress = progress
 
     def run(self) -> dict[str, Any]:
         self._validate_config()
+        self._progress("stage=load status=started")
         domains = self._read_domains()
         records = self._split_records(domains)
         self._validate_splits(records)
+        self._progress(
+            f"stage=load status=complete domains={len(domains)} records={len(records)}"
+        )
 
         train_correct = [
             value for value in records if value.split == "train" and value.record.error_step < 0
@@ -157,16 +168,24 @@ class TokenTransitionExperiment:
         test_records = [value for value in records if value.split == "test"]
 
         train = self._extract_windows(
-            train_correct, self.config.train_windows_per_chain, test_mode=False
+            train_correct,
+            self.config.train_windows_per_chain,
+            test_mode=False,
+            stage="train",
         )
         calibration = self._extract_windows(
             calibration_correct,
             self.config.calibration_windows_per_chain,
             test_mode=False,
+            stage="calibration",
         )
         evaluated = self._extract_windows(
-            test_records, self.config.max_test_windows_per_chain, test_mode=True
+            test_records,
+            self.config.max_test_windows_per_chain,
+            test_mode=True,
+            stage="test",
         )
+        self._progress("stage=baseline status=started")
         baseline = CorrectOnlyBaseline(
             position_bins=self.config.position_bins,
             min_bin_samples=self.config.min_baseline_samples,
@@ -177,7 +196,9 @@ class TokenTransitionExperiment:
         evaluated_z = baseline.standardize(
             evaluated.features, evaluated.domains, evaluated.position_bins
         )
+        self._progress("stage=baseline status=complete")
 
+        self._progress("stage=evaluate status=started")
         models = {
             name: self._arm_report(
                 calibration_z,
@@ -188,6 +209,7 @@ class TokenTransitionExperiment:
             )
             for name, feature_indices in self._ARMS.items()
         }
+        self._progress("stage=evaluate status=complete")
         split_counts = {
             f"{split}_{kind}": sum(
                 value.split == split
@@ -282,7 +304,9 @@ class TokenTransitionExperiment:
                 ),
             },
         }
+        self._progress("stage=save status=started")
         self._save(report)
+        self._progress("stage=complete status=complete")
         return report
 
     def inspect(self) -> dict[str, Any]:
@@ -422,6 +446,7 @@ class TokenTransitionExperiment:
         limit: int,
         *,
         test_mode: bool,
+        stage: str,
     ) -> _WindowBatch:
         feature_rows: list[np.ndarray] = []
         label_rows: list[np.ndarray] = []
@@ -432,13 +457,24 @@ class TokenTransitionExperiment:
         error_rows: list[np.ndarray] = []
         records_with_windows = 0
         early_error_records_skipped = 0
-        for value in records:
+        window_count = 0
+        started = time.monotonic()
+        update_every = max(1, len(records) // 20)
+        self._progress(
+            f"stage={stage} records=0/{len(records)} percent=0.0 windows=0 "
+            "elapsed=0.0s eta=pending"
+        )
+        for record_index, value in enumerate(records, start=1):
             states = value.source.load_states(value.record)
             endpoints, labels, skipped = self._selected_endpoints(
                 value, states.shape[0], limit, test_mode
             )
             early_error_records_skipped += int(skipped)
             if endpoints.size == 0:
+                if record_index % update_every == 0 or record_index == len(records):
+                    self._window_progress(
+                        stage, record_index, len(records), window_count, started
+                    )
                 continue
             records_with_windows += 1
             feature_rows.append(
@@ -461,6 +497,7 @@ class TokenTransitionExperiment:
                 self.config.position_bins - 1,
             )
             row_count = endpoints.size
+            window_count += row_count
             identity = f"{value.source.name}::{value.record.row}"
             group = f"{value.source.name}::{value.record.problem_group}"
             label_rows.append(labels)
@@ -471,6 +508,10 @@ class TokenTransitionExperiment:
             error_rows.append(
                 np.full(row_count, value.record.error_step >= 0, dtype=bool)
             )
+            if record_index % update_every == 0 or record_index == len(records):
+                self._window_progress(
+                    stage, record_index, len(records), window_count, started
+                )
         if not feature_rows:
             raise ValueError(
                 f"no token windows remain; window_size={self.config.window_size} is too large"
@@ -486,6 +527,29 @@ class TokenTransitionExperiment:
             records_considered=len(records),
             records_with_windows=records_with_windows,
             early_error_records_skipped=early_error_records_skipped,
+        )
+
+    def _progress(self, message: str) -> None:
+        if self.progress is not None:
+            self.progress(f"[progress] {message}")
+
+    def _window_progress(
+        self,
+        stage: str,
+        completed: int,
+        total: int,
+        windows: int,
+        started: float,
+    ) -> None:
+        elapsed = time.monotonic() - started
+        eta = elapsed / completed * (total - completed)
+        fraction = completed / total
+        filled = round(20 * fraction)
+        bar = "#" * filled + "-" * (20 - filled)
+        self._progress(
+            f"stage={stage} [{bar}] records={completed}/{total} "
+            f"percent={100.0 * fraction:.1f} windows={windows} "
+            f"elapsed={elapsed:.1f}s eta={eta:.1f}s"
         )
 
     def _arm_report(

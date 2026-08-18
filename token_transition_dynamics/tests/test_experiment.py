@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,7 @@ from token_transition_dynamics.experiment import (
     ExperimentConfig,
     TokenTransitionExperiment,
 )
+from token_transition_dynamics.main import main
 
 
 def _write_manifest(root: Path, layers: list[int]) -> Path:
@@ -147,3 +149,51 @@ def test_token_level_experiment_scores_raw_window_geometry_without_labels(tmp_pa
     assert report["data"]["window_counts"]["test_positive"] == 7 * test_error_chains
     assert (tmp_path / "out" / "results.json").is_file()
     assert (tmp_path / "out" / "summary.txt").is_file()
+
+
+def test_run_cli_reports_progress_for_each_expensive_stage(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    _write_dynamics_dataset(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "token-transition-dynamics",
+            "run",
+            "--data-root",
+            str(tmp_path),
+            "--domains",
+            "synthetic",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--window-size",
+            "12",
+            "--neighbors",
+            "5",
+            "--tle-centers",
+            "4",
+            "--train-windows-per-chain",
+            "8",
+            "--calibration-windows-per-chain",
+            "6",
+            "--max-test-windows-per-chain",
+            "12",
+            "--position-bins",
+            "2",
+            "--min-baseline-samples",
+            "3",
+            "--bootstrap-samples",
+            "0",
+        ],
+    )
+
+    main()
+
+    output = capsys.readouterr().out
+    assert "[progress] stage=train" in output
+    assert "[progress] stage=calibration" in output
+    assert "[progress] stage=test" in output
+    assert "[####################]" in output
+    assert "percent=100.0" in output
+    assert "[progress] stage=complete" in output

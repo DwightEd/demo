@@ -68,7 +68,12 @@ def _config(arguments: argparse.Namespace) -> ExperimentConfig:
 
 def main() -> None:
     arguments = _parser().parse_args()
-    experiment = TokenTransitionExperiment(_config(arguments))
+    progress = (
+        (lambda message: print(message, flush=True))
+        if arguments.command == "run"
+        else None
+    )
+    experiment = TokenTransitionExperiment(_config(arguments), progress=progress)
     result = experiment.inspect() if arguments.command == "preflight" else experiment.run()
     print(json.dumps(result, indent=2, ensure_ascii=False))
 

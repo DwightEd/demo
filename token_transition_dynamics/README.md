@@ -49,6 +49,9 @@ bash token_transition_dynamics/run_remote.sh smoke
 bash token_transition_dynamics/run_remote.sh full
 ```
 
+`smoke` 和 `full` 默认输出 train、calibration、test、baseline、evaluate、save
+各阶段状态；窗口提取阶段每约 5% 刷新进度条、累计窗口数、耗时和 ETA。
+
 也可以覆盖路径和 Python：
 
 ```bash
