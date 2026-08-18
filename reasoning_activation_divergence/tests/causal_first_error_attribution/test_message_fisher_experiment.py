@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 from functional_divergence.causal_first_error_attribution import (
@@ -147,6 +149,17 @@ def test_experiment_extracts_paired_boundaries_and_writes_auditable_artifacts(
     selected.mkdir(parents=True)
     np.savez_compressed(
         selected / "trace.npz",
+        full_input_ids=np.asarray([[10, 11, 20, 21, 30, 31], [99, 98, 97, 96, 95, 94]]),
+        full_attention_mask=np.ones((2, 6), dtype=np.int8),
+        prompt_token_counts=np.asarray([2, 2]),
+        step_token_ranges=np.asarray([[[2, 3], [4, 5]], [[2, 3], [4, 5]]]),
+        n_steps=np.asarray([2]),
+        gold_error_step=np.asarray([1]),
+        chain_idx=np.asarray([101]),
+        dataset=np.asarray(["gsm8k"]),
+    )
+    np.savez_compressed(
+        selected / "trace.raw_residual_stream.npz",
         full_input_ids=np.asarray([[10, 11, 20, 21, 30, 31]]),
         full_attention_mask=np.ones((1, 6), dtype=np.int8),
         prompt_token_counts=np.asarray([2]),
@@ -221,3 +234,5 @@ def test_experiment_extracts_paired_boundaries_and_writes_auditable_artifacts(
         assert "fisher_gram" in archive.files
         assert "euclidean_gram" in archive.files
         assert "input_ids" in archive.files
+        metadata = json.loads(str(archive["metadata_json"].item()))
+    assert metadata["replay_trace"].endswith("trace.raw_residual_stream.npz")

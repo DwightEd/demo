@@ -36,6 +36,13 @@ class FirstErrorBoundaryPair:
     event_decision_position: int
 
 
+@dataclass(frozen=True)
+class FirstErrorReplayJob:
+    domain: str
+    trace_path: Path
+    pair: FirstErrorBoundaryPair
+
+
 def first_error_boundary_pairs(
     trace_path: str | Path, *, max_cases: int, seed: int
 ) -> tuple[FirstErrorBoundaryPair, ...]:
@@ -73,7 +80,17 @@ def first_error_boundary_pairs(
         or step_counts.shape != (count,)
         or chain_ids.shape != (count,)
     ):
-        raise ValueError("trace arrays are not record aligned")
+        shapes = ", ".join(
+            (
+                f"full_input_ids={inputs.shape}",
+                f"full_attention_mask={masks.shape}",
+                f"step_token_ranges={ranges.shape}",
+                f"n_steps={step_counts.shape}",
+                f"gold_error_step={errors.shape}",
+                f"chain_idx={chain_ids.shape}",
+            )
+        )
+        raise ValueError(f"{path}: trace arrays are not record aligned; {shapes}")
     if isinstance(max_cases, (bool, np.bool_)) or int(max_cases) < 0:
         raise ValueError("max_cases must be a nonnegative integer")
 
@@ -291,15 +308,15 @@ class MessageFisherExperiment:
     def __init__(self, config: MessageFisherExperimentConfig) -> None:
         self.config = config
 
-    def run(self, model: object) -> dict[str, Any]:
-        runner = SourceMessageFisherRunner(
-            layers=self.config.layers,
-            epsilon=self.config.epsilon,
-            perturbation_batch_size=self.config.perturbation_batch_size,
-        )
+    def prepare(self) -> tuple[FirstErrorReplayJob, ...]:
         jobs = []
         for domain_index, domain in enumerate(self.config.domains):
-            trace = self.config.data_root / domain / "selected" / "trace.npz"
+            trace = (
+                self.config.data_root
+                / domain
+                / "selected"
+                / "trace.raw_residual_stream.npz"
+            )
             if not trace.is_file():
                 raise FileNotFoundError(trace)
             pairs = first_error_boundary_pairs(
@@ -307,16 +324,32 @@ class MessageFisherExperiment:
                 max_cases=self.config.max_cases_per_domain,
                 seed=self.config.seed + domain_index,
             )
-            for pair in pairs:
-                jobs.append((domain, trace, pair))
+            jobs.extend(
+                FirstErrorReplayJob(domain=domain, trace_path=trace, pair=pair)
+                for pair in pairs
+            )
         if not jobs:
             raise ValueError("no first-error cases with a preceding correct step")
+        return tuple(jobs)
+
+    def run(
+        self,
+        model: object,
+        jobs: Sequence[FirstErrorReplayJob] | None = None,
+    ) -> dict[str, Any]:
+        runner = SourceMessageFisherRunner(
+            layers=self.config.layers,
+            epsilon=self.config.epsilon,
+            perturbation_batch_size=self.config.perturbation_batch_size,
+        )
+        jobs = self.prepare() if jobs is None else tuple(jobs)
 
         rows: list[dict[str, Any]] = []
         artifact_paths = []
-        for domain, trace, pair in tqdm(
+        for job in tqdm(
             jobs, desc="source-message Fisher pairs", unit="pair"
         ):
+            domain, trace, pair = job.domain, job.trace_path, job.pair
             case_id = f"{domain}_chain_{pair.chain_id}_row_{pair.record_index}"
             boundaries = (
                 (
@@ -352,6 +385,7 @@ class MessageFisherExperiment:
                     "domain": domain,
                     "record_index": pair.record_index,
                     "chain_id": pair.chain_id,
+                    "replay_trace": str(trace),
                     "boundary_role": role,
                     "target_step": target_step,
                     "decision_position": decision_position,
@@ -421,6 +455,7 @@ class MessageFisherExperiment:
 __all__ = [
     "DEFAULT_FISHER_METRICS",
     "FirstErrorBoundaryPair",
+    "FirstErrorReplayJob",
     "MessageFisherExperiment",
     "MessageFisherExperimentConfig",
     "first_error_boundary_pairs",

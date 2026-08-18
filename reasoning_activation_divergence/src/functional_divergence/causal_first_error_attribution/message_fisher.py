@@ -238,6 +238,10 @@ def source_binned_attention_components(
         messages.append(torch.einsum("hd,ohd->o", grouped_context, head_projection))
     stacked = torch.stack(messages, dim=0)
     stacked_mass = torch.stack(source_mass, dim=1)
+    # BF16 eager attention is rounded after softmax.  Normalize only this
+    # reported attribution distribution; ``contexts`` and ``messages`` retain
+    # the exact model weights used for the replay and Fisher directions.
+    stacked_mass = stacked_mass / stacked_mass.sum(dim=1, keepdim=True)
     return unique_ids, stacked, stacked_mass, stacked.sum(dim=0)
 
 

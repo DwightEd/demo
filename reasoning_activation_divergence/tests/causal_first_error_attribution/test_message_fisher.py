@@ -60,6 +60,39 @@ def test_source_binned_messages_reconstruct_attention_output() -> None:
     assert torch.allclose(component_output, reconstructed)
 
 
+def test_source_binned_components_normalize_reported_mass_without_reweighting_messages() -> None:
+    torch = pytest.importorskip("torch")
+    attention = torch.tensor(
+        [[[[0.333984375, 0.333984375, 0.333984375]]]],
+        dtype=torch.bfloat16,
+    )
+    values = torch.tensor(
+        [[[[1.0, 0.0]], [[0.0, 1.0]], [[2.0, -1.0]]]],
+        dtype=torch.bfloat16,
+    )
+    output_weight = torch.eye(2, dtype=torch.bfloat16)
+
+    source_ids, messages, reported_mass, reconstructed = (
+        source_binned_attention_components(
+            attention,
+            values,
+            output_weight,
+            source_step_ids=np.asarray([-1, -1, 0]),
+            query_position=0,
+        )
+    )
+
+    raw_contexts = attention[0, 0, 0].float()[:, None] * values[0, :, 0].float()
+    expected_messages = torch.stack(
+        (raw_contexts[:2].sum(dim=0), raw_contexts[2:].sum(dim=0))
+    )
+    assert source_ids.tolist() == [-1, 0]
+    assert not torch.allclose(attention[0, 0, 0].float().sum(), torch.tensor(1.0))
+    assert torch.allclose(messages, expected_messages)
+    assert torch.allclose(messages.sum(dim=0), reconstructed)
+    assert torch.allclose(reported_mass.sum(dim=1), torch.ones(1), atol=1e-6)
+
+
 def test_categorical_fisher_gram_matches_explicit_covariance() -> None:
     logits = np.asarray([0.3, -0.2, 0.7], dtype=np.float64)
     jacobian = np.asarray([[1.0, 2.0, -1.0], [0.5, -0.5, 1.5]], dtype=np.float64)
@@ -251,3 +284,34 @@ def test_source_message_runner_uses_real_llama_cache_and_gqa_contract() -> None:
     assert result.euclidean_gram.shape == (2, 3, 3)
     assert result.attention_reconstruction_error.max() < 1e-4
     assert result.block_reconstruction_error.max() < 1e-4
+
+
+def test_source_message_runner_normalizes_bfloat16_llama_attention_mass_without_changing_reconstruction() -> None:
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    config = transformers.LlamaConfig(
+        vocab_size=32,
+        hidden_size=8,
+        intermediate_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        max_position_embeddings=32,
+    )
+    config._attn_implementation = "eager"
+    model = transformers.LlamaForCausalLM(config).eval().to(dtype=torch.bfloat16)
+
+    result = SourceMessageFisherRunner(
+        layers=(1, 2), epsilon=0.05, perturbation_batch_size=2
+    ).run(
+        model=model,
+        input_ids=np.asarray([1, 2, 3, 4], dtype=np.int64),
+        source_step_ids=np.asarray([-1, -1, 0, 0], dtype=np.int16),
+    )
+
+    np.testing.assert_allclose(result.attention_mass.sum(axis=2), 1.0, atol=1e-6)
+    np.testing.assert_allclose(
+        result.source_messages.sum(axis=1), result.attention_output, atol=1e-2
+    )
+    assert result.attention_reconstruction_error.max() < 1e-2
+    assert result.block_reconstruction_error.max() < 1e-2
