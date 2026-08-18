@@ -14,19 +14,9 @@ def _comma_strings(value: str) -> tuple[str, ...]:
     return items
 
 
-def _comma_ints(value: str) -> tuple[int, ...]:
-    try:
-        items = tuple(int(item) for item in _comma_strings(value))
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("clusters must be comma-separated integers") from error
-    if any(item < 1 for item in items):
-        raise argparse.ArgumentTypeError("cluster counts must be positive")
-    return items
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Correct-only token transition dynamics on raw LLM hidden states."
+        description="Correct-only raw-space token-window geometry on LLM hidden states."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("preflight", "run"):
@@ -40,12 +30,15 @@ def _parser() -> argparse.ArgumentParser:
         subparser.add_argument("--output-dir", type=Path, default=Path("outputs/token_transition_dynamics"))
         subparser.add_argument("--seed", type=int, default=17)
     run = subparsers.choices["run"]
-    run.add_argument("--pca-dim", type=int, default=16)
-    run.add_argument("--clusters", type=_comma_ints, default=(1, 2))
-    run.add_argument("--tokens-per-chain", type=int, default=8)
-    run.add_argument("--max-test-tokens-per-chain", type=int, default=64)
-    run.add_argument("--max-pca-rows", type=int, default=4096)
-    run.add_argument("--bootstrap-samples", type=int, default=2000)
+    run.add_argument("--window-size", type=int, default=24)
+    run.add_argument("--neighbors", type=int, default=20)
+    run.add_argument("--tle-centers", type=int, default=6)
+    run.add_argument("--train-windows-per-chain", type=int, default=4)
+    run.add_argument("--calibration-windows-per-chain", type=int, default=4)
+    run.add_argument("--max-test-windows-per-chain", type=int, default=12)
+    run.add_argument("--position-bins", type=int, default=4)
+    run.add_argument("--min-baseline-samples", type=int, default=8)
+    run.add_argument("--bootstrap-samples", type=int, default=1000)
     return parser
 
 
@@ -55,12 +48,19 @@ def _config(arguments: argparse.Namespace) -> ExperimentConfig:
         domains=arguments.domains,
         output_dir=arguments.output_dir,
         manifest_name=arguments.manifest_name,
-        pca_dim=getattr(arguments, "pca_dim", 16),
-        clusters=getattr(arguments, "clusters", (1, 2)),
-        tokens_per_chain=getattr(arguments, "tokens_per_chain", 8),
-        max_test_tokens_per_chain=getattr(arguments, "max_test_tokens_per_chain", 64),
-        max_pca_rows=getattr(arguments, "max_pca_rows", 4096),
-        bootstrap_samples=getattr(arguments, "bootstrap_samples", 2000),
+        window_size=getattr(arguments, "window_size", 24),
+        neighbors=getattr(arguments, "neighbors", 20),
+        tle_centers=getattr(arguments, "tle_centers", 6),
+        train_windows_per_chain=getattr(arguments, "train_windows_per_chain", 4),
+        calibration_windows_per_chain=getattr(
+            arguments, "calibration_windows_per_chain", 4
+        ),
+        max_test_windows_per_chain=getattr(
+            arguments, "max_test_windows_per_chain", 12
+        ),
+        position_bins=getattr(arguments, "position_bins", 4),
+        min_baseline_samples=getattr(arguments, "min_baseline_samples", 8),
+        bootstrap_samples=getattr(arguments, "bootstrap_samples", 1000),
         seed=arguments.seed,
         max_records_per_domain=arguments.max_records_per_domain,
     )

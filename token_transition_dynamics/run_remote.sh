@@ -24,11 +24,14 @@ case "${MODE}" in
       --domains "${DOMAINS}" \
       --output-dir "${OUTPUT_ROOT}/smoke" \
       --max-records-per-domain 128 \
-      --pca-dim 8 \
-      --clusters 1,2 \
-      --tokens-per-chain 4 \
-      --max-test-tokens-per-chain 32 \
-      --max-pca-rows 1024 \
+      --window-size 16 \
+      --neighbors 10 \
+      --tle-centers 4 \
+      --train-windows-per-chain 2 \
+      --calibration-windows-per-chain 2 \
+      --max-test-windows-per-chain 6 \
+      --position-bins 2 \
+      --min-baseline-samples 4 \
       --bootstrap-samples 200
     ;;
   full)
@@ -36,12 +39,15 @@ case "${MODE}" in
       --data-root "${DATA_ROOT}" \
       --domains "${DOMAINS}" \
       --output-dir "${OUTPUT_ROOT}/full" \
-      --pca-dim 16 \
-      --clusters 1,2 \
-      --tokens-per-chain 8 \
-      --max-test-tokens-per-chain 64 \
-      --max-pca-rows 4096 \
-      --bootstrap-samples 2000
+      --window-size 24 \
+      --neighbors 20 \
+      --tle-centers 6 \
+      --train-windows-per-chain 4 \
+      --calibration-windows-per-chain 4 \
+      --max-test-windows-per-chain 12 \
+      --position-bins 4 \
+      --min-baseline-samples 8 \
+      --bootstrap-samples 1000
     ;;
   *)
     echo "usage: bash token_transition_dynamics/run_remote.sh preflight|smoke|full" >&2

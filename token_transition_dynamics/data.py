@@ -159,9 +159,9 @@ class RawHiddenRepository:
             bad = {key: value for key, value in aligned.items() if value != n_records}
             if bad:
                 raise ValueError(f"{manifest}: arrays are not record aligned: {bad}, expected={n_records}")
-            if layers.size < 2 or np.any(np.diff(layers) != 1):
+            if layers.size == 0 or np.any(np.diff(layers) <= 0):
                 raise ValueError(
-                    f"{manifest}: token transition dynamics requires consecutive hidden layers; "
+                    f"{manifest}: hidden layers must be a non-empty strictly increasing list; "
                     f"found {layers.tolist()}"
                 )
 
